@@ -1,0 +1,22 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large dataset, checkpoints, logs and results
+src/data/archive (1)/
+checkpoints/
+logs/
+results/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,13 @@
+torch>=2.0.0
+torchvision>=0.15.0
+monai>=1.3.0
+gymnasium>=1.0.0
+stable-baselines3>=2.0.0
+numpy>=1.23.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+PyYAML>=6.0
+nibabel>=5.0.0        # NIfTI (.nii) 파일 입출력
+scikit-image>=0.21.0  # 슬라이스 리사이즈
+tensorboard>=2.14.0   # PPO 학습 로그 시각화
+tqdm>=4.66.0          # 진행 바

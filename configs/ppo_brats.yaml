@@ -1,0 +1,55 @@
+# PPO 에이전트 학습 설정
+# 사용 예시: python train_agent.py --config configs/ppo_brats.yaml
+
+# ──────────────────────────────────────────────
+# 데이터 설정
+# ──────────────────────────────────────────────
+# 실제 BraTS2020 데이터 사용 여부 (false이면 합성 데이터 사용)
+use_real_data: true
+
+# 실제 BraTS2020 데이터 경로
+train_root: "src/data/archive (1)/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData"
+val_root:   "src/data/archive (1)/BraTS2020_ValidationData/MICCAI_BraTS2020_ValidationData"
+
+# MRI 모달리티: t1ce (Gadolinium 조영 T1, 종양 대비 가장 선명)
+modality: "t1ce"
+
+# 2D 슬라이스 해상도
+image_size: 128
+
+# 환자 수 제한 (null이면 전체 사용, 빠른 테스트 시 숫자로 제한)
+max_train_patients: null
+max_val_patients: null
+
+# 합성 데이터 설정 (use_real_data: false 시 사용)
+num_samples: 300
+
+# ──────────────────────────────────────────────
+# RL 환경 설정
+# ──────────────────────────────────────────────
+max_steps: 20             # 에피소드당 최대 스텝 수
+target_dsc: 0.90          # 조기 종료 기준 DSC
+
+# ──────────────────────────────────────────────
+# PPO 하이퍼파라미터
+# ──────────────────────────────────────────────
+total_timesteps: 200000
+n_envs: 4
+n_steps: 512
+batch_size: 64
+n_epochs: 4
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.01
+learning_rate: 0.0003
+
+# 정책 네트워크
+net_arch: [256, 256]
+
+# ──────────────────────────────────────────────
+# 저장 경로
+# ──────────────────────────────────────────────
+save_path: "checkpoints/ppo_refiner"
+log_path: "logs/ppo"
+unet_checkpoint: "checkpoints/unet_best.pt"
