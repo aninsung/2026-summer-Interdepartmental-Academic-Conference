@@ -10,7 +10,7 @@
 ## 🏗️ Overall Architecture
 
 <p align="center">
-  <img src="images/architecture.png" width="1000"/>
+  <img src="KakaoTalk_20260707_161218634.png" width="1000"/>
 </p>
 
 <p align="center">
