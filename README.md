@@ -6,6 +6,21 @@
 
 ---
 
+## 🏗️ Overall Architecture
+
+<p align="center">
+  <img src="images/architecture.png" width="1000"/>
+</p>
+
+<p align="center">
+<b>Figure 1.</b> Overall architecture of RL-Refiner.
+A lightweight U-Net first predicts a coarse tumor segmentation mask.
+A PPO agent then iteratively refines the tumor boundary through three actions (Expand, Shrink, Keep) in a Gymnasium environment.
+The refined mask is finally evaluated using Dice, HD95, IoU, and ASSD metrics.
+</p>
+
+---
+
 ## 💡 프로젝트 배경 및 필요성
 
 의료 영상 분할에서 U-Net과 같은 딥러닝 모델은 종양의 대략적인 위치는 잘 파악하지만, 종양의 미세한 경계면에서 울퉁불퉁한 오차를 자주 발생시킵니다.
