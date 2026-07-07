@@ -67,4 +67,4 @@ cd RL-Refiner
 pip install -r requirements.txt
 
 # 에이전트 학습 실행 예시
-python train_agent.py --config configs/ppo_brats.yaml
+py train_agent.py --config configs/ppo_brats.yaml
