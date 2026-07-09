@@ -4,12 +4,13 @@
 # ──────────────────────────────────────────────
 # 데이터 설정
 # ──────────────────────────────────────────────
-# 실제 BraTS2020 데이터 사용 여부 (false이면 합성 데이터 사용)
+# 실제 BraTS 데이터 사용 여부
 use_real_data: true
 
-# 실제 BraTS2020 데이터 경로
-train_root: "src/data/archive (1)/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData"
-val_root:   "src/data/archive (1)/BraTS2020_ValidationData/MICCAI_BraTS2020_ValidationData"
+# BraTS2021 데이터 경로 (압축 해제된 폴더)
+# BraTS2021은 train/val 분리가 없으므로 동일 경로를 사용하고
+# train_agent.py 에서 80/20 분할합니다.
+train_root: "src/data/archive/BraTS2021_Training_Data"
 
 # MRI 모달리티: t1ce (Gadolinium 조영 T1, 종양 대비 가장 선명)
 modality: "t1ce"
@@ -18,22 +19,23 @@ modality: "t1ce"
 image_size: 128
 
 # 환자 수 제한 (null이면 전체 사용, 빠른 테스트 시 숫자로 제한)
-max_train_patients: null
-max_val_patients: null
+# BraTS2021 전체: 약 1251명 → null 이면 전체 사용
+# 테스트 시: 20~50 으로 설정
+max_train_patients: 100   # null → 100: 300K 스텝이 의미 있도록 데이터 수 제한
 
-# 합성 데이터 설정 (use_real_data: false 시 사용)
+# 합성 데이터 설정 (use_real_data: false 시 사용, 현재 미사용)
 num_samples: 300
 
 # ──────────────────────────────────────────────
 # RL 환경 설정
 # ──────────────────────────────────────────────
-max_steps: 20             # 에피소드당 최대 스텝 수
-target_dsc: 0.90          # 조기 종료 기준 DSC
+max_steps: 30             # 에피소드당 최대 스텝 수 (20 → 30: 더 많은 학습 기회)
+target_dsc: 0.95          # 조기 종료 기준 DSC (0.90 → 0.95: 에이전트가 더 열심히 보정하도록)
 
 # ──────────────────────────────────────────────
 # PPO 하이퍼파라미터
 # ──────────────────────────────────────────────
-total_timesteps: 200000
+total_timesteps: 500000   # 500K: 100명 데이터 기준 충분한 반복 학습
 n_envs: 4
 n_steps: 512
 batch_size: 64

@@ -101,11 +101,21 @@ RL-Refiner/
 ## 📦 Getting Started
 
 ```bash
-git clone https://github.com/your-username/RL-Refiner.git
+git clone https://github.com/aninsung/2026-summer-Interdepartmental-Academic-Conference.git
 
-cd RL-Refiner
+cd 2026-summer-Interdepartmental-Academic-Conference
 
 pip install -r requirements.txt
 
+# 전체 파이프라인 실행 예시 (U-Net 학습 -> Agent 학습 -> 평가)
+python run_pipeline.py
+
+# 특정 단계를 건너뛰고 싶을 때 (예: U-Net 학습 건너뛰기)
+python run_pipeline.py --skip_unet
+
+# 개별 단계 실행 (Agent 학습)
 python train_agent.py --config configs/ppo_brats.yaml
+
+# 평가
+python evaluate.py --agent_path checkpoints/best_model --unet_path checkpoints/unet_best.pt
 ```

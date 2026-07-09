@@ -154,16 +154,16 @@ def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc):
 def train_agent(
     # 데이터
     use_real_data:       bool  = True,
-    train_root:          str   = r"src\data\archive (1)\BraTS2020_TrainingData\MICCAI_BraTS2020_TrainingData",
+    train_root:          str   = r"src\data\archive\BraTS2021_Training_Data",
     modality:            str   = "t1ce",
     image_size:          int   = 128,
     max_train_patients:  Optional[int] = None,
     num_samples:         int   = 300,         # 합성 데이터용
     # RL 환경
-    max_steps:           int   = 20,
-    target_dsc:          float = 0.90,
+    max_steps:           int   = 30,          # 20 → 30
+    target_dsc:          float = 0.95,         # 0.90 → 0.95
     # PPO 하이퍼파라미터
-    total_timesteps:     int   = 200_000,
+    total_timesteps:     int   = 300_000,      # 200K → 300K (5-class 행동 공간 확장 대응)
     n_envs:              int   = 4,
     n_steps:             int   = 512,
     batch_size:          int   = 64,
@@ -182,6 +182,7 @@ def train_agent(
     from stable_baselines3.common.env_util import make_vec_env
     from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
     from stable_baselines3.common.vec_env import DummyVecEnv
+    from stable_baselines3.common.monitor import Monitor
 
     if net_arch is None:
         net_arch = [256, 256]
@@ -215,8 +216,21 @@ def train_agent(
     train_env_fn = make_env_fn(tr_img,  tr_gt,  tr_rough,  max_steps, target_dsc)
     val_env_fn   = make_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc)
 
-    train_env = make_vec_env(train_env_fn, n_envs=n_envs)
-    eval_env  = DummyVecEnv([val_env_fn])
+    # Monitor wrapper 적용 팬토리
+    def make_monitored_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc):
+        def _init():
+            env = MaskRefinementEnv(
+                images=images,
+                gt_masks=gt_masks,
+                rough_masks=rough_masks,
+                max_steps=max_steps,
+                target_dsc=target_dsc,
+            )
+            return Monitor(env)
+        return _init
+
+    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, max_steps, target_dsc), n_envs=n_envs)
+    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc)])
 
     # ── PPO 에이전트 ─────────────────────────────────────────
     # TensorBoard 설치 여부 확인
@@ -229,7 +243,7 @@ def train_agent(
         log.warning("TensorBoard 미설치 — 로그 비활성화 (pip install tensorboard 로 활성화 가능)")
 
     model = PPO(
-        policy="MlpPolicy",
+        policy="CnnPolicy",      # GPU CNN으로 이미지 (2,H,W) 처리
         env=train_env,
         n_steps=n_steps,
         batch_size=batch_size,
@@ -239,9 +253,14 @@ def train_agent(
         clip_range=clip_range,
         ent_coef=ent_coef,
         learning_rate=learning_rate,
-        verbose=0,                          # 기본 SB3 테이블 출력 비활성화
+        verbose=0,
+        device="cuda",           # GPU 명시
         tensorboard_log=tb_log,
-        policy_kwargs=dict(net_arch=net_arch),
+        policy_kwargs=dict(
+            net_arch=net_arch,
+            # 관측값이 float32 [0,1] 이므로 SB3 내부 정규화 비활성화
+            normalize_images=False,
+        ),
     )
 
     # ── 콜백 ────────────────────────────────────────────────
@@ -315,16 +334,16 @@ def main():
     # 데이터
     parser.add_argument("--use_real_data",  action="store_true", default=True)
     parser.add_argument("--train_root",     type=str,
-                        default=r"src\data\archive (1)\BraTS2020_TrainingData\MICCAI_BraTS2020_TrainingData")
+                        default=r"src\data\archive\BraTS2021_Training_Data")
     parser.add_argument("--modality",       type=str, default="t1ce")
     parser.add_argument("--image_size",     type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None)
     parser.add_argument("--num_samples",    type=int, default=300)
     # RL 환경
-    parser.add_argument("--max_steps",      type=int,   default=20)
-    parser.add_argument("--target_dsc",     type=float, default=0.90)
+    parser.add_argument("--max_steps",      type=int,   default=30)
+    parser.add_argument("--target_dsc",     type=float, default=0.95)
     # PPO
-    parser.add_argument("--total_timesteps",type=int,   default=200_000)
+    parser.add_argument("--total_timesteps",type=int,   default=300_000)
     parser.add_argument("--n_envs",         type=int,   default=4)
     parser.add_argument("--n_steps",        type=int,   default=512)
     parser.add_argument("--batch_size",     type=int,   default=64)
