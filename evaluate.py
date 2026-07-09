@@ -51,9 +51,25 @@ def hausdorff_95(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
 
 # ── 전통 방법 벤치마크 ─────────────────────────────────────────────────────────
 
-def morphological_refine(mask: np.ndarray, n_iter: int = 2) -> np.ndarray:
-    """Opening + Closing으로 경계를 부드럽게 만드는 전통적 보정."""
+def morphological_refine(mask: np.ndarray, n_iter: int = None) -> np.ndarray:
+    """
+    Opening + Closing 으로 경계를 부드럽게 만드는 전통적 보정.
+    종양 크기에 따라 n_iter를 자동 결정하는 적응형 방식 적용.
+      - 소형 (어직 수 < 200): n_iter=1 (과도한 erosion 로 정보 소실 방지)
+      - 중형 (200 ≤ 어직 수 < 1000): n_iter=2
+      - 대형 (어직 수 ≥ 1000): n_iter=3
+    """
     struct = np.ones((3, 3), dtype=bool)
+    pixel_count = int(mask.sum())
+
+    if n_iter is None:
+        if pixel_count < 200:
+            n_iter = 1
+        elif pixel_count < 1000:
+            n_iter = 2
+        else:
+            n_iter = 3
+
     m = binary_erosion(mask.astype(bool), structure=struct, iterations=n_iter)
     m = binary_dilation(m, structure=struct, iterations=n_iter)
     m = binary_dilation(m, structure=struct, iterations=n_iter)
@@ -92,7 +108,7 @@ def evaluate(
     agent_path: Optional[str] = None,
     unet_path: Optional[str] = None,
     num_eval: int = 50,
-    max_steps: int = 20,
+    max_steps: int = 30,    # 20 → 30
     output_dir: str = "results",
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
@@ -100,18 +116,18 @@ def evaluate(
 
     try:
         dataset = BraTS2020Dataset(
-            root_dir=r"src/data/archive (1)/BraTS2020_ValidationData/MICCAI_BraTS2020_ValidationData",
+            root_dir=r"src/data/archive/BraTS2021_Training_Data",
             modality="t1ce",
             target_size=128,
             max_patients=num_eval,
             simulate_rough=True,
         )
         if len(dataset) == 0:
-            raise ValueError("Validation dataset is empty.")
+            raise ValueError("Dataset is empty.")
     except Exception as e:
-        log.warning(f"검증 데이터 폴더 로드 실패 ({e}). 학습 데이터 폴더에서 평가용 데이터를 로드합니다.")
+        log.warning(f"데이터 로드 실패 ({e}). 학습 데이터 폴더에서 평가용 데이터를 로드합니다.")
         dataset = BraTS2020Dataset(
-            root_dir=r"src/data/archive (1)/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData",
+            root_dir=r"src/data/archive/BraTS2021_Training_Data",
             modality="t1ce",
             target_size=128,
             max_patients=num_eval,
@@ -267,7 +283,7 @@ if __name__ == "__main__":
     parser.add_argument("--agent_path", type=str, default="checkpoints/ppo_refiner")
     parser.add_argument("--unet_path", type=str, default="checkpoints/unet_best.pt")
     parser.add_argument("--num_eval", type=int, default=50)
-    parser.add_argument("--max_steps", type=int, default=20)
+    parser.add_argument("--max_steps", type=int, default=30)
     parser.add_argument("--output_dir", type=str, default="results")
     args = parser.parse_args()
     evaluate(**vars(args))

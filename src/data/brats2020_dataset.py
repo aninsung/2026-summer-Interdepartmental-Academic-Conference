@@ -1,15 +1,21 @@
 """
-실제 BraTS2020 데이터셋 로더 (NIfTI .nii 기반)
------------------------------------------------
+BraTS 데이터셋 로더 (BraTS2020 / BraTS2021 공용, NIfTI .nii / .nii.gz 지원)
+--------------------------------------------------------------------------
+BraTS2021 폴더 구조:
+  <root>/
+    BraTS2021_00000/
+      BraTS2021_00000_flair.nii.gz
+      BraTS2021_00000_t1.nii.gz
+      BraTS2021_00000_t1ce.nii.gz
+      BraTS2021_00000_t2.nii.gz
+      BraTS2021_00000_seg.nii.gz   ← GT 레이블
+    BraTS2021_00002/ ...
+
 BraTS2020 폴더 구조:
   <root>/
     BraTS20_Training_001/
       BraTS20_Training_001_flair.nii
-      BraTS20_Training_001_t1.nii
-      BraTS20_Training_001_t1ce.nii
-      BraTS20_Training_001_t2.nii
-      BraTS20_Training_001_seg.nii   ← GT 레이블
-    BraTS20_Training_002/ ...
+      ...
 
 GT 레이블(seg) 값:
   0 = 배경
@@ -19,9 +25,9 @@ GT 레이블(seg) 값:
   → 이진화: 0 이외 = 종양 (Whole Tumor)
 
 출력 슬라이스:
-  - image   : (1, H, W)  — t1ce 단일 채널 (가장 종양 대비 선명)
-  - gt_mask : (1, H, W)  — 이진 Whole Tumor 마스크
-  - rough_mask : (1, H, W) — make_noisy_mask()로 시뮬레이션한 U-Net 초기 예측
+  - image      : (1, H, W)  — 단일 채널 MRI 이미지
+  - gt_mask    : (1, H, W)  — 이진 Whole Tumor 마스크
+  - rough_mask : (1, H, W)  — make_noisy_mask()로 시뮬레이션한 U-Net 초기 예측
 """
 
 import os
@@ -55,16 +61,44 @@ def _normalize_volume(vol: np.ndarray) -> np.ndarray:
 
 
 def _load_volume(path: str) -> np.ndarray:
-    """NIfTI 파일을 (H, W, D) float32 배열로 반환."""
+    """NIfTI 파일(.nii / .nii.gz)을 (H, W, D) float32 배열로 반환."""
     img = nib.load(path)
     return np.asarray(img.dataobj, dtype=np.float32)
 
 
 def _find_patient_dirs(root: str) -> List[Path]:
-    """루트 디렉토리 아래 BraTS20_* 폴더 목록을 정렬하여 반환."""
+    """
+    루트 디렉토리 아래 BraTS20* 또는 BraTS2021* 폴더 목록을 정렬하여 반환.
+    BraTS2020: BraTS20_Training_XXX
+    BraTS2021: BraTS2021_XXXXX
+    """
     root_path = Path(root)
-    dirs = sorted([p for p in root_path.iterdir() if p.is_dir() and "BraTS20" in p.name])
+    dirs = sorted([
+        p for p in root_path.iterdir()
+        if p.is_dir() and ("BraTS20" in p.name or "BraTS2021" in p.name)
+    ])
     return dirs
+
+
+def _find_modality_file(pdir: Path, pid: str, modality: str) -> Optional[Path]:
+    """
+    환자 폴더에서 지정 모달리티 파일을 찾아 반환.
+    .nii.gz → .nii 순서로 탐색.
+    """
+    for ext in [".nii.gz", ".nii"]:
+        candidate = pdir / f"{pid}_{modality}{ext}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _find_seg_file(pdir: Path, pid: str) -> Optional[Path]:
+    """환자 폴더에서 seg 파일을 찾아 반환."""
+    for ext in [".nii.gz", ".nii"]:
+        candidate = pdir / f"{pid}_seg{ext}"
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _select_slices(
@@ -112,7 +146,6 @@ def make_noisy_mask(
             mask = binary_dilation(mask, structure=struct)
 
     # 경계에 픽셀 단위 소금-후추 노이즈
-    boundary = np.zeros_like(gt_mask, dtype=bool)
     dilated = np.array(binary_dilation(mask, np.ones((3, 3))))
     eroded = np.array(binary_erosion(mask, np.ones((3, 3))))
     boundary = dilated ^ eroded
@@ -130,13 +163,14 @@ def make_noisy_mask(
 
 class BraTS2020Dataset(Dataset):
     """
-    실제 BraTS2020 2D 슬라이스 데이터셋.
+    BraTS2020 / BraTS2021 2D 슬라이스 데이터셋.
+    .nii 와 .nii.gz 형식을 모두 자동 감지합니다.
 
     Parameters
     ----------
     root_dir : str
-        BraTS20_Training_* 폴더들이 있는 최상위 경로.
-        예) "src/data/archive (1)/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData"
+        BraTS20_Training_* 또는 BraTS2021_* 폴더들이 있는 최상위 경로.
+        예) "src/data/archive/BraTS2021_Training_Data"
     modality : str
         사용할 MRI 모달리티 ('t1ce', 't1', 't2', 'flair'). 기본 t1ce.
     target_size : int
@@ -162,9 +196,9 @@ class BraTS2020Dataset(Dataset):
         noise_seed: int = 42,
         simulate_rough: bool = True,
     ):
-        self.root_dir      = root_dir
-        self.modality      = modality
-        self.target_size   = target_size
+        self.root_dir        = root_dir
+        self.modality        = modality
+        self.target_size     = target_size
         self.min_tumor_ratio = min_tumor_ratio
         self.simulate_rough  = simulate_rough
         self.rng = np.random.default_rng(noise_seed)
@@ -175,63 +209,80 @@ class BraTS2020Dataset(Dataset):
     # ── 내부 빌더 ──────────────────────────────────────────
     def _build(self, max_patients: Optional[int]) -> None:
         patient_dirs = _find_patient_dirs(self.root_dir)
+        if not patient_dirs:
+            print(f"[BraTS2020Dataset] 경고: '{self.root_dir}' 에서 환자 폴더를 찾을 수 없습니다.")
+            return
+
         if max_patients is not None:
             patient_dirs = patient_dirs[:max_patients]
 
         try:
             from tqdm import tqdm
-            _iter = tqdm(patient_dirs, desc="[BraTS2020] Loading patients", unit="pt", ncols=80, ascii=True)
+            _iter = tqdm(patient_dirs, desc="[BraTS] Loading patients", unit="pt", ncols=80, ascii=True)
         except ImportError:
             _iter = patient_dirs
-            print(f"[BraTS2020Dataset] {len(patient_dirs)}명 환자 로딩 중...")
+            print(f"[BraTS Dataset] {len(patient_dirs)}명 환자 로딩 중...")
 
         import sys
         sys.stdout.reconfigure(errors='replace') if hasattr(sys.stdout, 'reconfigure') else None
         total_slices = 0
+        skipped = 0
 
         for pdir in _iter:
             pid = pdir.name
-            mod_path = pdir / f"{pid}_{self.modality}.nii"
-            seg_path = pdir / f"{pid}_seg.nii"
 
-            if not mod_path.exists() or not seg_path.exists():
+            mod_path = _find_modality_file(pdir, pid, self.modality)
+            seg_path = _find_seg_file(pdir, pid)
+
+            if mod_path is None or seg_path is None:
+                skipped += 1
                 if hasattr(_iter, 'write'):
-                    _iter.write(f"  [SKIP] 파일 없음: {pdir.name}")
+                    _iter.write(f"  [SKIP] 파일 없음: {pid}")
                 else:
-                    print(f"  [SKIP] 파일 없음: {pdir.name}")
+                    print(f"  [SKIP] 파일 없음: {pid}")
                 continue
 
-            # 볼륨 로드
-            mod_vol = _normalize_volume(_load_volume(str(mod_path)))  # (H,W,D)
-            seg_vol = _load_volume(str(seg_path))                     # (H,W,D) 레이블
+            try:
+                # 볼륨 로드
+                mod_vol = _normalize_volume(_load_volume(str(mod_path)))  # (H,W,D)
+                seg_vol = _load_volume(str(seg_path))                     # (H,W,D) 레이블
 
-            # 유효 슬라이스 선택
-            valid_zs = _select_slices(seg_vol, self.min_tumor_ratio)
-            for z in valid_zs:
-                img_sl  = mod_vol[:, :, z]                           # (H,W)
-                gt_sl   = (seg_vol[:, :, z] > 0).astype(np.float32)  # 이진화
+                # 유효 슬라이스 선택
+                valid_zs = _select_slices(seg_vol, self.min_tumor_ratio)
+                for z in valid_zs:
+                    img_sl = mod_vol[:, :, z]                            # (H,W)
+                    gt_sl  = (seg_vol[:, :, z] > 0).astype(np.float32)  # 이진화
 
-                # 리사이즈
-                if self.target_size > 0:
-                    img_sl = self._resize(img_sl)
-                    gt_sl  = self._resize(gt_sl, is_mask=True)
+                    # 리사이즈
+                    if self.target_size > 0:
+                        img_sl = self._resize(img_sl)
+                        gt_sl  = self._resize(gt_sl, is_mask=True)
 
-                # rough_mask 생성
-                if self.simulate_rough:
-                    rough_sl = make_noisy_mask(gt_sl, self.rng)
+                    # rough_mask 생성
+                    if self.simulate_rough:
+                        rough_sl = make_noisy_mask(gt_sl, self.rng)
+                    else:
+                        rough_sl = gt_sl.copy()
+
+                    self._samples.append((img_sl, gt_sl, rough_sl))
+
+                total_slices += len(valid_zs)
+                if hasattr(_iter, 'set_postfix'):
+                    _iter.set_postfix({"slices": total_slices, "this_pt": len(valid_zs)})
+
+            except Exception as e:
+                skipped += 1
+                msg = f"  [ERROR] {pid}: {e}"
+                if hasattr(_iter, 'write'):
+                    _iter.write(msg)
                 else:
-                    rough_sl = gt_sl.copy()
+                    print(msg)
+                continue
 
-                self._samples.append((img_sl, gt_sl, rough_sl))
-
-            total_slices += len(valid_zs)
-            if hasattr(_iter, 'set_postfix'):
-                _iter.set_postfix({"slices": total_slices, "this_pt": len(valid_zs)})
-
-        print(f"[BraTS2020Dataset] 완료: 총 {total_slices}개 유효 슬라이스 로드.")
+        print(f"[BraTS Dataset] 완료: 총 {total_slices}개 유효 슬라이스 로드. (건너뜀: {skipped}명)")
 
     def _resize(self, arr: np.ndarray, is_mask: bool = False) -> np.ndarray:
-        """간단한 바이선형/최근접 이웃 리사이즈 (PIL 없이 skimage)."""
+        """간단한 바이선형/최근접 이웃 리사이즈 (skimage)."""
         from skimage.transform import resize as sk_resize
         order = 0 if is_mask else 1  # 마스크는 최근접, 이미지는 바이선형
         resized = sk_resize(
@@ -268,29 +319,26 @@ class BraTS2020Dataset(Dataset):
 
 
 # ──────────────────────────────────────────────
-# BraTS2020 경로 헬퍼
+# BraTS 경로 헬퍼
 # ──────────────────────────────────────────────
 
-# 기본 데이터 경로 (configs/ppo_brats.yaml 또는 직접 오버라이드)
-_DATA_DIR = Path(__file__).parent / "archive (1)"
-DEFAULT_TRAIN_ROOT = str(
-    _DATA_DIR / "BraTS2020_TrainingData" / "MICCAI_BraTS2020_TrainingData"
-)
-DEFAULT_VAL_ROOT = str(
-    _DATA_DIR / "BraTS2020_ValidationData" / "MICCAI_BraTS2020_ValidationData"
-)
+# BraTS2021 기본 데이터 경로
+_DATA_DIR = Path(__file__).parent / "archive" / "BraTS2021_Training_Data"
+DEFAULT_TRAIN_ROOT = str(_DATA_DIR)
+DEFAULT_VAL_ROOT   = str(_DATA_DIR)  # BraTS2021은 train/val 분리가 없으므로 동일 경로 사용
 
 
 def build_brats_datasets(
     train_root: str = DEFAULT_TRAIN_ROOT,
-    val_root: str   = DEFAULT_VAL_ROOT,
-    modality: str   = "t1ce",
+    val_root:   str = DEFAULT_VAL_ROOT,
+    modality:   str = "t1ce",
     target_size: int = 128,
     max_train_patients: Optional[int] = None,
     max_val_patients:   Optional[int] = None,
 ) -> Tuple["BraTS2020Dataset", "BraTS2020Dataset"]:
     """
-    학습/검증용 BraTS2020 데이터셋을 한 번에 생성합니다.
+    학습/검증용 BraTS 데이터셋을 한 번에 생성합니다.
+    BraTS2021은 별도 val 폴더가 없으므로 train 데이터를 분할하여 사용합니다.
 
     Usage
     -----
