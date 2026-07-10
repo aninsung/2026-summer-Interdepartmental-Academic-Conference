@@ -69,10 +69,10 @@ The refined mask is finally evaluated using Dice, HD95, IoU, and ASSD metrics.
 
 ## 🚀 Expected Contributions
 
-- Pixel-level boundary refinement using reinforcement learning.
-- Automatic correction of segmentation artifacts.
-- Reduced manual annotation effort in clinical workflows.
-- Improved segmentation quality for radiotherapy planning.
+- 강화학습을 활용한 픽셀 단위 종양 경계 보정
+- 분할 과정에서 발생하는 아티팩트(Artifact)의 자동 보정
+- 임상 환경에서 수작업 영상 라벨링 부담 감소
+- 방사선 치료 계획을 위한 종양 분할 품질 향상
 
 ---
 
@@ -101,17 +101,10 @@ RL-Refiner/
 ## 📦 Getting Started
 
 ```bash
-git clone https://github.com/aninsung/2026-summer-Interdepartmental-Academic-Conference.git
-
-cd 2026-summer-Interdepartmental-Academic-Conference
 
 pip install -r requirements.txt
 
-# 전체 파이프라인 실행 예시 (U-Net 학습 -> Agent 학습 -> 평가)
-python run_pipeline.py
 
-# 특정 단계를 건너뛰고 싶을 때 (예: U-Net 학습 건너뛰기)
-python run_pipeline.py --skip_unet
 
 # 개별 단계 실행 (Agent 학습)
 python train_agent.py --config configs/ppo_brats.yaml
