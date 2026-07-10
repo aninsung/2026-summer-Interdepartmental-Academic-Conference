@@ -45,14 +45,14 @@ The refined mask is finally evaluated using Dice, HD95, IoU, and ASSD metrics.
 
 ---
 
-## ⚙️ Pipeline
+## ⚙️ pipeline
 
-| Step | Description |
-|------|-------------|
-| **1** | Train a lightweight 2D U-Net on the BraTS dataset to generate an initial segmentation mask. |
-| **2** | Build a custom Gymnasium environment where the state consists of MRI images and masks, and the actions are Expand, Shrink, or Keep. |
-| **3** | Train a PPO agent using Stable-Baselines3 with reward functions based on Dice score, HD95, boundary smoothness, and penalties. |
-| **4** | Compare the refined masks with Ground Truth and evaluate against traditional post-processing methods. |
+| 단계 | 설명 |
+|------|------|
+| **1** | BraTS 데이터셋을 이용하여 경량화된 **2D U-Net**을 학습하고, 초기 뇌종양 분할 마스크(Rough Mask)를 생성한다. |
+| **2** | MRI 영상과 초기 분할 마스크를 상태(State)로 사용하는 **Gymnasium 기반 커스텀 강화학습 환경**을 구축하고, 행동(Action)은 **수축(Shrink), 유지(Keep), 팽창(Expand)** 으로 정의한다. |
+| **3** | **Stable-Baselines3**의 **PPO(Proximal Policy Optimization)** 알고리즘을 이용하여 에이전트를 학습하며, **Dice Score, HD95, 경계 부드러움(Boundary Smoothness), 패널티** 등을 활용한 보상 함수를 적용한다. |
+| **4** | 강화학습으로 보정된 분할 마스크를 **Ground Truth**와 비교하여 성능을 평가하고, **Morphological Refinement** 등 기존 후처리 기법과 성능을 비교·분석한다. |
 
 ---
 
