@@ -1,0 +1,156 @@
+2026-07-13 21:24:29,388 [INFO] 설정 파일 로드: configs/ppo_brats.yaml
+2026-07-13 21:24:29,388 [INFO] 최종 파라미터:
+2026-07-13 21:24:29,388 [INFO]   use_real_data: True
+2026-07-13 21:24:29,388 [INFO]   train_root: src/data/archive
+2026-07-13 21:24:29,388 [INFO]   modality: t1ce
+2026-07-13 21:24:29,388 [INFO]   image_size: 128
+2026-07-13 21:24:29,388 [INFO]   max_train_patients: 150
+2026-07-13 21:24:29,388 [INFO]   num_samples: 300
+2026-07-13 21:24:29,388 [INFO]   max_steps: 20
+2026-07-13 21:24:29,388 [INFO]   target_dsc: 0.9
+2026-07-13 21:24:29,388 [INFO]   total_timesteps: 200000
+2026-07-13 21:24:29,388 [INFO]   n_envs: 4
+2026-07-13 21:24:29,388 [INFO]   n_steps: 512
+2026-07-13 21:24:29,388 [INFO]   batch_size: 64
+2026-07-13 21:24:29,388 [INFO]   n_epochs: 4
+2026-07-13 21:24:29,388 [INFO]   gamma: 0.99
+2026-07-13 21:24:29,388 [INFO]   gae_lambda: 0.95
+2026-07-13 21:24:29,388 [INFO]   clip_range: 0.2
+2026-07-13 21:24:29,388 [INFO]   ent_coef: 0.01
+2026-07-13 21:24:29,388 [INFO]   learning_rate: 0.0003
+2026-07-13 21:24:29,388 [INFO]   net_arch: [256, 256]
+2026-07-13 21:24:29,388 [INFO]   save_path: checkpoints/ppo_refiner
+2026-07-13 21:24:29,388 [INFO]   log_path: logs/ppo
+2026-07-13 21:24:29,404 [INFO] 실제 BraTS2020 데이터 로드 중: src/data/archive
+[BraTS2020] Loading patients: 100%|#| 150/150 [00:32<00:00,  4.58pt/s, slices=89
+2026-07-13 21:25:02,701 [INFO] RL 환경 데이터: 8974개 슬라이스 | 이미지 크기: 128x128
+2026-07-13 21:25:02,702 [INFO] TensorBoard 로그 활성화: logs/ppo
+/home/ai-5070/projects/brats-rl-refiner/.venv/lib/python3.12/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+warnings.warn(
+2026-07-13 21:25:03,717 [INFO] PPO 학습 시작: total_timesteps=200,000  n_envs=4
+2026-07-13 21:25:03,717 [INFO]   >> Ctrl+C 로 언제든 중단 가능 (현재까지 학습된 모델 자동 저장)
+/home/ai-5070/projects/brats-rl-refiner/.venv/lib/python3.12/site-packages/stable_baselines3/common/evaluation.py:71: UserWarning: Evaluation environment is not wrapped with a ``Monitor`` wrapper. This may result in reporting modified episode lengths and rewards, if other wrappers happen to modify these. Consider wrapping environment first with ``Monitor`` wrapper.
+warnings.warn(
+/home/ai-5070/projects/brats-rl-refiner/.venv/lib/python3.12/site-packages/stable_baselines3/common/evaluation.py:71: UserWarning: Evaluation environment is not wrapped with a ``Monitor`` wrapper. This may result in reporting modified episode lengths and rewards, if other wrappers happen to modify these. Consider wrapping environment first with ``Monitor`` wrapper.
+warnings.warn(
+2026-07-13 21:27:43,672 [INFO] 모델 저장 완료: checkpoints/ppo_refiner
+[BraTS2020Dataset] 완료: 총 8974개 유효 슬라이스 로드.
+======================================================================
+PPO 학습 시작  |  총 스텐: 200,000
+======================================================================
+Step  Progress    MeanReward    EpLen     FPS       ETA
+----------------------------------------------------------------------
+2,048/200,000      1.0%           nan      nan    2667     1m14s
+4,096/200,000      2.0%           nan      nan    2064     1m34s
+6,144/200,000      3.1%           nan      nan    1963     1m38s
+8,192/200,000      4.1%        3.6820     20.0    1917     1m40s
+10,240/200,000      5.1%        2.2422     20.0    1889     1m40s
+12,288/200,000      6.1%           nan      nan    1873     1m40s
+14,336/200,000      7.2%           nan      nan    1862     1m39s
+16,384/200,000      8.2%        2.6580     20.0    1856     1m38s
+18,432/200,000      9.2%        1.2460     20.0    1851     1m38s
+20,480/200,000     10.2%           nan      nan    1847     1m37s
+22,528/200,000     11.3%           nan      nan    1843     1m36s
+24,576/200,000     12.3%           nan      nan    1840     1m35s
+26,624/200,000     13.3%           nan      nan    1837     1m34s
+28,672/200,000     14.3%        4.8381     20.0    1834     1m33s
+30,720/200,000     15.4%           nan      nan    1833     1m32s
+32,768/200,000     16.4%        1.5994     20.0    1832     1m31s
+34,816/200,000     17.4%           nan      nan    1827     1m30s
+36,864/200,000     18.4%           nan      nan    1826     1m29s
+38,912/200,000     19.5%           nan      nan    1824     1m28s
+Eval num_timesteps=40000, episode_reward=0.10 +/- 1.20
+Episode length: 18.30 +/- 5.10
+New best mean reward!
+40,960/200,000     20.5%           nan      nan    1809     1m27s
+43,008/200,000     21.5%           nan      nan    1808     1m26s
+45,056/200,000     22.5%           nan      nan    1806     1m25s
+47,104/200,000     23.6%           nan      nan    1804     1m24s
+49,152/200,000     24.6%           nan      nan    1802     1m23s
+51,200/200,000     25.6%           nan      nan    1801     1m22s
+53,248/200,000     26.6%           nan      nan    1800     1m21s
+55,296/200,000     27.6%           nan      nan    1799     1m20s
+57,344/200,000     28.7%       -0.2448     20.0    1798     1m19s
+59,392/200,000     29.7%           nan      nan    1797     1m18s
+61,440/200,000     30.7%           nan      nan    1796     1m17s
+63,488/200,000     31.7%           nan      nan    1794     1m16s
+65,536/200,000     32.8%        2.1985     20.0    1793     1m14s
+67,584/200,000     33.8%        3.5162     17.0    1792     1m13s
+69,632/200,000     34.8%        2.9255     20.0    1791     1m12s
+71,680/200,000     35.8%        1.1436     20.0    1789     1m11s
+73,728/200,000     36.9%        0.0000     20.0    1789     1m10s
+75,776/200,000     37.9%        0.0000     20.0    1788     1m09s
+77,824/200,000     38.9%           nan      nan    1787     1m08s
+79,872/200,000     39.9%           nan      nan    1786     1m07s
+Eval num_timesteps=80000, episode_reward=0.56 +/- 1.84
+Episode length: 18.10 +/- 5.70
+New best mean reward!
+81,920/200,000     41.0%           nan      nan    1327     1m28s
+83,968/200,000     42.0%           nan      nan    1335     1m26s
+86,016/200,000     43.0%           nan      nan    1342     1m24s
+88,064/200,000     44.0%           nan      nan    1350     1m22s
+90,112/200,000     45.1%           nan      nan    1357     1m20s
+92,160/200,000     46.1%           nan      nan    1364     1m19s
+94,208/200,000     47.1%           nan      nan    1370     1m17s
+96,256/200,000     48.1%           nan      nan    1376     1m15s
+98,304/200,000     49.2%        3.0087     20.0    1382     1m13s
+100,352/200,000     50.2%        0.0000     20.0    1388     1m11s
+102,400/200,000     51.2%           nan      nan    1394     1m09s
+104,448/200,000     52.2%        4.8581     12.0    1400     1m08s
+106,496/200,000     53.2%           nan      nan    1406     1m06s
+108,544/200,000     54.3%           nan      nan    1411     1m04s
+110,592/200,000     55.3%           nan      nan    1417     1m03s
+112,640/200,000     56.3%           nan      nan    1422     1m01s
+114,688/200,000     57.3%           nan      nan    1427       59s
+116,736/200,000     58.4%        0.0000     20.0    1432       58s
+118,784/200,000     59.4%           nan      nan    1437       56s
+Eval num_timesteps=120000, episode_reward=1.75 +/- 2.99
+Episode length: 16.90 +/- 4.74
+New best mean reward!
+120,832/200,000     60.4%           nan      nan    1127     1m10s
+122,880/200,000     61.4%           nan      nan    1134     1m08s
+124,928/200,000     62.5%           nan      nan    1140     1m05s
+126,976/200,000     63.5%           nan      nan    1147     1m03s
+129,024/200,000     64.5%           nan      nan    1153     1m01s
+131,072/200,000     65.5%        1.2851      1.0    1159       59s
+133,120/200,000     66.6%           nan      nan    1165       57s
+135,168/200,000     67.6%           nan      nan    1118       57s
+137,216/200,000     68.6%           nan      nan    1124       55s
+139,264/200,000     69.6%           nan      nan    1130       53s
+141,312/200,000     70.7%           nan      nan    1136       51s
+143,360/200,000     71.7%           nan      nan    1141       49s
+145,408/200,000     72.7%           nan      nan    1147       47s
+147,456/200,000     73.7%           nan      nan    1145       45s
+149,504/200,000     74.8%           nan      nan    1151       43s
+151,552/200,000     75.8%           nan      nan    1156       41s
+153,600/200,000     76.8%           nan      nan    1161       39s
+155,648/200,000     77.8%       -4.4975     20.0    1166       38s
+157,696/200,000     78.8%           nan      nan    1171       36s
+159,744/200,000     79.9%        0.0000     20.0    1176       34s
+Eval num_timesteps=160000, episode_reward=0.90 +/- 1.95
+Episode length: 14.70 +/- 8.16
+161,792/200,000     80.9%           nan      nan    1180       32s
+163,840/200,000     81.9%           nan      nan    1185       30s
+165,888/200,000     82.9%           nan      nan    1189       28s
+167,936/200,000     84.0%        4.2755     20.0    1194       26s
+169,984/200,000     85.0%           nan      nan    1199       25s
+172,032/200,000     86.0%           nan      nan    1203       23s
+174,080/200,000     87.0%        2.6761     20.0    1208       21s
+176,128/200,000     88.1%           nan      nan    1212       19s
+178,176/200,000     89.1%           nan      nan    1216       17s
+180,224/200,000     90.1%           nan      nan    1221       16s
+182,272/200,000     91.1%        1.7125     20.0    1225       14s
+184,320/200,000     92.2%           nan      nan    1229       12s
+186,368/200,000     93.2%           nan      nan    1233       11s
+188,416/200,000     94.2%           nan      nan    1237        9s
+190,464/200,000     95.2%        2.3476     20.0    1241        7s
+192,512/200,000     96.3%        3.1371      6.0    1245        6s
+194,560/200,000     97.3%        0.0000     20.0    1249        4s
+196,608/200,000     98.3%        2.1382      4.0    1252        2s
+198,656/200,000     99.3%           nan      nan    1256        1s
+Eval num_timesteps=200000, episode_reward=1.24 +/- 2.14
+Episode length: 14.70 +/- 8.12
+200,704/200,000    100.4%           nan      nan    1259        0s
+----------------------------------------------------------------------
+학습 완료!  소요 시간: 2m39s  |  총 스텐: 200,704
+======================================================================

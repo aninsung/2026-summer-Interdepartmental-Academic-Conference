@@ -1,0 +1,21 @@
+[BraTS2020] Loading patients: 100%|#| 50/50 [00:09<00:00,  5.43pt/s, slices=2902
+2026-07-13 22:08:52,947 [INFO] attention_unet 모델 로드: checkpoints/attention_unet_best.pt
+/home/ai-5070/projects/brats-rl-refiner/.venv/lib/python3.12/site-packages/stable_baselines3/common/on_policy_algorithm.py:150: UserWarning: You are trying to run PPO on the GPU, but it is primarily intended to run on the CPU when not using a CNN policy (you are using ActorCriticPolicy which should be a MlpPolicy). See https://github.com/DLR-RM/stable-baselines3/issues/1245 for more info. You can pass `device='cpu'` or `export CUDA_VISIBLE_DEVICES=` to force using the CPU.Note: The model will train, but the GPU utilization will be poor and the training might take longer than on CPU.
+warnings.warn(
+2026-07-13 22:08:53,391 [INFO] PPO 에이전트 로드: checkpoints/ppo_refiner
+2026-07-13 22:08:54,186 [INFO]   [1/50] rough DSC=0.039 | morpho DSC=0.040 | RL DSC=0.000
+2026-07-13 22:08:54,269 [INFO]   [11/50] rough DSC=0.307 | morpho DSC=0.311 | RL DSC=0.726
+2026-07-13 22:08:54,352 [INFO]   [21/50] rough DSC=0.412 | morpho DSC=0.415 | RL DSC=0.752
+2026-07-13 22:08:54,435 [INFO]   [31/50] rough DSC=0.395 | morpho DSC=0.403 | RL DSC=0.728
+2026-07-13 22:08:54,518 [INFO]   [41/50] rough DSC=0.082 | morpho DSC=0.085 | RL DSC=0.103
+2026-07-13 22:08:54,976 [INFO] 샘플 시각화 저장: results/sample_comparison.png
+2026-07-13 22:08:55,029 [INFO] DSC 박스플롯 저장: results/dsc_boxplot.png
+2026-07-13 22:08:55,030 [INFO] 결과 저장 완료: results/
+[BraTS2020Dataset] 완료: 총 2902개 유효 슬라이스 로드.
+============================================================
+Method           DSC (mean+/-std)      HD95 (mean+/-std)
+------------------------------------------------------------
+rough          0.2609 +/- 0.1342       22.50 +/- 9.44
+morpho         0.2646 +/- 0.1351       22.04 +/- 9.27
+rl             0.5412 +/- 0.2471        9.44 +/- 7.23
+============================================================
