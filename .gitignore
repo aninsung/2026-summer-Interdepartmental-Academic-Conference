@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 # Large dataset, checkpoints, logs and results
+src/data/archive/
 src/data/archive (1)/
 checkpoints/
 logs/

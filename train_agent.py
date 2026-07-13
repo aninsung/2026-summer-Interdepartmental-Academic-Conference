@@ -115,26 +115,83 @@ def load_real_data(
     target_size: int,
     max_patients: Optional[int],
     noise_seed: int = 42,
+    unet_path: Optional[str] = None,
+    model_type: str = "unet",
 ):
     """실제 BraTS2020 데이터를 NumPy 배열로 반환."""
     from src.data.brats2020_dataset import BraTS2020Dataset
+    import torch
+    
     log.info(f"실제 BraTS2020 데이터 로드 중: {train_root}")
     ds = BraTS2020Dataset(
         root_dir=train_root,
         modality=modality,
         target_size=target_size,
         max_patients=max_patients,
-        simulate_rough=True,
+        simulate_rough=False,  # 실제/합성 믹스업을 위해 일단 False로 로드
         noise_seed=noise_seed,
     )
-    return ds.get_numpy_arrays()   # (N,H,W), (N,H,W), (N,H,W)
+    imgs, gts, _ = ds.get_numpy_arrays()
+
+    rng = np.random.default_rng(noise_seed)
+
+    # 1. 합성 노이즈 마스크 생성
+    from src.data.brats2020_dataset import make_noisy_mask
+    log.info("학습 데이터에 대한 합성 노이즈 마스크 생성 중...")
+    synthetic_roughs = np.stack([make_noisy_mask(gt, rng) for gt in gts], axis=0)
+
+    # 2. 실제 모델 예측 마스크 생성 (가중치가 있으면)
+    actual_roughs = synthetic_roughs.copy()  # 폴백용
+    if unet_path and os.path.exists(unet_path):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        log.info(f"세그멘테이션 모델({model_type}) 가중치 로드: {unet_path} (Device: {device})")
+        if model_type == "segresnet":
+            from src.models.segresnet import build_segresnet
+            model = build_segresnet().to(device)
+        else:
+            from src.models.unet import build_unet
+            model = build_unet().to(device)
+        
+        model.load_state_dict(torch.load(unet_path, map_location=device))
+        model.eval()
+
+        batch_size = 64
+        num_slices = len(imgs)
+        preds = []
+        log.info("학습 데이터에 대한 실제 모델 예측 마스크 생성 중...")
+        with torch.no_grad():
+            for start_idx in range(0, num_slices, batch_size):
+                end_idx = min(start_idx + batch_size, num_slices)
+                batch_imgs = imgs[start_idx:end_idx]
+                batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device)
+                batch_preds = model(batch_t)
+                batch_preds = (torch.sigmoid(batch_preds) > 0.5).float().squeeze(1).cpu().numpy()
+                preds.append(batch_preds)
+        actual_roughs = np.concatenate(preds, axis=0)
+        log.info(f"실제 모델 예측 마스크 생성 완료 (개수: {len(actual_roughs)})")
+
+        # 데이터 믹스업: 실제 예측값 50% + 합성 노이즈 50% 데이터셋 2배 확장
+        imgs = np.concatenate([imgs, imgs], axis=0)
+        gts = np.concatenate([gts, gts], axis=0)
+        roughs = np.concatenate([actual_roughs, synthetic_roughs], axis=0)
+        
+        # 순열(permutation) 믹스
+        perm = rng.permutation(len(imgs))
+        imgs = imgs[perm]
+        gts = gts[perm]
+        roughs = roughs[perm]
+        log.info(f"실제 예측 + 합성 노이즈 마스크 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
+    else:
+        roughs = synthetic_roughs
+
+    return imgs, gts, roughs
 
 
 # ──────────────────────────────────────────────
 # VecEnv 빌더
 # ──────────────────────────────────────────────
 
-def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc):
+def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penalty=0.01):
     """MaskRefinementEnv 팩토리 함수 반환."""
     def _init():
         return MaskRefinementEnv(
@@ -143,6 +200,7 @@ def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc):
             rough_masks=rough_masks,
             max_steps=max_steps,
             target_dsc=target_dsc,
+            step_penalty=step_penalty,
         )
     return _init
 
@@ -159,9 +217,12 @@ def train_agent(
     image_size:          int   = 128,
     max_train_patients:  Optional[int] = None,
     num_samples:         int   = 300,         # 합성 데이터용
+    unet_path:           Optional[str] = None,
+    model_type:          str   = "unet",
     # RL 환경
     max_steps:           int   = 30,          # 20 → 30
     target_dsc:          float = 0.95,         # 0.90 → 0.95
+    step_penalty:        float = 0.01,
     # PPO 하이퍼파라미터
     total_timesteps:     int   = 300_000,      # 200K → 300K (5-class 행동 공간 확장 대응)
     n_envs:              int   = 4,
@@ -197,6 +258,8 @@ def train_agent(
             modality=modality,
             target_size=image_size,
             max_patients=max_train_patients,
+            unet_path=unet_path,
+            model_type=model_type,
         )
     else:
         images, gt_masks, rough_masks = load_synthetic_data(
@@ -213,11 +276,11 @@ def train_agent(
     val_img, val_gt, val_rough = images[split:],  gt_masks[split:],  rough_masks[split:]
 
     # ── VecEnv 생성 ─────────────────────────────────────────
-    train_env_fn = make_env_fn(tr_img,  tr_gt,  tr_rough,  max_steps, target_dsc)
-    val_env_fn   = make_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc)
+    train_env_fn = make_env_fn(tr_img,  tr_gt,  tr_rough,  max_steps, target_dsc, step_penalty)
+    val_env_fn   = make_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc, step_penalty)
 
-    # Monitor wrapper 적용 팬토리
-    def make_monitored_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc):
+    # Monitor wrapper 적용 팩토리
+    def make_monitored_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penalty):
         def _init():
             env = MaskRefinementEnv(
                 images=images,
@@ -225,12 +288,13 @@ def train_agent(
                 rough_masks=rough_masks,
                 max_steps=max_steps,
                 target_dsc=target_dsc,
+                step_penalty=step_penalty,
             )
             return Monitor(env)
         return _init
 
-    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, max_steps, target_dsc), n_envs=n_envs)
-    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc)])
+    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, max_steps, target_dsc, step_penalty), n_envs=n_envs)
+    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc, step_penalty)])
 
     # ── PPO 에이전트 ─────────────────────────────────────────
     # TensorBoard 설치 여부 확인
@@ -339,9 +403,15 @@ def main():
     parser.add_argument("--image_size",     type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None)
     parser.add_argument("--num_samples",    type=int, default=300)
+    parser.add_argument("--unet_path",      type=str, default=None,
+                        help="가중치 파일 경로 (checkpoints/unet_best.pt 또는 checkpoints/segresnet_best.pt)")
+    parser.add_argument("--model_type",     type=str, default="unet", choices=["unet", "segresnet"],
+                        help="세그멘테이션 모델 종류 (unet / segresnet)")
     # RL 환경
     parser.add_argument("--max_steps",      type=int,   default=30)
     parser.add_argument("--target_dsc",     type=float, default=0.95)
+    parser.add_argument("--step_penalty",   type=float, default=0.01,
+                        help="유지(Keep) 이외의 액션을 취할 때 보상에서 차감하는 미세 패널티")
     # PPO
     parser.add_argument("--total_timesteps",type=int,   default=300_000)
     parser.add_argument("--n_envs",         type=int,   default=4)
@@ -373,8 +443,11 @@ def main():
         "image_size":          "image_size",
         "max_train_patients":  "max_train_patients",
         "num_samples":         "num_samples",
+        "unet_path":           "unet_path",
+        "model_type":          "model_type",
         "max_steps":           "max_steps",
         "target_dsc":          "target_dsc",
+        "step_penalty":        "step_penalty",
         "total_timesteps":     "total_timesteps",
         "n_envs":              "n_envs",
         "n_steps":             "n_steps",
@@ -402,7 +475,10 @@ def main():
             cli_val  = cli_args.get("use_real_data", False)
             final_params[fn_key] = yaml_val or cli_val
         else:
-            yaml_val = cfg.get(yaml_key, None)
+            if fn_key == "unet_path":
+                yaml_val = cfg.get("unet_path", cfg.get("unet_checkpoint", None))
+            else:
+                yaml_val = cfg.get(yaml_key, None)
             cli_val  = cli_args.get(fn_key, None)
             default_val = defaults.get(fn_key, None)
             # CLI가 기본값과 다르면(사용자가 직접 지정) 우선, 아니면 YAML, 그 외 기본값

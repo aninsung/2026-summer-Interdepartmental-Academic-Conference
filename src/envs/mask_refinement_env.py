@@ -81,7 +81,7 @@ class MaskRefinementEnv(gym.Env):
     Action space: Discrete(5)
         0=강수축, 1=약수축, 2=유지, 3=약팽창, 4=강팽창
 
-    Reward: ΔDSC × 10 (DSC 향상량만 사용, 단순·안정적)
+    Reward: ΔDSC × 10 - step_penalty (비작동 행동 시 감산)
     """
 
     metadata = {"render_modes": []}
@@ -93,6 +93,7 @@ class MaskRefinementEnv(gym.Env):
         rough_masks: np.ndarray,   # (N, H, W) float32
         max_steps: int = 20,
         target_dsc: float = 0.95,
+        step_penalty: float = 0.01,
     ):
         super().__init__()
         assert images.shape == gt_masks.shape == rough_masks.shape
@@ -101,6 +102,7 @@ class MaskRefinementEnv(gym.Env):
         self.rough_masks = rough_masks
         self.max_steps = max_steps
         self.target_dsc = target_dsc
+        self.step_penalty = step_penalty
 
         N, H, W = images.shape
         self.H, self.W = H, W
@@ -147,9 +149,11 @@ class MaskRefinementEnv(gym.Env):
         new_mask = _apply_action(self._current_mask, int(action))
         new_dsc = _dice(new_mask, self._current_gt)
 
-        # ── 보상: DSC 향상량만 사용 (단순·안정적) ────────────────────
+        # ── 보상: DSC 향상량 + 비작동 패널티 ────────────────────
         delta_dsc = new_dsc - prev_dsc
         reward = delta_dsc * 10.0
+        if int(action) != 2:
+            reward -= self.step_penalty
 
         self._current_mask = new_mask
         self._step_count += 1

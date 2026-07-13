@@ -323,3 +323,76 @@ net_arch: [256, 256]
 | 🟡 3 | `max_train_patients` 200~300명 + 800K steps | 일반화↑ | ⭐ |
 | 🟡 4 | Learning rate decay (cosine schedule) | 수렴 안정화 | ⭐⭐ |
 | 🟢 5 | 3D 볼륨 단위 처리로 확장 | 근본적 개선 | ⭐⭐⭐ |
+
+---
+
+## 🧪 실험 4 — SegResNet (MONAI) as Step 1 대안 모델
+
+> Step 1에서 경량 2D U-Net 대신 **SegResNet** (잔차 블록 + GroupNorm)을 사용하는 실험입니다.
+> RL Refiner(Step 2)는 실험 3의 best_model을 그대로 사용하며, Rough Mask 품질만 비교합니다.
+
+### 모델 비교
+
+| 항목 | Light-weight 2D U-Net | **SegResNet (MONAI)** |
+|------|:---:|:---:|
+| 파일 | `src/models/unet.py` | `src/models/segresnet.py` |
+| 학습 스크립트 | `train_unet.py` | `train_segresnet.py` |
+| 저장 경로 | `checkpoints/unet_best.pt` | `checkpoints/segresnet_best.pt` |
+| 채널 구성 | `(16, 32, 64, 128)` | `init_filters=16` → `(16,32,64,128)` |
+| 파라미터 수 | ≈ 0.6 M | ≈ 1.2 M |
+| 정규화 | Instance Norm | Group Norm |
+| 잔차 연결 | ✅ (num_res_units=1) | ✅ (잔차 블록 내장) |
+| 드롭아웃 | ❌ | ✅ (dropout_prob=0.2) |
+
+### 설정 (실험 3과 동일 데이터/RL 환경 유지)
+
+| 파라미터 | 값 |
+|---------|-----|
+| 학습 데이터 | BraTS2021 **100명** (실험 3 동일) |
+| 모달리티 | T1ce, 128×128 |
+| init_filters | `16` |
+| dropout_prob | `0.2` |
+| epochs | `20` |
+| batch_size | `16` |
+| lr | `3e-4` (CosineAnnealing) |
+
+### 실행 명령
+
+```bash
+# Step 1: SegResNet 학습
+python train_segresnet.py \
+    --max_train_patients 100 \
+    --init_filters 16 \
+    --epochs 20 \
+    --save_path checkpoints/segresnet_best.pt
+
+# Step 2: RL Refiner는 기존 best_model 재사용
+# (필요시 재학습: python train_agent.py)
+
+# 평가: segresnet_best.pt 로 rough mask 교체
+python evaluate.py \
+    --unet_path checkpoints/segresnet_best.pt \
+    --num_eval 50
+```
+
+### 평가 결과 (50명, 2,902 슬라이스)
+
+| 방법 | DSC mean | DSC std | HD95 mean | HD95 std | U-Net 대비 |
+|------|:---:|:---:|:---:|:---:|:---:|
+| Rough (U-Net) | 0.7209 | ±0.2019 | 5.75 | ±9.69 | 기준 |
+| Rough (**SegResNet**) | **0.8491** | ±0.1473 | **2.87** | ±6.08 | **+12.8%p DSC / HD95 -50%** |
+| Morpho (U-Net) | 0.7255 | ±0.1967 | 5.04 | ±8.63 | — |
+| Morpho (**SegResNet**) | **0.8504** | ±0.1414 | **2.84** | ±5.96 | **+12.5%p DSC / HD95 -44%** |
+| RL Refined (U-Net 기반) | 0.6911 | ±0.2154 | 6.07 | ±10.28 | — |
+| RL Refined (**SegResNet 기반**) | 0.7268 | ±0.2297 | 3.87 | ±6.63 | +3.6%p DSC |
+
+### 실제 측정 결과 분석
+
+| 항목 | 결과 |
+|------|------|
+| Rough DSC | U-Net(0.721) 대비 **+0.128 (+17.8%)** ✅ 예상 초과 |
+| HD95 | U-Net(5.75px) 대비 **-2.88px (-50%)** ✅ 매우 큰 개선 |
+| 학습 안정성 | 표준편차 0.202 → **0.147** (27% 감소) ✅ |
+| RL 보정 효과 | RL이 U-Net 기준 학습됨 → SegResNet 초기값 분포 외(OOD) → **DSC 하락** ❌ |
+
+> **RL Refiner 재학습 필요**: SegResNet Rough를 시작점으로 재학습하면 최종 DSC 0.85+ 목표 가능
