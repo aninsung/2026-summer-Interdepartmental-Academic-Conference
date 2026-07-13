@@ -22,6 +22,7 @@ from stable_baselines3 import PPO
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.data.brats2020_dataset import BraTS2020Dataset
 from src.models.unet import build_unet, compute_dice
+from src.models.segresnet import build_segresnet
 from src.envs.mask_refinement_env import MaskRefinementEnv, _dice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -107,6 +108,7 @@ def rl_refine(
 def evaluate(
     agent_path: Optional[str] = None,
     unet_path: Optional[str] = None,
+    model_type: str = "unet",   # "unet" 또는 "segresnet"
     num_eval: int = 50,
     max_steps: int = 30,    # 20 → 30
     output_dir: str = "results",
@@ -136,15 +138,19 @@ def evaluate(
 
     images, gt_masks, rough_masks = dataset.get_numpy_arrays()
 
-    # U-Net 로드 (있으면)
+    # 세그멘테이션 모델 로드 (있으면)
     unet = None
     if unet_path and os.path.exists(unet_path):
-        unet = build_unet().to(device)
+        if model_type == "segresnet":
+            unet = build_segresnet().to(device)
+            log.info(f"SegResNet 로드: {unet_path}")
+        else:
+            unet = build_unet().to(device)
+            log.info(f"U-Net 로드: {unet_path}")
         unet.load_state_dict(torch.load(unet_path, map_location=device))
         unet.eval()
-        log.info(f"U-Net 로드: {unet_path}")
     else:
-        log.info("U-Net 체크포인트 없음 → rough_mask(합성 노이즈 마스크)를 초기 마스크로 사용")
+        log.info("체크포인트 없음 → rough_mask(합성 노이즈 마스크)를 초기 마스크로 사용")
 
     # PPO 에이전트 로드 (있으면)
     agent = None
@@ -159,6 +165,7 @@ def evaluate(
         "morpho": {"dsc": [], "hd95": []},
         "rl":     {"dsc": [], "hd95": []},
     }
+    sample_masks = []  # 시각화용: 실제 보정 마스크 저장
 
     for i in range(num_eval):
         img = images[i]
@@ -185,6 +192,10 @@ def evaluate(
             results[key]["dsc"].append(_dice(mask, gt))
             results[key]["hd95"].append(hausdorff_95(mask, gt))
 
+        # 시각화용 마스크 저장 (num_show수만큼만)
+        if i < 4:
+            sample_masks.append({"rough": rough, "morpho": morpho, "rl": rl_mask})
+
         if i % 10 == 0:
             log.info(f"  [{i+1}/{num_eval}] rough DSC={results['rough']['dsc'][-1]:.3f} | "
                      f"morpho DSC={results['morpho']['dsc'][-1]:.3f} | "
@@ -206,12 +217,12 @@ def evaluate(
         )
     print("=" * 60)
 
-    # ── 시각화 ───────────────────────────────────────────────
-    _plot_results(images, gt_masks, rough_masks, results, output_dir, num_show=min(4, num_eval))
+    # ── 시각화 ─────────────────────────────────────────────────────
+    _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=min(4, num_eval))
     log.info(f"결과 저장 완료: {output_dir}/")
 
 
-def _plot_results(images, gt_masks, rough_masks, results, output_dir, num_show=4):
+def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=4):
     """샘플 시각화 및 DSC 분포 박스플롯 저장."""
     # 1) 샘플별 마스크 비교
     fig, axes = plt.subplots(num_show, 4, figsize=(14, num_show * 3.5))
@@ -219,13 +230,30 @@ def _plot_results(images, gt_masks, rough_masks, results, output_dir, num_show=4
     for ax, col in zip(axes[0], cols):
         ax.set_title(col, fontsize=12, fontweight="bold")
 
-    for row in range(num_show):
-        img = images[row]
-        gt = gt_masks[row]
-        rough = rough_masks[row]
-        dsc_rough = results["rough"]["dsc"][row]
+    for row in range(min(num_show, len(sample_masks))):
+        img    = images[row]
+        gt     = gt_masks[row]
+        rough  = sample_masks[row]["rough"]
+        morpho = sample_masks[row]["morpho"]
+        rl     = sample_masks[row]["rl"]
+        dsc_rough  = results["rough"]["dsc"][row]
         dsc_morpho = results["morpho"]["dsc"][row]
-        dsc_rl = results["rl"]["dsc"][row]
+        dsc_rl     = results["rl"]["dsc"][row]
+
+        # GT 기반 크롭(확대) 영역 계산
+        y_indices, x_indices = np.where(gt > 0.5)
+        if len(y_indices) > 0:
+            ymin, ymax = y_indices.min(), y_indices.max()
+            xmin, xmax = x_indices.min(), x_indices.max()
+            # 종양 주변에 15픽셀의 마진 부여
+            margin = 15
+            ymin = max(0, ymin - margin)
+            ymax = min(gt.shape[0] - 1, ymax + margin)
+            xmin = max(0, xmin - margin)
+            xmax = min(gt.shape[1] - 1, xmax + margin)
+        else:
+            ymin, ymax = 0, gt.shape[0] - 1
+            xmin, xmax = 0, gt.shape[1] - 1
 
         # MRI + GT 윤곽
         axes[row, 0].imshow(img, cmap="gray", vmin=0, vmax=1)
@@ -239,19 +267,24 @@ def _plot_results(images, gt_masks, rough_masks, results, output_dir, num_show=4
         axes[row, 1].set_xlabel(f"DSC={dsc_rough:.3f}", fontsize=9)
         axes[row, 1].axis("off")
 
-        # Morpho
+        # Morpho — 실제 morpho 마스크 사용
         axes[row, 2].imshow(img, cmap="gray", vmin=0, vmax=1)
-        axes[row, 2].contour(rough, levels=[0.5], colors="orange", linewidths=1.5)
+        axes[row, 2].contour(morpho, levels=[0.5], colors="orange", linewidths=1.5)
         axes[row, 2].contour(gt, levels=[0.5], colors="lime", linewidths=1.0, linestyles="--")
         axes[row, 2].set_xlabel(f"DSC={dsc_morpho:.3f}", fontsize=9)
         axes[row, 2].axis("off")
 
-        # RL
+        # RL — 실제 rl 마스크 사용
         axes[row, 3].imshow(img, cmap="gray", vmin=0, vmax=1)
-        axes[row, 3].contour(rough, levels=[0.5], colors="cyan", linewidths=1.5)
+        axes[row, 3].contour(rl, levels=[0.5], colors="cyan", linewidths=1.5)
         axes[row, 3].contour(gt, levels=[0.5], colors="lime", linewidths=1.0, linestyles="--")
         axes[row, 3].set_xlabel(f"DSC={dsc_rl:.3f}", fontsize=9)
         axes[row, 3].axis("off")
+
+        # 각 서브플롯 축의 범위 설정하여 확대 적용
+        for col_idx in range(4):
+            axes[row, col_idx].set_xlim(xmin, xmax)
+            axes[row, col_idx].set_ylim(ymax, ymin)  # Y축 반전 상태 유지
 
     plt.tight_layout()
     save_path = os.path.join(output_dir, "sample_comparison.png")
@@ -281,9 +314,13 @@ def _plot_results(images, gt_masks, rough_masks, results, output_dir, num_show=4
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Step 4: Evaluate RL-Refiner")
     parser.add_argument("--agent_path", type=str, default="checkpoints/ppo_refiner")
-    parser.add_argument("--unet_path", type=str, default="checkpoints/unet_best.pt")
-    parser.add_argument("--num_eval", type=int, default=50)
-    parser.add_argument("--max_steps", type=int, default=30)
+    parser.add_argument("--unet_path",  type=str, default="checkpoints/unet_best.pt")
+    parser.add_argument(
+        "--model_type", type=str, default="unet", choices=["unet", "segresnet"],
+        help="로드할 세그멘테이션 모델 종류 (기본값: unet)",
+    )
+    parser.add_argument("--num_eval",   type=int, default=50)
+    parser.add_argument("--max_steps",  type=int, default=30)
     parser.add_argument("--output_dir", type=str, default="results")
     args = parser.parse_args()
     evaluate(**vars(args))
