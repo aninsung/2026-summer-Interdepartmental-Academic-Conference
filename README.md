@@ -40,8 +40,7 @@ The refined mask is finally evaluated using Dice, HD95, IoU, and ASSD metrics.
 - **평가지표**
   - Dice Similarity Coefficient (DSC)
   - HD95 (95% Hausdorff Distance)
-  - IoU
-  - ASSD
+  - IoU/ASSD
 
 ---
 
