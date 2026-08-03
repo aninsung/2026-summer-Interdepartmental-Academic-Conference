@@ -1,4 +1,4 @@
-# 컴공&인지 연합학술제 연구트랙 주제
+# 컴공&인지 연합학술제 연구트랙 
 
 # RL-Refiner
 > **강화학습(RL)을 활용한 뇌종양 의료 영상 분할(Segmentation) 경계선 자동 보정 시스템**
@@ -40,19 +40,18 @@ The refined mask is finally evaluated using Dice, HD95, IoU, and ASSD metrics.
 - **평가지표**
   - Dice Similarity Coefficient (DSC)
   - HD95 (95% Hausdorff Distance)
-  - IoU
-  - ASSD
+  - IoU/ASSD
 
 ---
 
-## ⚙️ Pipeline
+## ⚙️ pipeline
 
-| Step | Description |
-|------|-------------|
-| **1** | Train a lightweight 2D U-Net on the BraTS dataset to generate an initial segmentation mask. |
-| **2** | Build a custom Gymnasium environment where the state consists of MRI images and masks, and the actions are Expand, Shrink, or Keep. |
-| **3** | Train a PPO agent using Stable-Baselines3 with reward functions based on Dice score, HD95, boundary smoothness, and penalties. |
-| **4** | Compare the refined masks with Ground Truth and evaluate against traditional post-processing methods. |
+| 단계 | 설명 |
+|------|------|
+| **1** | BraTS 데이터셋을 이용하여 경량화된 **2D U-Net**을 학습하고, 초기 뇌종양 분할 마스크(Rough Mask)를 생성한다. |
+| **2** | MRI 영상과 초기 분할 마스크를 상태(State)로 사용하는 Gymnasium 기반 커스텀 강화학습 환경을 구축하고, 행동(Action)은 경계 축소(Shrink), 경계 유지(Keep), 경계 팽창(Expand) 으로 정의한다. |
+| **3** | Stable-Baselines3의 PPO(Proximal Policy Optimization) 알고리즘을 이용하여 에이전트를 학습하며, Dice Score와 HD95를 기반으로 한 보상 함수(Reward Function) 를 설계하여 분할 경계를 반복적으로 보정한다. |
+| **4** | 강화학습으로 보정된 최종 분할 마스크를 Ground Truth와 비교하여 Dice Score, HD95 등의 성능을 평가하고, Morphological Refinement(Opening/Closing) 와 같은 기존 후처리 기법과 성능을 비교·분석한다. |
 
 ---
 
@@ -69,10 +68,10 @@ The refined mask is finally evaluated using Dice, HD95, IoU, and ASSD metrics.
 
 ## 🚀 Expected Contributions
 
-- Pixel-level boundary refinement using reinforcement learning.
-- Automatic correction of segmentation artifacts.
-- Reduced manual annotation effort in clinical workflows.
-- Improved segmentation quality for radiotherapy planning.
+- 강화학습을 활용한 픽셀 단위 종양 경계 보정
+- 분할 과정에서 발생하는 아티팩트(Artifact)의 자동 보정
+- 임상 환경에서 수작업 영상 라벨링 부담 감소
+- 방사선 치료 계획을 위한 종양 분할 품질 향상
 
 ---
 
@@ -101,17 +100,10 @@ RL-Refiner/
 ## 📦 Getting Started
 
 ```bash
-git clone https://github.com/aninsung/2026-summer-Interdepartmental-Academic-Conference.git
-
-cd 2026-summer-Interdepartmental-Academic-Conference
 
 pip install -r requirements.txt
 
-# 전체 파이프라인 실행 예시 (U-Net 학습 -> Agent 학습 -> 평가)
-python run_pipeline.py
 
-# 특정 단계를 건너뛰고 싶을 때 (예: U-Net 학습 건너뛰기)
-python run_pipeline.py --skip_unet
 
 # 개별 단계 실행 (Agent 학습)
 python train_agent.py --config configs/ppo_brats.yaml
