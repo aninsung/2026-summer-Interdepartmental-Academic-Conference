@@ -102,12 +102,8 @@ RL-Refiner/
 ```bash
 
 pip install -r requirements.txt
+python run_pipeline.py --model_type [model name]
 
 
 
-# 개별 단계 실행 (Agent 학습)
-python train_agent.py --config configs/ppo_brats.yaml
-
-# 평가
-python evaluate.py --agent_path checkpoints/best_model --unet_path checkpoints/unet_best.pt
 ```
