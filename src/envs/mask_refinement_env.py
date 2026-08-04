@@ -81,7 +81,8 @@ class MaskRefinementEnv(gym.Env):
     Action space: Discrete(5)
         0=강수축, 1=약수축, 2=유지, 3=약팽창, 4=강팽창
 
-    Reward: ΔDSC × 10 - step_penalty (비작동 행동 시 감산)
+    Reward: ΔDSC × 10 (악화 시 2배 패널티) - step_penalty (비작동 행동 시 감산)
+           이미 좋은 마스크(DSC ≥ 0.85)에서 유지 선택 시 소액 보상 추가
     """
 
     metadata = {"render_modes": []}
@@ -149,10 +150,16 @@ class MaskRefinementEnv(gym.Env):
         new_mask = _apply_action(self._current_mask, int(action))
         new_dsc = _dice(new_mask, self._current_gt)
 
-        # ── 보상: DSC 향상량 + 비작동 패널티 ────────────────────
+        # ── 보상: DSC 향상량 + 비대칭 패널티 ────────────────────
         delta_dsc = new_dsc - prev_dsc
         reward = delta_dsc * 10.0
-        if int(action) != 2:
+        # 악화 시 패널티 2배 (asymmetric reward)
+        if delta_dsc < 0:
+            reward *= 2.0
+        # 이미 좋은 마스크에서 유지 선택 시 소액 보상
+        if int(action) == 2 and prev_dsc >= 0.85:
+            reward += 0.005
+        elif int(action) != 2:
             reward -= self.step_penalty
 
         self._current_mask = new_mask

@@ -135,10 +135,13 @@ def load_real_data(
 
     rng = np.random.default_rng(noise_seed)
 
-    # 1. 합성 노이즈 마스크 생성
+    # 1. 합성 노이즈 마스크 생성 (SegResNet용: 약한 노이즈)
     from src.data.brats2020_dataset import make_noisy_mask
-    log.info("학습 데이터에 대한 합성 노이즈 마스크 생성 중...")
-    synthetic_roughs = np.stack([make_noisy_mask(gt, rng) for gt in gts], axis=0)
+    morph_px = 3 if model_type == "segresnet" else 5  # SegResNet은 경계 오류가 작으므로 약한 노이즈
+    log.info(f"학습 데이터에 대한 합성 노이즈 마스크 생성 중... (max_morph_px={morph_px})")
+    synthetic_roughs = np.stack(
+        [make_noisy_mask(gt, rng, max_morph_px=morph_px) for gt in gts], axis=0
+    )
 
     # 2. 실제 모델 예측 마스크 생성 (가중치가 있으면)
     actual_roughs = synthetic_roughs.copy()  # 폴백용
@@ -148,6 +151,9 @@ def load_real_data(
         if model_type == "segresnet":
             from src.models.segresnet import build_segresnet
             model = build_segresnet().to(device)
+        elif model_type == "unetplusplus":
+            from src.models.unetplusplus import build_unetplusplus
+            model = build_unetplusplus().to(device)
         else:
             from src.models.unet import build_unet
             model = build_unet().to(device)
@@ -170,17 +176,18 @@ def load_real_data(
         actual_roughs = np.concatenate(preds, axis=0)
         log.info(f"실제 모델 예측 마스크 생성 완료 (개수: {len(actual_roughs)})")
 
-        # 데이터 믹스업: 실제 예측값 50% + 합성 노이즈 50% 데이터셋 2배 확장
-        imgs = np.concatenate([imgs, imgs], axis=0)
-        gts = np.concatenate([gts, gts], axis=0)
-        roughs = np.concatenate([actual_roughs, synthetic_roughs], axis=0)
+        # 데이터 믹스업: 실제 예측값 70% + 합성 노이즈 30%
+        # → 실제 예측을 2회 반복 + 합성 1회 = 약 67:33 비율
+        imgs = np.concatenate([imgs, imgs, imgs], axis=0)
+        gts = np.concatenate([gts, gts, gts], axis=0)
+        roughs = np.concatenate([actual_roughs, actual_roughs, synthetic_roughs], axis=0)
         
         # 순열(permutation) 믹스
         perm = rng.permutation(len(imgs))
         imgs = imgs[perm]
         gts = gts[perm]
         roughs = roughs[perm]
-        log.info(f"실제 예측 + 합성 노이즈 마스크 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
+        log.info(f"실제 예측 70% + 합성 노이즈 30% 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
     else:
         roughs = synthetic_roughs
 
@@ -217,8 +224,8 @@ def train_agent(
     image_size:          int   = 128,
     max_train_patients:  Optional[int] = None,
     num_samples:         int   = 300,         # 합성 데이터용
-    unet_path:           Optional[str] = None,
-    model_type:          str   = "unet",
+    unet_path:           Optional[str] = "checkpoints/segresnet_best.pt",
+    model_type:          str   = "segresnet",
     # RL 환경
     max_steps:           int   = 30,          # 20 → 30
     target_dsc:          float = 0.95,         # 0.90 → 0.95
@@ -403,10 +410,10 @@ def main():
     parser.add_argument("--image_size",     type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None)
     parser.add_argument("--num_samples",    type=int, default=300)
-    parser.add_argument("--unet_path",      type=str, default=None,
+    parser.add_argument("--unet_path",      type=str, default="checkpoints/segresnet_best.pt",
                         help="가중치 파일 경로 (checkpoints/unet_best.pt 또는 checkpoints/segresnet_best.pt)")
-    parser.add_argument("--model_type",     type=str, default="unet", choices=["unet", "segresnet"],
-                        help="세그멘테이션 모델 종류 (unet / segresnet)")
+    parser.add_argument("--model_type",     type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus"],
+                        help="세그멘테이션 모델 종류 (기본값: segresnet)")
     # RL 환경
     parser.add_argument("--max_steps",      type=int,   default=30)
     parser.add_argument("--target_dsc",     type=float, default=0.95)
@@ -488,6 +495,22 @@ def main():
                 final_params[fn_key] = yaml_val
             else:
                 final_params[fn_key] = default_val
+
+    # model_type에 따라 기본 unet_path 및 save_path 자동 분기 매핑
+    m_type = final_params.get("model_type", "segresnet")
+    
+    # 1. unet_path 자동 설정
+    if final_params.get("unet_path") in [None, "checkpoints/segresnet_best.pt", "checkpoints/unet_best.pt", "checkpoints/unetplusplus_best.pt"]:
+        if m_type == "segresnet":
+            final_params["unet_path"] = "checkpoints/segresnet_best.pt"
+        elif m_type == "unetplusplus":
+            final_params["unet_path"] = "checkpoints/unetplusplus_best.pt"
+        else:
+            final_params["unet_path"] = "checkpoints/unet_best.pt"
+
+    # 2. save_path 자동 설정 (기본값인 경우 모델 타입별로 분리 저장)
+    if final_params.get("save_path") == "checkpoints/ppo_refiner":
+        final_params["save_path"] = f"checkpoints/ppo_refiner_{m_type}"
 
     log.info("최종 파라미터:")
     for k, v in final_params.items():
