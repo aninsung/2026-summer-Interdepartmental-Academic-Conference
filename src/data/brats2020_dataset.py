@@ -247,6 +247,9 @@ class BraTS2020Dataset(Dataset):
                 mod_vol = _normalize_volume(_load_volume(str(mod_path)))  # (H,W,D)
                 seg_vol = _load_volume(str(seg_path))                     # (H,W,D) 레이블
 
+                # 해당 환자의 전체 볼륨에 레이블 4(ET)가 존재하는지 체크
+                has_et = bool((seg_vol == 4.0).any())
+
                 # 유효 슬라이스 선택
                 valid_zs = _select_slices(seg_vol, self.min_tumor_ratio)
                 for z in valid_zs:
@@ -264,7 +267,7 @@ class BraTS2020Dataset(Dataset):
                     else:
                         rough_sl = gt_sl.copy()
 
-                    self._samples.append((img_sl, gt_sl, rough_sl))
+                    self._samples.append((img_sl, gt_sl, rough_sl, has_et))
 
                 total_slices += len(valid_zs)
                 if hasattr(_iter, 'set_postfix'):
@@ -300,11 +303,12 @@ class BraTS2020Dataset(Dataset):
         return len(self._samples)
 
     def __getitem__(self, idx: int) -> dict:
-        img, gt, rough = self._samples[idx]
+        img, gt, rough, has_et = self._samples[idx]
         return {
             "image":      torch.from_numpy(img).unsqueeze(0),    # (1,H,W)
             "gt_mask":    torch.from_numpy(gt).unsqueeze(0),     # (1,H,W)
             "rough_mask": torch.from_numpy(rough).unsqueeze(0),  # (1,H,W)
+            "has_et":     has_et,
         }
 
     def get_numpy_arrays(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -316,6 +320,13 @@ class BraTS2020Dataset(Dataset):
         gts    = np.stack([s[1] for s in self._samples], axis=0)
         roughs = np.stack([s[2] for s in self._samples], axis=0)
         return imgs, gts, roughs
+
+    def get_et_presence_array(self) -> np.ndarray:
+        """
+        각 슬라이스별로 해당 환자 볼륨의 ET(레이블 4) 존재 여부를 bool 배열로 반환.
+        Returns: has_ets (N,)
+        """
+        return np.array([s[3] for s in self._samples], dtype=bool)
 
 
 # ──────────────────────────────────────────────

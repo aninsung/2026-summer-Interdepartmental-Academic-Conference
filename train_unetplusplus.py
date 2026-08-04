@@ -1,21 +1,13 @@
 """
-Step 1 (대안): SegResNet 학습 스크립트
-경량 2D U-Net 대신 MONAI SegResNet을 사용하여 초기 마스크를 생성합니다.
+Step 1: UNet++ (Nested U-Net) 학습 스크립트
+MONAI BasicUNetPlusPlus를 기반으로 초기 마스크 생성기를 학습합니다.
 
 사용 예시:
   # 실제 BraTS2021 데이터 (기본값)
-  python train_segresnet.py
+  python train_unetplusplus.py
 
   # 환자 수 제한 + 커스텀 저장 경로
-  python train_segresnet.py --max_train_patients 100 --save_path checkpoints/segresnet_best.pt
-
-  # init_filters 조정 (표현력↑)
-  python train_segresnet.py --init_filters 32 --epochs 30
-
-비교 실행 (U-Net vs SegResNet):
-  python train_unet.py      --save_path checkpoints/unet_best.pt
-  python train_segresnet.py --save_path checkpoints/segresnet_best.pt
-  # 이후 evaluate.py 에서 --unet_path 를 각각 지정하여 성능 비교
+  python train_unetplusplus.py --max_train_patients 100 --save_path checkpoints/unetplusplus_best.pt
 """
 
 import os
@@ -29,13 +21,14 @@ from torch.utils.data import DataLoader, random_split
 # 프로젝트 루트를 경로에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.models.segresnet import build_segresnet, DiceLoss, BCEDiceLoss, compute_dice
+from src.models.unetplusplus import build_unetplusplus
+from src.models.segresnet import BCEDiceLoss, DiceLoss, compute_dice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 
-def train_segresnet(
+def train_unetplusplus(
     # 데이터 설정
     use_real_data: bool = True,
     train_root: str = r"src\data\archive\BraTS2021_Training_Data",
@@ -44,14 +37,11 @@ def train_segresnet(
     target_size: int = 128,
     max_train_patients: int = None,
     max_val_patients: int = None,
-    # SegResNet 구조 설정
-    init_filters: int = 16,
-    dropout_prob: float = 0.2,
     # 학습 설정
     epochs: int = 20,
     batch_size: int = 16,
     lr: float = 3e-4,
-    save_path: str = "checkpoints/segresnet_best.pt",
+    save_path: str = "checkpoints/unetplusplus_best.pt",
     device: str = "auto",
     use_bce_dice: bool = True,
     augment: bool = True,
@@ -65,7 +55,6 @@ def train_segresnet(
     if use_real_data:
         log.info("실제 BraTS2021 데이터 사용")
         from src.data.brats2020_dataset import BraTS2020Dataset
-
         full_ds = BraTS2020Dataset(
             root_dir=train_root,
             modality=modality,
@@ -73,7 +62,6 @@ def train_segresnet(
             max_patients=max_train_patients,
             simulate_rough=True,
         )
-        # BraTS2021은 별도 val 폴더가 없음 → train 데이터 80/20 분할
         if val_root and val_root != train_root and val_root != "":
             try:
                 val_ds = BraTS2020Dataset(
@@ -104,9 +92,8 @@ def train_segresnet(
 
     log.info(f"학습 슬라이스: {len(train_ds)}  |  검증 슬라이스: {len(val_ds)}")
 
-    # ── Data Augmentation (학습 시에만) ────────────────────
+    # ── Data Augmentation ──────────────────────────────────
     def augment_batch(batch):
-        """랜덤 수평 뒤집기 + 랜덤 90° 회전 augmentation."""
         import torch
         images = torch.stack([b["image"] for b in batch])
         gt_masks = torch.stack([b["gt_mask"] for b in batch])
@@ -114,15 +101,12 @@ def train_segresnet(
 
         if augment:
             for i in range(images.size(0)):
-                # 랜덤 수평 뒤집기 (50% 확률)
                 if torch.rand(1).item() > 0.5:
                     images[i] = torch.flip(images[i], dims=[-1])
                     gt_masks[i] = torch.flip(gt_masks[i], dims=[-1])
-                # 랜덤 수직 뒤집기 (50% 확률)
                 if torch.rand(1).item() > 0.5:
                     images[i] = torch.flip(images[i], dims=[-2])
                     gt_masks[i] = torch.flip(gt_masks[i], dims=[-2])
-                # 랜덤 90° 회전 (25% 확률)
                 if torch.rand(1).item() > 0.75:
                     k = torch.randint(1, 4, (1,)).item()
                     images[i] = torch.rot90(images[i], k, dims=[-2, -1])
@@ -140,15 +124,10 @@ def train_segresnet(
     )
 
     # ── 모델 ────────────────────────────────────────────────
-    model = build_segresnet(
+    model = build_unetplusplus(
         in_channels=1,
         out_channels=1,
-        init_filters=init_filters,
-        dropout_prob=dropout_prob,
     ).to(device)
-
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    log.info(f"SegResNet 파라미터 수: {n_params:,}  (init_filters={init_filters})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if use_bce_dice:
@@ -160,13 +139,10 @@ def train_segresnet(
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_val_dsc = 0.0
-    os.makedirs(
-        os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True
-    )
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
 
     try:
         from tqdm import tqdm as _tqdm
-
         USE_TQDM = True
     except ImportError:
         USE_TQDM = False
@@ -239,86 +215,35 @@ def train_segresnet(
             torch.save(model.state_dict(), save_path)
             log.info(f"  ✔ Best model saved (val_DSC={best_val_dsc:.4f})")
 
-    log.info(f"\n=== SegResNet 학습 완료. Best val DSC: {best_val_dsc:.4f} ===")
+    log.info(f"\n=== UNet++ 학습 완료. Best val DSC: {best_val_dsc:.4f} ===")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Step 1 (대안): Train SegResNet (MONAI) on BraTS2021"
-    )
+    parser = argparse.ArgumentParser(description="Step 1: Train UNet++ (MONAI)")
     # 데이터 관련
-    parser.add_argument(
-        "--use_real_data",
-        action="store_true",
-        default=True,
-        help="실제 BraTS NIfTI 데이터 사용 (기본값)",
-    )
-    parser.add_argument(
-        "--train_root",
-        type=str,
-        default=r"src\data\archive\BraTS2021_Training_Data",
-    )
-    parser.add_argument(
-        "--val_root",
-        type=str,
-        default="",
-        help="BraTS2021은 별도 val 폴더 없음. 비워두면 train 80/20 분할.",
-    )
-    parser.add_argument(
-        "--modality", type=str, default="t1ce", choices=["t1ce", "t1", "t2", "flair"]
-    )
+    parser.add_argument("--use_real_data", action="store_true", default=True, help="실제 데이터 사용")
+    parser.add_argument("--train_root", type=str, default=r"src\data\archive\BraTS2021_Training_Data")
+    parser.add_argument("--val_root", type=str, default="", help="비워두면 train 80/20 분할")
+    parser.add_argument("--modality", type=str, default="t1ce", choices=["t1ce", "t1", "t2", "flair"])
     parser.add_argument("--target_size", type=int, default=128)
-    parser.add_argument(
-        "--max_train_patients", type=int, default=None, help="학습 환자 수 제한 (None=전체)"
-    )
-    parser.add_argument(
-        "--max_val_patients", type=int, default=None, help="검증 환자 수 제한 (None=전체)"
-    )
-    # SegResNet 구조
-    parser.add_argument(
-        "--init_filters",
-        type=int,
-        default=16,
-        help="SegResNet 첫 블록 채널 수 (기본 16; 32/64로 늘리면 표현력↑)",
-    )
-    parser.add_argument(
-        "--dropout_prob",
-        type=float,
-        default=0.2,
-        help="드롭아웃 비율 (0=비활성화)",
-    )
+    parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한")
+    parser.add_argument("--max_val_patients", type=int, default=None, help="검증 환자 수 제한")
     # 학습 관련
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--save_path", type=str, default="checkpoints/segresnet_best.pt")
+    parser.add_argument("--save_path", type=str, default="checkpoints/unetplusplus_best.pt")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument(
-        "--use_bce_dice",
-        action="store_true",
-        default=True,
-        help="BCE+Dice 복합 손실 함수 사용 (기본값: True)",
-    )
-    parser.add_argument(
-        "--no_bce_dice",
-        action="store_true",
-        default=False,
-        help="DiceLoss만 사용 (BCE+Dice 비활성화)",
-    )
-    parser.add_argument(
-        "--no_augment",
-        action="store_true",
-        default=False,
-        help="Data Augmentation 비활성화",
-    )
+    parser.add_argument("--use_bce_dice", action="store_true", default=True, help="BCE+Dice 사용")
+    parser.add_argument("--no_bce_dice", action="store_true", default=False, help="DiceLoss만 사용")
+    parser.add_argument("--no_augment", action="store_true", default=False, help="Data Augmentation 비활성화")
+    
     args = parser.parse_args()
-    # --no_bce_dice 플래그 처리
     if args.no_bce_dice:
         args.use_bce_dice = False
-    # --no_augment → augment=False
     args.augment = not args.no_augment
-    # argparse 전용 키 제거
     d = vars(args)
     d.pop("no_bce_dice", None)
     d.pop("no_augment", None)
-    train_segresnet(**d)
+    
+    train_unetplusplus(**d)

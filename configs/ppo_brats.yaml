@@ -54,4 +54,6 @@ net_arch: [256, 256]
 # ──────────────────────────────────────────────
 save_path: "checkpoints/ppo_refiner"
 log_path: "logs/ppo"
-unet_checkpoint: "checkpoints/unet_best.pt"
+unet_checkpoint: "checkpoints/segresnet_best.pt"
+model_type: "segresnet"
+

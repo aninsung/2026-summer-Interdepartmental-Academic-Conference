@@ -23,7 +23,7 @@ from monai.networks.layers.factories import Dropout
 from monai.networks.layers.utils import get_act_layer, get_norm_layer
 from monai.utils import UpsampleMode
 
-__all__ = ["SegResNet", "SegResNetVAE", "build_segresnet"]
+__all__ = ["SegResNet", "SegResNetVAE", "build_segresnet", "BCEDiceLoss"]
 
 
 class SegResNet(nn.Module):
@@ -337,3 +337,34 @@ def build_segresnet(
         dropout_prob=dropout_prob,
     )
     return model
+
+
+class BCEDiceLoss(nn.Module):
+    """
+    BCE + Dice 복합 손실 함수.
+    - BCE: 픽셀 단위 학습 안정성 (특히 경계 영역)
+    - Dice: 전역적 겹침 비율 최적화
+    - bce_weight: BCE 손실의 가중치 (기본 0.5)
+    """
+
+    def __init__(self, smooth: float = 1e-5, bce_weight: float = 0.5):
+        super().__init__()
+        self.smooth = smooth
+        self.bce_weight = bce_weight
+        self.bce = nn.BCEWithLogitsLoss()
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # BCE 손실 (logits 입력)
+        bce_loss = self.bce(pred, target)
+
+        # Dice 손실 (sigmoid 적용)
+        pred_sig = torch.sigmoid(pred)
+        pred_flat = pred_sig.view(pred_sig.size(0), -1)
+        target_flat = target.view(target.size(0), -1)
+        intersection = (pred_flat * target_flat).sum(dim=1)
+        dsc = (2.0 * intersection + self.smooth) / (
+            pred_flat.sum(dim=1) + target_flat.sum(dim=1) + self.smooth
+        )
+        dice_loss = 1.0 - dsc.mean()
+
+        return self.bce_weight * bce_loss + (1 - self.bce_weight) * dice_loss

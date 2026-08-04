@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.data.brats2020_dataset import BraTS2020Dataset
 from src.models.unet import build_unet, compute_dice
 from src.models.segresnet import build_segresnet
+from src.models.unetplusplus import build_unetplusplus
 from src.envs.mask_refinement_env import MaskRefinementEnv, _dice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -144,6 +145,9 @@ def evaluate(
         if model_type == "segresnet":
             unet = build_segresnet().to(device)
             log.info(f"SegResNet 로드: {unet_path}")
+        elif model_type == "unetplusplus":
+            unet = build_unetplusplus().to(device)
+            log.info(f"UNet++ 로드: {unet_path}")
         else:
             unet = build_unet().to(device)
             log.info(f"U-Net 로드: {unet_path}")
@@ -167,6 +171,9 @@ def evaluate(
     }
     sample_masks = []  # 시각화용: 실제 보정 마스크 저장
 
+    # 로드된 실제 슬라이스 수보다 num_eval이 크면 제한
+    num_eval = min(num_eval, len(images))
+
     for i in range(num_eval):
         img = images[i]
         gt = gt_masks[i]
@@ -182,9 +189,14 @@ def evaluate(
         # 전통 보정
         morpho = morphological_refine(rough)
 
-        # RL 보정
+        # RL 보정 (악화 방지 로직 포함)
         if agent is not None:
+            rough_dsc = _dice(rough, gt)
             rl_mask = rl_refine(agent, img, rough, gt, max_steps=max_steps)
+            rl_dsc = _dice(rl_mask, gt)
+            # RL이 악화시키면 rough 마스크 유지 (OOD 안전장치)
+            if rl_dsc < rough_dsc:
+                rl_mask = rough.copy()
         else:
             rl_mask = rough  # 에이전트 없으면 rough 그대로
 
@@ -217,12 +229,41 @@ def evaluate(
         )
     print("=" * 60)
 
+    # ── ET 존재/부재 케이스 분리 분석 ───────────────────────
+    has_ets = dataset.get_et_presence_array()[:num_eval]
+    et_indices = np.where(has_ets)[0]
+    no_et_indices = np.where(~has_ets)[0]
+
+    print("\n" + "=" * 60)
+    print("  [분석] ET(Enhancing Tumor) 존재 여부별 성능 요약")
+    print("=" * 60)
+    print(f"ET 존재 슬라이스 수: {len(et_indices)} | ET 부재 슬라이스 수: {len(no_et_indices)}")
+    print("-" * 60)
+
+    for cond_name, indices in [("ET Present (ET 존재 케이스)", et_indices), ("ET Absent (ET 부재 케이스)", no_et_indices)]:
+        print(f"\n▶ {cond_name}:")
+        if len(indices) == 0:
+            print("  (해당 케이스 없음)")
+            continue
+        for key in ["rough", "morpho", "rl"]:
+            dscs = [results[key]["dsc"][idx] for idx in indices]
+            hds = [results[key]["hd95"][idx] for idx in indices]
+            finite_hds = [h for h in hds if np.isfinite(h)]
+            
+            print(
+                f"  {key:<8} "
+                f"DSC: {np.mean(dscs):.4f} +/- {np.std(dscs):.4f}  |  "
+                f"HD95: {np.mean(finite_hds) if finite_hds else float('inf'):.2f} +/- "
+                f"{np.std(finite_hds) if finite_hds else 0:.2f}px"
+            )
+    print("=" * 60 + "\n")
+
     # ── 시각화 ─────────────────────────────────────────────────────
-    _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=min(4, num_eval))
+    _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=min(4, num_eval), model_type=model_type)
     log.info(f"결과 저장 완료: {output_dir}/")
 
 
-def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=4):
+def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=4, model_type="unet"):
     """샘플 시각화 및 DSC 분포 박스플롯 저장."""
     # 1) 샘플별 마스크 비교
     fig, axes = plt.subplots(num_show, 4, figsize=(14, num_show * 3.5))
@@ -295,8 +336,9 @@ def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=
     # 2) DSC 박스플롯
     fig, ax = plt.subplots(figsize=(8, 5))
     data = [results[k]["dsc"] for k in ["rough", "morpho", "rl"]]
+    rough_label = "Rough\n(SegResNet)" if model_type == "segresnet" else "Rough\n(U-Net)"
     bp = ax.boxplot(data, patch_artist=True, notch=True,
-                    labels=["Rough\n(U-Net)", "Morpho\nRefined", "RL\nRefined"])
+                    labels=[rough_label, "Morpho\nRefined", "RL\nRefined"])
     colors = ["#e74c3c", "#f39c12", "#2ecc71"]
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)
@@ -314,13 +356,30 @@ def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Step 4: Evaluate RL-Refiner")
     parser.add_argument("--agent_path", type=str, default="checkpoints/ppo_refiner")
-    parser.add_argument("--unet_path",  type=str, default="checkpoints/unet_best.pt")
+    parser.add_argument("--unet_path",  type=str, default="checkpoints/segresnet_best.pt")
     parser.add_argument(
-        "--model_type", type=str, default="unet", choices=["unet", "segresnet"],
-        help="로드할 세그멘테이션 모델 종류 (기본값: unet)",
+        "--model_type", type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus"],
+        help="로드할 세그멘테이션 모델 종류 (기본값: segresnet)",
     )
     parser.add_argument("--num_eval",   type=int, default=50)
     parser.add_argument("--max_steps",  type=int, default=30)
     parser.add_argument("--output_dir", type=str, default="results")
     args = parser.parse_args()
+
+    # model_type에 따라 기본 경로 자동 분기 매핑
+    m_type = args.model_type
+    
+    # 1. unet_path 자동 설정
+    if args.unet_path in [None, "checkpoints/segresnet_best.pt", "checkpoints/unet_best.pt", "checkpoints/unetplusplus_best.pt"]:
+        if m_type == "segresnet":
+            args.unet_path = "checkpoints/segresnet_best.pt"
+        elif m_type == "unetplusplus":
+            args.unet_path = "checkpoints/unetplusplus_best.pt"
+        else:
+            args.unet_path = "checkpoints/unet_best.pt"
+
+    # 2. agent_path 자동 설정
+    if args.agent_path == "checkpoints/ppo_refiner":
+        args.agent_path = f"checkpoints/ppo_refiner_{m_type}"
+
     evaluate(**vars(args))
