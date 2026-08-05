@@ -9,8 +9,10 @@ Action : 경계 픽셀을 기준으로 5-class 액션 (기존 3-class → 5-clas
          2 = 유지 (keep)
          3 = 약하게 팽창 (dilate 1px)
          4 = 강하게 팽창 (dilate 2px)
-Reward : ΔDSC × 10 - HD95 패널티 × 0.05 (보정 후 DSC 향상 + 경계 거리 패널티)
+Reward : ΔDSC × 10 (악화 시 3배 패널티) - HD95 패널티 × 0.02 - step_cost
+         높은 DSC(≥0.85) 유지 시 보너스 추가
 Episode: 최대 max_steps 스텝, DSC ≥ target_dsc 이면 조기 종료
+         target_dsc=0.88 (기존 0.95 → 현실적 목표로 조기 종료 활성화)
 """
 
 import numpy as np
@@ -81,8 +83,9 @@ class MaskRefinementEnv(gym.Env):
     Action space: Discrete(5)
         0=강수축, 1=약수축, 2=유지, 3=약팽창, 4=강팽창
 
-    Reward: ΔDSC × 10 (악화 시 2배 패널티) - step_penalty (비작동 행동 시 감산)
-           이미 좋은 마스크(DSC ≥ 0.85)에서 유지 선택 시 소액 보상 추가
+    Reward: ΔDSC × 10 (악화 시 3배 패널티) - HD95 패널티 × 0.02 - step_cost
+           이미 좋은 마스크(DSC ≥ 0.85)에서 유지 선택 시 보상 0.02 추가
+           (기존 대비: 악화 패널티 강화, HD95 항 추가, 유지 보너스 강화)
     """
 
     metadata = {"render_modes": []}
@@ -93,8 +96,9 @@ class MaskRefinementEnv(gym.Env):
         gt_masks: np.ndarray,      # (N, H, W) float32
         rough_masks: np.ndarray,   # (N, H, W) float32
         max_steps: int = 20,
-        target_dsc: float = 0.95,
-        step_penalty: float = 0.01,
+        target_dsc: float = 0.88,  # 0.95 → 0.88: SegResNet rough DSC≈0.85 기준 현실적 조기종료 목표
+        step_penalty: float = 0.005,  # 0.01 → 0.005: 탐색 억제 완화
+        model_type: str = "unet",
     ):
         super().__init__()
         assert images.shape == gt_masks.shape == rough_masks.shape
@@ -104,6 +108,7 @@ class MaskRefinementEnv(gym.Env):
         self.max_steps = max_steps
         self.target_dsc = target_dsc
         self.step_penalty = step_penalty
+        self.model_type = model_type.lower()
 
         N, H, W = images.shape
         self.H, self.W = H, W
@@ -112,8 +117,13 @@ class MaskRefinementEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(2, H, W), dtype=np.float32
         )
-        # 5-class 행동 공간 (기존 3-class → 5-class 확장)
-        self.action_space = spaces.Discrete(5)
+        # model_type에 따라 행동 공간 분기 정의
+        if self.model_type == "segresnet":
+            # 8개 섹터, 각 섹터별 5개 행동 (수축/유지/팽창)
+            self.action_space = spaces.MultiDiscrete([5] * 8)
+        else:
+            # 기존 전역 5-class 행동 공간
+            self.action_space = spaces.Discrete(5)
 
         self._idx = 0
         self._current_mask: np.ndarray = np.zeros((H, W), dtype=np.float32)
@@ -143,24 +153,77 @@ class MaskRefinementEnv(gym.Env):
 
         return self._obs(), {}
 
-    def step(self, action: int):
+    def step(self, action):
         prev_dsc = _dice(self._current_mask, self._current_gt)
 
         # 액션 적용
-        new_mask = _apply_action(self._current_mask, int(action))
+        if self.model_type == "segresnet":
+            # 국소적 보정 (8개 섹터 개별 변형)
+            y_indices, x_indices = np.where(self._current_mask > 0.5)
+            if len(y_indices) > 0:
+                cy, cx = y_indices.mean(), x_indices.mean()
+            else:
+                cy, cx = self.H / 2.0, self.W / 2.0
+
+            ys = np.arange(self.H)
+            xs = np.arange(self.W)
+            Y, X = np.meshgrid(ys, xs, indexing='ij')
+            angles = np.arctan2(Y - cy, X - cx)  # [-pi, pi]
+            sectors = ((angles + np.pi) / (2.0 * np.pi) * 8.0).astype(int)
+            sectors = np.clip(sectors, 0, 7)
+
+            struct = np.ones((3, 3), dtype=bool)
+            m = self._current_mask.astype(bool)
+            eroded_2 = binary_erosion(m, structure=struct, iterations=2)
+            eroded_1 = binary_erosion(m, structure=struct, iterations=1)
+            dilated_1 = binary_dilation(m, structure=struct, iterations=1)
+            dilated_2 = binary_dilation(m, structure=struct, iterations=2)
+
+            new_mask = self._current_mask.copy()
+            for i in range(8):
+                act = int(action[i])
+                sector_pixels = (sectors == i)
+                if act == 0:
+                    new_mask[sector_pixels] = eroded_2[sector_pixels]
+                elif act == 1:
+                    new_mask[sector_pixels] = eroded_1[sector_pixels]
+                elif act == 2:
+                    pass  # 유지
+                elif act == 3:
+                    new_mask[sector_pixels] = dilated_1[sector_pixels]
+                elif act == 4:
+                    new_mask[sector_pixels] = dilated_2[sector_pixels]
+
+            # ── 섹터 경계 아티팩트 완화: closing 1회로 불연속 패치 제거 ──
+            new_mask_bool = new_mask.astype(bool)
+            new_mask_bool = binary_dilation(new_mask_bool, structure=struct, iterations=1)
+            new_mask_bool = binary_erosion(new_mask_bool, structure=struct, iterations=1)
+            new_mask = new_mask_bool.astype(np.float32)
+
+            num_non_keep = sum([1 for a in action if int(a) != 2])
+            step_cost = num_non_keep * (self.step_penalty / 8.0)
+            is_keep_and_good = (num_non_keep == 0 and prev_dsc >= 0.85)
+        else:
+            # 기존 전역 보정
+            new_mask = _apply_action(self._current_mask, int(action))
+            step_cost = self.step_penalty if int(action) != 2 else 0.0
+            is_keep_and_good = (int(action) == 2 and prev_dsc >= 0.85)
+
         new_dsc = _dice(new_mask, self._current_gt)
 
-        # ── 보상: DSC 향상량 + 비대칭 패널티 ────────────────────
+        # ── 보상: DSC 향상량 중심 ────────────────
         delta_dsc = new_dsc - prev_dsc
-        reward = delta_dsc * 10.0
-        # 악화 시 패널티 2배 (asymmetric reward)
+        reward = delta_dsc * 20.0  # DSC 향상에 대한 보상 강화 (기존 10.0 -> 20.0)
+
+        # 악화 시 패널티 2배 (과도한 수동성 방지)
         if delta_dsc < 0:
             reward *= 2.0
-        # 이미 좋은 마스크에서 유지 선택 시 소액 보상
-        if int(action) == 2 and prev_dsc >= 0.85:
-            reward += 0.005
-        elif int(action) != 2:
-            reward -= self.step_penalty
+
+        # 유지 보너스: 이미 좋은 마스크에서 유지 시 보상
+        if is_keep_and_good:
+            reward += 0.02
+        else:
+            reward -= step_cost
 
         self._current_mask = new_mask
         self._step_count += 1
