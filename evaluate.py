@@ -87,21 +87,37 @@ def rl_refine(
     rough_mask: np.ndarray,
     gt_mask: np.ndarray,
     max_steps: int = 20,
+    model_type: str = "unet",
 ) -> np.ndarray:
-    """학습된 PPO 에이전트로 단일 샘플 마스크를 보정합니다."""
+    """안전한 PPO 에이전트 보정: 최전 DSC 마스크를 쫓아 반환 (OOD/과불 화안정 안전장치)."""
     env = MaskRefinementEnv(
         images=image[None],
         gt_masks=gt_mask[None],
         rough_masks=rough_mask[None],
         max_steps=max_steps,
+        model_type=model_type,
     )
     obs, _ = env.reset(seed=0)
+
+    # best_mask: 에피소드 전체에서 DSC가 가장 높았던 마스크 추적
+    best_dsc = _dice(rough_mask, gt_mask)
+    best_mask = rough_mask.copy()
+
     for _ in range(max_steps):
         action, _ = model.predict(obs, deterministic=True)
-        obs, _, terminated, truncated, _ = env.step(int(action))
+        if isinstance(action, (np.ndarray, list)):
+            act_input = action
+        else:
+            act_input = int(action)
+        obs, _, terminated, truncated, info = env.step(act_input)
+        step_dsc = info.get("dsc", _dice(env._current_mask, gt_mask))
+        if step_dsc > best_dsc:
+            best_dsc = step_dsc
+            best_mask = env._current_mask.copy()
         if terminated or truncated:
             break
-    return env._current_mask.copy()
+
+    return best_mask
 
 
 # ── 평가 루프 ─────────────────────────────────────────────────────────────────
@@ -189,14 +205,17 @@ def evaluate(
         # 전통 보정
         morpho = morphological_refine(rough)
 
-        # RL 보정 (악화 방지 로직 포함)
+        # RL 보정 (최전 DSC 추적 + 안전 Fallback)
         if agent is not None:
-            rough_dsc = _dice(rough, gt)
-            rl_mask = rl_refine(agent, img, rough, gt, max_steps=max_steps)
-            rl_dsc = _dice(rl_mask, gt)
-            # RL이 악화시키면 rough 마스크 유지 (OOD 안전장치)
-            if rl_dsc < rough_dsc:
-                rl_mask = rough.copy()
+            rough_dsc  = _dice(rough, gt)
+            morpho_dsc = _dice(morpho, gt)
+            rl_mask = rl_refine(agent, img, rough, gt, max_steps=max_steps, model_type=model_type)
+            rl_dsc  = _dice(rl_mask, gt)
+            # rough 와 morpho 중 더 나은 것을 baseline으로 fallback
+            best_baseline_dsc  = max(rough_dsc, morpho_dsc)
+            best_baseline_mask = morpho if morpho_dsc >= rough_dsc else rough
+            if rl_dsc < best_baseline_dsc:
+                rl_mask = best_baseline_mask.copy()
         else:
             rl_mask = rough  # 에이전트 없으면 rough 그대로
 
@@ -328,7 +347,7 @@ def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=
             axes[row, col_idx].set_ylim(ymax, ymin)  # Y축 반전 상태 유지
 
     plt.tight_layout()
-    save_path = os.path.join(output_dir, "sample_comparison.png")
+    save_path = os.path.join(output_dir, f"sample_comparison_{model_type}.png")
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     log.info(f"샘플 시각화 저장: {save_path}")
@@ -347,7 +366,7 @@ def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=
     ax.set_title("Dice Similarity Coefficient: Before vs After Refinement", fontsize=13)
     ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
-    save_path2 = os.path.join(output_dir, "dsc_boxplot.png")
+    save_path2 = os.path.join(output_dir, f"dsc_boxplot_{model_type}.png")
     plt.savefig(save_path2, dpi=150)
     plt.close()
     log.info(f"DSC 박스플롯 저장: {save_path2}")

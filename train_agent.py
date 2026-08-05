@@ -135,9 +135,9 @@ def load_real_data(
 
     rng = np.random.default_rng(noise_seed)
 
-    # 1. 합성 노이즈 마스크 생성 (SegResNet용: 약한 노이즈)
+    # 1. 합성 노이즈 마스크 생성 (평가와 동일한 노이즈 세기 적용)
     from src.data.brats2020_dataset import make_noisy_mask
-    morph_px = 3 if model_type == "segresnet" else 5  # SegResNet은 경계 오류가 작으므로 약한 노이즈
+    morph_px = 5  # train/eval 동일: max_morph_px=5 (분포 일치)
     log.info(f"학습 데이터에 대한 합성 노이즈 마스크 생성 중... (max_morph_px={morph_px})")
     synthetic_roughs = np.stack(
         [make_noisy_mask(gt, rng, max_morph_px=morph_px) for gt in gts], axis=0
@@ -176,18 +176,18 @@ def load_real_data(
         actual_roughs = np.concatenate(preds, axis=0)
         log.info(f"실제 모델 예측 마스크 생성 완료 (개수: {len(actual_roughs)})")
 
-        # 데이터 믹스업: 실제 예측값 70% + 합성 노이즈 30%
-        # → 실제 예측을 2회 반복 + 합성 1회 = 약 67:33 비율
-        imgs = np.concatenate([imgs, imgs, imgs], axis=0)
-        gts = np.concatenate([gts, gts, gts], axis=0)
-        roughs = np.concatenate([actual_roughs, actual_roughs, synthetic_roughs], axis=0)
+        # 데이터 믹스업: 실제 예측값 50% + 합성 노이즈 50%
+        # → 실제 예측 1회 + 합성 1회 = 1:1 비율 (일반화 향상을 위해 합성 비중 증가)
+        imgs = np.concatenate([imgs, imgs], axis=0)
+        gts = np.concatenate([gts, gts], axis=0)
+        roughs = np.concatenate([actual_roughs, synthetic_roughs], axis=0)
         
         # 순열(permutation) 믹스
         perm = rng.permutation(len(imgs))
         imgs = imgs[perm]
         gts = gts[perm]
         roughs = roughs[perm]
-        log.info(f"실제 예측 70% + 합성 노이즈 30% 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
+        log.info(f"실제 예측 50% + 합성 노이즈 50% 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
     else:
         roughs = synthetic_roughs
 
@@ -198,7 +198,7 @@ def load_real_data(
 # VecEnv 빌더
 # ──────────────────────────────────────────────
 
-def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penalty=0.01):
+def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penalty=0.01, model_type="unet"):
     """MaskRefinementEnv 팩토리 함수 반환."""
     def _init():
         return MaskRefinementEnv(
@@ -208,6 +208,7 @@ def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penal
             max_steps=max_steps,
             target_dsc=target_dsc,
             step_penalty=step_penalty,
+            model_type=model_type,
         )
     return _init
 
@@ -228,8 +229,8 @@ def train_agent(
     model_type:          str   = "segresnet",
     # RL 환경
     max_steps:           int   = 30,          # 20 → 30
-    target_dsc:          float = 0.95,         # 0.90 → 0.95
-    step_penalty:        float = 0.01,
+    target_dsc:          float = 0.88,        # 0.95 → 0.88: SegResNet rough DSC≈0.85 기준 현실적 목표
+    step_penalty:        float = 0.005,       # 0.01 → 0.005: 탐색 억제 완화
     # PPO 하이퍼파라미터
     total_timesteps:     int   = 300_000,      # 200K → 300K (5-class 행동 공간 확장 대응)
     n_envs:              int   = 4,
@@ -283,11 +284,11 @@ def train_agent(
     val_img, val_gt, val_rough = images[split:],  gt_masks[split:],  rough_masks[split:]
 
     # ── VecEnv 생성 ─────────────────────────────────────────
-    train_env_fn = make_env_fn(tr_img,  tr_gt,  tr_rough,  max_steps, target_dsc, step_penalty)
-    val_env_fn   = make_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc, step_penalty)
+    train_env_fn = make_env_fn(tr_img,  tr_gt,  tr_rough,  max_steps, target_dsc, step_penalty, model_type=model_type)
+    val_env_fn   = make_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc, step_penalty, model_type=model_type)
 
     # Monitor wrapper 적용 팩토리
-    def make_monitored_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penalty):
+    def make_monitored_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penalty, model_type):
         def _init():
             env = MaskRefinementEnv(
                 images=images,
@@ -296,12 +297,13 @@ def train_agent(
                 max_steps=max_steps,
                 target_dsc=target_dsc,
                 step_penalty=step_penalty,
+                model_type=model_type,
             )
             return Monitor(env)
         return _init
 
-    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, max_steps, target_dsc, step_penalty), n_envs=n_envs)
-    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc, step_penalty)])
+    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, max_steps, target_dsc, step_penalty, model_type), n_envs=n_envs)
+    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc, step_penalty, model_type)])
 
     # ── PPO 에이전트 ─────────────────────────────────────────
     # TensorBoard 설치 여부 확인
