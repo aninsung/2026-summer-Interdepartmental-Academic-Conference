@@ -10,7 +10,7 @@
 ## 🏗️ Overall Architecture
 
 <p align="center">
-  <img src="overview.png" width="1000"/>
+  <img src="view.png" width="1000"/>
 </p>
 
 <p align="center">
