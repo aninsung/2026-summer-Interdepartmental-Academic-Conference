@@ -135,7 +135,7 @@ def evaluate(
 
     try:
         dataset = BraTS2020Dataset(
-            root_dir=r"src/data/archive/BraTS2021_Training_Data",
+            root_dir=r"src/data/archive",
             modality="t1ce",
             target_size=128,
             max_patients=num_eval,
@@ -146,7 +146,7 @@ def evaluate(
     except Exception as e:
         log.warning(f"데이터 로드 실패 ({e}). 학습 데이터 폴더에서 평가용 데이터를 로드합니다.")
         dataset = BraTS2020Dataset(
-            root_dir=r"src/data/archive/BraTS2021_Training_Data",
+            root_dir=r"src/data/archive",
             modality="t1ce",
             target_size=128,
             max_patients=num_eval,
@@ -356,8 +356,15 @@ def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=
     fig, ax = plt.subplots(figsize=(8, 5))
     data = [results[k]["dsc"] for k in ["rough", "morpho", "rl"]]
     rough_label = "Rough\n(SegResNet)" if model_type == "segresnet" else "Rough\n(U-Net)"
-    bp = ax.boxplot(data, patch_artist=True, notch=True,
-                    labels=[rough_label, "Morpho\nRefined", "RL\nRefined"])
+    tick_labels = [rough_label, "Morpho\nRefined", "RL\nRefined"]
+    import matplotlib
+    mpl_ver = tuple(int(x) for x in matplotlib.__version__.split(".")[:2])
+    if mpl_ver >= (3, 9):
+        bp = ax.boxplot(data, patch_artist=True, notch=True,
+                        tick_labels=tick_labels)
+    else:
+        bp = ax.boxplot(data, patch_artist=True, notch=True,
+                        labels=tick_labels)
     colors = ["#e74c3c", "#f39c12", "#2ecc71"]
     for patch, color in zip(bp["boxes"], colors):
         patch.set_facecolor(color)

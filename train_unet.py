@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 def train_unet(
     # 데이터 설정
     use_real_data: bool = True,
-    train_root: str = r"src\data\archive\BraTS2021_Training_Data",
+    train_root: str = "src/data/archive",
     val_root:   str = "",  # BraTS2021은 별도 val 폴더 없음 → train 80/20 분할
     modality:   str = "t1ce",
     target_size: int = 128,
@@ -173,7 +173,7 @@ if __name__ == "__main__":
     # 데이터 관련
     parser.add_argument("--use_real_data", action="store_true", default=True, help="실제 BraTS NIfTI 데이터 사용 (기본값)")
     parser.add_argument("--train_root", type=str,
-                        default=r"src\data\archive\BraTS2021_Training_Data")
+                        default="src/data/archive")
     parser.add_argument("--val_root",   type=str, default="",
                         help="BraTS2021은 별도 val 폴더 없음. 비워두면 train 80/20 분할.")
     parser.add_argument("--modality",   type=str, default="t1ce", choices=["t1ce","t1","t2","flair"])

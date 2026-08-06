@@ -23,6 +23,7 @@ from typing import Optional
 import numpy as np
 import yaml
 from stable_baselines3.common.callbacks import BaseCallback
+from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.envs.mask_refinement_env import MaskRefinementEnv
@@ -96,6 +97,182 @@ class ProgressCallback(BaseCallback):
         print("-"*70)
         print(f"  학습 완료!  소요 시간: {m}m{s:02d}s  |  총 스텐: {self.num_timesteps:,}")
         print("="*70)
+
+
+# ──────────────────────────────────────────────
+# Stop Motion 콜백 모음
+# ──────────────────────────────────────────────
+
+class DSCTargetStopCallback(BaseCallback):
+    """
+    [Stop #1] DSC 목표 달성 Stop
+    eval 환경에서 측정한 평균 DSC 가 dsc_target 이상이면 학습을 즉시 중단합니다.
+    EvalCallback 이 기록하는 'eval/mean_reward' 대신, 직접 infos 로부터 dsc 를 추적합니다.
+
+    Parameters
+    ----------
+    dsc_target : float
+        이 값 이상의 평균 DSC 가 달성되면 중단 (기본 0.92).
+    check_freq  : int
+        몇 스텝마다 DSC 를 확인할지 (기본 2048).
+    min_episodes : int
+        최소 이 에피소드 수의 데이터가 쌓여야 판단합니다 (기본 10).
+    """
+
+    def __init__(self, dsc_target: float = 0.92, check_freq: int = 2048, min_episodes: int = 10):
+        super().__init__(verbose=0)
+        self.dsc_target   = dsc_target
+        self.check_freq   = check_freq
+        self.min_episodes = min_episodes
+        self._dsc_buffer: deque = deque(maxlen=100)
+        self._last_check  = 0
+
+    def _on_step(self) -> bool:
+        # infos 에서 에피소드 종료 시점의 dsc 수집
+        infos = self.locals.get("infos", [])
+        for info in infos:
+            ep = info.get("episode", {})
+            dsc = info.get("dsc", None)           # MaskRefinementEnv info 키
+            if dsc is not None:
+                self._dsc_buffer.append(dsc)
+            elif "dsc" in ep:                      # Monitor wrapper 경유 시
+                self._dsc_buffer.append(ep["dsc"])
+
+        if self.num_timesteps - self._last_check < self.check_freq:
+            return True
+        self._last_check = self.num_timesteps
+
+        if len(self._dsc_buffer) < self.min_episodes:
+            return True
+
+        mean_dsc = float(np.mean(self._dsc_buffer))
+        if mean_dsc >= self.dsc_target:
+            print()
+            print("★" * 70)
+            print(f"  [Stop #1 · DSC 목표 달성]  평균 DSC={mean_dsc:.4f} ≥ {self.dsc_target}")
+            print(f"  학습을 {self.num_timesteps:,} 스텝에서 중단합니다.")
+            print("★" * 70)
+            return False   # False 반환 → SB3 학습 루프 종료
+        return True
+
+
+class RewardPlateauStopCallback(BaseCallback):
+    """
+    [Stop #2] Reward Plateau Stop
+    최근 window_size 개 에피소드의 평균 리워드가
+    patience 회 연속 개선되지 않으면 학습을 중단합니다.
+
+    Parameters
+    ----------
+    window_size : int
+        이동 평균에 사용할 에피소드 수 (기본 50).
+    min_delta   : float
+        개선으로 인정할 최소 리워드 증분 (기본 0.005).
+    patience    : int
+        허용할 비개선 횟수 (기본 5).  check_freq 마다 1 카운트.
+    check_freq  : int
+        몇 스텝마다 plateau 를 확인할지 (기본 4096).
+    """
+
+    def __init__(
+        self,
+        window_size: int = 50,
+        min_delta:   float = 0.005,
+        patience:    int   = 5,
+        check_freq:  int   = 4096,
+    ):
+        super().__init__(verbose=0)
+        self.window_size  = window_size
+        self.min_delta    = min_delta
+        self.patience     = patience
+        self.check_freq   = check_freq
+        self._rew_buffer: deque = deque(maxlen=window_size)
+        self._best_mean   = -np.inf
+        self._no_improve  = 0
+        self._last_check  = 0
+
+    def _on_step(self) -> bool:
+        # 에피소드 종료 시 리워드 수집
+        infos = self.locals.get("infos", [])
+        for info in infos:
+            ep = info.get("episode", {})
+            if "r" in ep:
+                self._rew_buffer.append(float(ep["r"]))
+
+        if self.num_timesteps - self._last_check < self.check_freq:
+            return True
+        self._last_check = self.num_timesteps
+
+        if len(self._rew_buffer) < self.window_size:
+            return True
+
+        mean_rew = float(np.mean(self._rew_buffer))
+        if mean_rew > self._best_mean + self.min_delta:
+            self._best_mean  = mean_rew
+            self._no_improve = 0
+        else:
+            self._no_improve += 1
+            print(
+                f"  [Stop #2 · Plateau] 개선 없음 {self._no_improve}/{self.patience}"
+                f"  (mean_rew={mean_rew:.4f}, best={self._best_mean:.4f})"
+            )
+            if self._no_improve >= self.patience:
+                print()
+                print("▲" * 70)
+                print(f"  [Stop #2 · Reward Plateau]  {self.patience} 회 연속 개선 없음")
+                print(f"  학습을 {self.num_timesteps:,} 스텝에서 중단합니다.")
+                print("▲" * 70)
+                return False
+        return True
+
+
+class MilestoneSnapshotCallback(BaseCallback):
+    """
+    [Stop #3] Milestone Snapshot (멈추지 않고 스냅샷 저장)
+    milestones 에 지정한 타임스텝 비율(0~1)에 도달할 때마다
+    모델을 자동으로 저장합니다.
+    예) milestones=[0.25, 0.5, 0.75] → 25 / 50 / 75 % 지점에서 저장.
+
+    Parameters
+    ----------
+    total_timesteps : int
+        전체 학습 스텝.
+    save_dir        : str
+        스냅샷을 저장할 디렉터리.
+    milestones      : list[float]
+        저장 비율 목록 (기본 [0.25, 0.50, 0.75]).
+    """
+
+    def __init__(
+        self,
+        total_timesteps: int,
+        save_dir:        str,
+        milestones:      list = None,
+    ):
+        super().__init__(verbose=0)
+        self.total_timesteps = total_timesteps
+        self.save_dir        = save_dir
+        self.milestones      = milestones if milestones is not None else [0.25, 0.50, 0.75]
+        # 저장 완료된 마일스톤 추적 (인덱스)
+        self._triggered: set = set()
+
+    def _on_step(self) -> bool:
+        progress = self.num_timesteps / self.total_timesteps
+        for i, ms in enumerate(self.milestones):
+            if i in self._triggered:
+                continue
+            if progress >= ms:
+                self._triggered.add(i)
+                os.makedirs(self.save_dir, exist_ok=True)
+                snap_name = f"snapshot_{int(ms*100):03d}pct_{self.num_timesteps}"
+                snap_path = os.path.join(self.save_dir, snap_name)
+                self.model.save(snap_path)
+                print()
+                print("◆" * 70)
+                print(f"  [Milestone {int(ms*100)}%]  스냅샷 저장 → {snap_path}.zip")
+                print("◆" * 70)
+        return True
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -220,7 +397,7 @@ def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penal
 def train_agent(
     # 데이터
     use_real_data:       bool  = True,
-    train_root:          str   = r"src\data\archive\BraTS2021_Training_Data",
+    train_root:          str   = "src/data/archive",
     modality:            str   = "t1ce",
     image_size:          int   = 128,
     max_train_patients:  Optional[int] = None,
@@ -246,6 +423,18 @@ def train_agent(
     # 저장
     save_path:           str   = "checkpoints/ppo_refiner",
     log_path:            str   = "logs/ppo",
+    # ── Stop Motion 설정 ──────────────────────────────────────
+    # Stop #1: DSC 목표 달성 시 조기 종료
+    stop_dsc_target:     float = 0.92,        # 이 DSC 달성 시 즉시 중단 (0이면 비활성)
+    stop_dsc_check_freq: int   = 2048,        # DSC 확인 주기 (스텝)
+    # Stop #2: Reward Plateau 감지 시 조기 종료
+    stop_plateau:        bool  = True,        # Plateau Stop 활성화 여부
+    plateau_window:      int   = 50,          # 이동 평균 에피소드 수
+    plateau_min_delta:   float = 0.005,       # 최소 개선 임계값
+    plateau_patience:    int   = 5,           # 비개선 허용 횟수
+    plateau_check_freq:  int   = 4096,        # Plateau 확인 주기 (스텝)
+    # Stop #3: Milestone Snapshot (중단 없이 자동 저장)
+    milestone_ratios:    list  = None,        # 저장 비율 목록 (기본 [0.25, 0.5, 0.75])
 ) -> None:
     from stable_baselines3 import PPO
     from stable_baselines3.common.env_util import make_vec_env
@@ -357,6 +546,48 @@ def train_agent(
         print_freq=max(2048, n_steps * n_envs),  # 1 iteration = n_steps * n_envs
     )
 
+    # ── Stop Motion 콜백 ────────────────────────────────────
+    stop_callbacks = []
+
+    # Stop #1: DSC 목표 달성 Stop
+    if stop_dsc_target > 0:
+        dsc_stop_cb = DSCTargetStopCallback(
+            dsc_target=stop_dsc_target,
+            check_freq=stop_dsc_check_freq,
+        )
+        stop_callbacks.append(dsc_stop_cb)
+        log.info(f"  [Stop #1] DSC 목표 달성 Stop 활성화: dsc_target={stop_dsc_target}")
+    else:
+        log.info("  [Stop #1] DSC 목표 달성 Stop 비활성화 (stop_dsc_target=0)")
+
+    # Stop #2: Reward Plateau Stop
+    if stop_plateau:
+        plateau_cb = RewardPlateauStopCallback(
+            window_size=plateau_window,
+            min_delta=plateau_min_delta,
+            patience=plateau_patience,
+            check_freq=plateau_check_freq,
+        )
+        stop_callbacks.append(plateau_cb)
+        log.info(
+            f"  [Stop #2] Plateau Stop 활성화: "
+            f"window={plateau_window}, patience={plateau_patience}, "
+            f"min_delta={plateau_min_delta}"
+        )
+    else:
+        log.info("  [Stop #2] Plateau Stop 비활성화")
+
+    # Stop #3: Milestone Snapshot
+    snap_dir = os.path.join(ckpt_dir, "snapshots")
+    milestone_cb = MilestoneSnapshotCallback(
+        total_timesteps=total_timesteps,
+        save_dir=snap_dir,
+        milestones=milestone_ratios,
+    )
+    stop_callbacks.append(milestone_cb)
+    ratios = milestone_ratios if milestone_ratios is not None else [0.25, 0.50, 0.75]
+    log.info(f"  [Stop #3] Milestone Snapshot 활성화: {[f'{int(r*100)}%' for r in ratios]}")
+
     log.info(f"PPO 학습 시작: total_timesteps={total_timesteps:,}  n_envs={n_envs}")
     log.info("  >> Ctrl+C 로 언제든 중단 가능 (현재까지 학습된 모델 자동 저장)")
 
@@ -373,7 +604,7 @@ def train_agent(
     try:
         model.learn(
             total_timesteps=total_timesteps,
-            callback=[eval_cb, ckpt_cb, progress_cb],
+            callback=[eval_cb, ckpt_cb, progress_cb] + stop_callbacks,
             reset_num_timesteps=True,
         )
     except KeyboardInterrupt:
@@ -407,7 +638,7 @@ def main():
     # 데이터
     parser.add_argument("--use_real_data",  action="store_true", default=True)
     parser.add_argument("--train_root",     type=str,
-                        default=r"src\data\archive\BraTS2021_Training_Data")
+                        default="src/data/archive")
     parser.add_argument("--modality",       type=str, default="t1ce")
     parser.add_argument("--image_size",     type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None)
@@ -435,6 +666,23 @@ def main():
     # 저장
     parser.add_argument("--save_path",  type=str, default="checkpoints/ppo_refiner")
     parser.add_argument("--log_path",   type=str, default="logs/ppo")
+    # ── Stop Motion ───────────────────────────────────────────────
+    # Stop #1: DSC 목표 달성 시 조기 종료
+    parser.add_argument("--stop_dsc_target",     type=float, default=0.92,
+                        help="평균 DSC 이 이 값 이상이면 학습 없다. 0으로 설정 시 비활성")
+    parser.add_argument("--stop_dsc_check_freq", type=int,   default=2048,
+                        help="DSC 확인 주기 (스텝)")
+    # Stop #2: Reward Plateau 감지 시 조기 종료
+    parser.add_argument("--no_plateau_stop",     action="store_true", default=False,
+                        help="Plateau Stop 비활성화 플래그")
+    parser.add_argument("--plateau_window",      type=int,   default=50)
+    parser.add_argument("--plateau_min_delta",   type=float, default=0.005)
+    parser.add_argument("--plateau_patience",    type=int,   default=5)
+    parser.add_argument("--plateau_check_freq",  type=int,   default=4096)
+    # Stop #3: Milestone Snapshot
+    parser.add_argument("--milestone_ratios",    type=float, nargs="+",
+                        default=None,
+                        help="마일스톤 저장 비율 (0~1). 예: 0.25 0.5 0.75")
 
     args = parser.parse_args()
 
@@ -470,6 +718,15 @@ def main():
         "net_arch":            "net_arch",
         "save_path":           "save_path",
         "log_path":            "log_path",
+        # Stop Motion
+        "stop_dsc_target":     "stop_dsc_target",
+        "stop_dsc_check_freq": "stop_dsc_check_freq",
+        "stop_plateau":        "stop_plateau",
+        "plateau_window":      "plateau_window",
+        "plateau_min_delta":   "plateau_min_delta",
+        "plateau_patience":    "plateau_patience",
+        "plateau_check_freq":  "plateau_check_freq",
+        "milestone_ratios":    "milestone_ratios",
     }
 
     # 최종 파라미터: YAML 기본값 → CLI 인자로 override

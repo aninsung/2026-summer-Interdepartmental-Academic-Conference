@@ -10,7 +10,7 @@ use_real_data: true
 # BraTS2021 데이터 경로 (압축 해제된 폴더)
 # BraTS2021은 train/val 분리가 없으므로 동일 경로를 사용하고
 # train_agent.py 에서 80/20 분할합니다.
-train_root: "src/data/archive/BraTS2021_Training_Data"
+train_root: "src/data/archive"
 
 # MRI 모달리티: t1ce (Gadolinium 조영 T1, 종양 대비 가장 선명)
 modality: "t1ce"

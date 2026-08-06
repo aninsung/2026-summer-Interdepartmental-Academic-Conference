@@ -82,7 +82,7 @@ def generate_part1():
     gs = gridspec.GridSpec(2, 4, figure=fig, left=0.04, right=0.96, top=0.85, bottom=0.08, wspace=0.25, hspace=0.25)
     
     # 실제 BraTS 2021 NIfTI 데이터 로드
-    data_dir = r"src/data/archive/BraTS2021_Training_Data/BraTS2021_00000"
+    data_dir = r"src/data/archive/BraTS2021_00000"
     t1ce_path = os.path.join(data_dir, "BraTS2021_00000_t1ce.nii.gz")
     seg_path = os.path.join(data_dir, "BraTS2021_00000_seg.nii.gz")
     
@@ -188,7 +188,7 @@ def generate_part2():
     gs = gridspec.GridSpec(2, 4, figure=fig, left=0.04, right=0.96, top=0.85, bottom=0.08, wspace=0.2, hspace=0.25)
     
     dataset = BraTS2020Dataset(
-        root_dir=r"src/data/archive/BraTS2021_Training_Data",
+        root_dir=r"src/data/archive",
         modality="t1ce",
         target_size=128,
         max_patients=5,
@@ -436,7 +436,7 @@ def generate_part4():
     gs = gridspec.GridSpec(2, 4, figure=fig, left=0.04, right=0.96, top=0.85, bottom=0.08, wspace=0.22, hspace=0.25)
     
     dataset = BraTS2020Dataset(
-        root_dir=r"src/data/archive/BraTS2021_Training_Data",
+        root_dir=r"src/data/archive",
         modality="t1ce",
         target_size=128,
         max_patients=5,

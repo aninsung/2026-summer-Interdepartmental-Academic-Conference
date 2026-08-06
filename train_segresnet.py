@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 def train_segresnet(
     # 데이터 설정
     use_real_data: bool = True,
-    train_root: str = r"src\data\archive\BraTS2021_Training_Data",
+    train_root: str = "src/data/archive",
     val_root: str = "",  # BraTS2021은 별도 val 폴더 없음 → train 80/20 분할
     modality: str = "t1ce",
     target_size: int = 128,
@@ -130,14 +130,20 @@ def train_segresnet(
 
         return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
 
+    n_workers = min(8, os.cpu_count() or 4)
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True,
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=n_workers, pin_memory=True, persistent_workers=True,
+        prefetch_factor=4,
         collate_fn=augment_batch,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True,
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=n_workers, pin_memory=True, persistent_workers=True,
+        prefetch_factor=4,
         collate_fn=augment_batch,
     )
+    log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}, prefetch_factor=4")
 
     # ── 모델 ────────────────────────────────────────────────
     model = build_segresnet(
@@ -158,6 +164,11 @@ def train_segresnet(
         criterion = DiceLoss()
         log.info("손실 함수: DiceLoss")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    # ── AMP (자동 혼합 정밀도) ──────────────────────────────
+    use_amp = (device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    log.info(f"AMP(FP16 혼합 정밀도): {'✅ 활성화' if use_amp else '❌ 비활성화 (CPU)'})")
 
     best_val_dsc = 0.0
     os.makedirs(
@@ -189,13 +200,15 @@ def train_segresnet(
             pbar = train_loader
 
         for step, batch in enumerate(pbar, 1):
-            img = batch["image"].to(device)
-            gt = batch["gt_mask"].to(device)
-            optimizer.zero_grad()
-            pred = model(img)
-            loss = criterion(pred, gt)
-            loss.backward()
-            optimizer.step()
+            img = batch["image"].to(device, non_blocking=True)
+            gt  = batch["gt_mask"].to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                pred = model(img)
+                loss = criterion(pred, gt)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             train_loss += loss.item()
             if USE_TQDM:
                 pbar.set_postfix({"loss": f"{train_loss / step:.4f}"})
@@ -223,9 +236,10 @@ def train_segresnet(
                 else val_loader
             )
             for batch in val_iter:
-                img = batch["image"].to(device)
-                gt = batch["gt_mask"].to(device)
-                pred = torch.sigmoid(model(img))
+                img = batch["image"].to(device, non_blocking=True)
+                gt  = batch["gt_mask"].to(device, non_blocking=True)
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    pred = torch.sigmoid(model(img))
                 pred_bin = (pred > 0.5).float()
                 val_dsc += compute_dice(pred_bin, gt)
             if USE_TQDM:
@@ -256,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--train_root",
         type=str,
-        default=r"src\data\archive\BraTS2021_Training_Data",
+        default="src/data/archive",
     )
     parser.add_argument(
         "--val_root",
@@ -289,7 +303,7 @@ if __name__ == "__main__":
     )
     # 학습 관련
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--save_path", type=str, default="checkpoints/segresnet_best.pt")
     parser.add_argument("--device", type=str, default="auto")
