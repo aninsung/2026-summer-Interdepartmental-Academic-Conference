@@ -334,7 +334,7 @@ class BraTS2020Dataset(Dataset):
 # ──────────────────────────────────────────────
 
 # BraTS2021 기본 데이터 경로
-_DATA_DIR = Path(__file__).parent / "archive" / "BraTS2021_Training_Data"
+_DATA_DIR = Path(__file__).parent / "archive"
 DEFAULT_TRAIN_ROOT = str(_DATA_DIR)
 DEFAULT_VAL_ROOT   = str(_DATA_DIR)  # BraTS2021은 train/val 분리가 없으므로 동일 경로 사용
 

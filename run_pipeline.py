@@ -26,7 +26,10 @@ def main():
     parser.add_argument("--config", type=str, default="configs/ppo_brats.yaml", help="Agent 학습용 YAML 설정 파일 경로")
     parser.add_argument("--model_type", type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus"],
                         help="세그멘테이션 백본 모델 (기본값: segresnet)")
-    
+    parser.add_argument("--batch_size", type=int, default=None, help="배치 크기 (기본값: 각 스크립트 기본값 사용)")
+    parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한")
+    parser.add_argument("--epochs", type=int, default=None, help="학습 에폭 수")
+
     args = parser.parse_args()
 
     python_exec = sys.executable
@@ -35,14 +38,23 @@ def main():
 
     # 1. Step 1: SegResNet / U-Net / UNet++ 학습
     if not args.skip_segresnet:
+        # 공통 학습 인자 구성
+        extra_args = []
+        if args.batch_size is not None:
+            extra_args += ["--batch_size", str(args.batch_size)]
+        if args.max_train_patients is not None:
+            extra_args += ["--max_train_patients", str(args.max_train_patients)]
+        if args.epochs is not None:
+            extra_args += ["--epochs", str(args.epochs)]
+
         if args.model_type == "segresnet":
-            cmd_segresnet = [python_exec, "train_segresnet.py"]
+            cmd_segresnet = [python_exec, "train_segresnet.py"] + extra_args
             run_command(cmd_segresnet, "Step 1: SegResNet (초기 모델) 학습")
         elif args.model_type == "unetplusplus":
-            cmd_unetplusplus = [python_exec, "train_unetplusplus.py"]
+            cmd_unetplusplus = [python_exec, "train_unetplusplus.py"] + extra_args
             run_command(cmd_unetplusplus, "Step 1: UNet++ (초기 모델) 학습")
         else:
-            cmd_unet = [python_exec, "train_unet.py"]
+            cmd_unet = [python_exec, "train_unet.py"] + extra_args
             run_command(cmd_unet, "Step 1: U-Net (초기 모델) 학습")
     else:
         log.info("⏭️  Step 1: 초기 모델 학습 단계를 건너뜁니다.\n")
