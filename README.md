@@ -64,32 +64,8 @@ The refined mask is finally evaluated using Dice, HD95, IoU, and ASSD metrics.
 ---
 
 ## 📊 실험 및 성능 비교 결과
-
-> [!NOTE]
-> 자세한 비교 데이터 및 원인 분석은 **[results_summary.md](file:///C:/Users/a3426/.gemini/antigravity-ide/brain/5c6215ce-0e82-4cc9-9ea0-b83ecb717783/results_summary.md)**에서 확인하실 수 있습니다.
-
-### 1. 성능 비교 표 (50명, 2,902 슬라이스 기준)
-
-| 백본 모델 (Step 1) | 보정 방법 (Refinement) | DSC (Mean ± Std) ↑ | HD95 (Mean ± Std) ↓ | 성능 변화 (각 Rough 대비) |
-| :--- | :--- | :---: | :---: | :---: |
-| **U-Net** | Rough (기본 예측) | 0.8184 ± 0.2215 | 3.06 ± 6.56 | 기준선 (U-Net Baseline) |
-| (1,251명 사전학습) | Morpho Refined | 0.8205 ± 0.2215 | 1.44 ± 1.17 | DSC 미세 개선, HD95 개선 |
-| | **RL Refined (U-Net 전용)** | **0.8225 ± 0.2220** | **1.41 ± 1.14** | 🎉 **성공 (DSC +0.41%p, HD95 -54%)** |
-| **SegResNet** | Rough (기본 예측) | **0.8193 ± 0.1283** | **2.86 ± 2.50** | 기준선 (SegResNet Baseline) |
-| (1,251명 사전학습) | Morpho Refined | **0.8209 ± 0.1283** | **2.93 ± 2.58** | DSC 미세 개선, HD95 하락 |
-| | **RL Refined (SegResNet 전용)** | **0.8260 ± 0.1269** | **2.76 ± 2.55** | 🎉 **성공 (DSC +0.67%p, HD95 -3.5%)** |
-
-### 2. 주요 분석 및 성과
-* **U-Net & SegResNet 모두 RL 보정 성공**:
-  * 각 백본 모델이 생성한 마스크 예측 분포를 직접 RL 에이전트 학습에 결합하여 기존에 발생하던 OOD(Out-of-Distribution) 문제를 완벽히 해결했습니다.
-  * U-Net 전용 RL은 Rough 대비 **HD95 지표를 -54% 수준으로 대폭 단축**했고, SegResNet 전용 RL은 **최고 DSC(0.8260) 및 HD95(2.76px)를 달성**했습니다.
-* **Target DSC 조정을 통한 과보정 방지**:
-  * 조기 종료 타겟 DSC 수준을 기존 0.95에서 현실적인 `0.88`로 조정하여, 에이전트가 과도하게 수축/팽창 동작을 지속해 마스크를 파괴하는 부작용(Over-correction)을 방지했습니다.
-* **형태학적 보정(Morpho) 능가**: 
-  * 두 파이프라인 모두 단순 팽창/수축 필터링 방식(Morpho)보다 지능적 경계 미세 조정(RL Refined)을 수행했을 때 성능이 가장 우수함을 보였습니다.
-
 ---
-
+[final_models_report.md]
 ## 📂 Project Structure
 
 ```text
