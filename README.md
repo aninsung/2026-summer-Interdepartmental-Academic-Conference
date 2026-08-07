@@ -65,7 +65,7 @@ The refined mask is finally evaluated using Dice, HD95, IoU, and ASSD metrics.
 
 ## 📊 실험 및 성능 비교 결과
 ---
-[final_models_report.md]
+final_models_report.md
 ## 📂 Project Structure
 
 ```text
