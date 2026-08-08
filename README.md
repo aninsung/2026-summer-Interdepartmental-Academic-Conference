@@ -73,18 +73,21 @@
 📄 **[Technical Report](technical_report.md)**  
 📄 **[Experiments History](EXPERIMENTS.md)**
 
-### 종합 랭킹 및 백본별 성능 비교 (50명 2,902 슬라이스 평가)
-1. 🥇 **UNet 3+ (32ch + BatchNorm) + RL**: **`0.8327 DSC`** (전체 1위 SOTA)
-2. 🥈 **Attention U-Net (MONAI) + RL**: **`0.8297 DSC`** (종합 2위)
-3. 🥉 **UNet++ (MONAI Basic) + RL**: **`0.8292 DSC`** (종합 3위)
-4. ⚡ **SegResNet (MONAI ResNet) + RL**: **`0.8210 DSC`** (Rough `0.8111` ➔ RL `0.8210`, **+0.99%p 향상 / HD95 2.84px**)
-5. 4️⃣ **U-Net + RL**: **`0.8134 DSC`**
+### 종합 랭킹 및 듀얼 SOTA 백본 성능 비교 (50명 2,902 슬라이스 평가)
 
-### 🖼️ SOTA 1위 (UNet 3+ + RL-Refiner) 시각화 샘플
-![UNet 3+ Sample Comparison](results/sample_comparison_unet3plus.png)
+| 순위 | 백본 모델 (+ RL-Refiner) | **DSC (높을수록 좋음 ↑)** | **HD95 (낮을수록 좋음 ↓)** | **표준편차 (안정성)** | SOTA 분류 / 평가 |
+|:---:|:---|:---:|:---:|:---:|:---|
+| 🥇 | **Attention U-Net (MONAI)** 🏆 | **`0.8297`** | **`2.53 px` (1위)** | **`±0.1171` (1위)** | 🏆 **최종 종합 SOTA (HD95 오차 최저, 최고 밸런스)** |
+| 🎯 | **UNet 3+ (32ch + BN)** 🎯 | **`0.8327` (1위)** | `3.46 px` | `±0.1273` | 🎯 **영역 분할 SOTA (Dice 겹침 비율 1위)** |
+| 🥉 | **UNet++ (MONAI Basic)** | `0.8292` | `2.63 px` | `±0.1390` | 🥉 **종합 3위 (고른 성과)** |
+| ⚡ | **SegResNet (MONAI ResNet)** | `0.8210` | `2.84 px` | `±0.1331` | 🎉 **DSC +0.99%p 향상, HD95 17% 감소** |
+| 4️⃣ | **U-Net (커스텀)** | `0.8134` | `2.03 px` | `±0.1929` | 기준선 |
 
-### 📈 SOTA 1위 (UNet 3+ + RL-Refiner) 성능 분포 Boxplot
-![UNet 3+ Boxplot](results/dsc_boxplot_unet3plus.png)
+### 🖼️ 최종 종합 SOTA (Attention U-Net + RL-Refiner) 시각화 샘플
+![Attention U-Net Sample Comparison](results/sample_comparison_attention_unet.png)
+
+### 📈 최종 종합 SOTA (Attention U-Net + RL-Refiner) 성능 분포 Boxplot
+![Attention U-Net Boxplot](results/dsc_boxplot_attention_unet.png)
 
 ---
 
