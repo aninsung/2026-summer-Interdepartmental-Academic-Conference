@@ -1,0 +1,49 @@
+# PPO 에이전트 학습 설정 — UNet 3+ 백본
+# 사용 예시: python train_agent.py --config configs/ppo_brats_unet3plus.yaml --model_type unet3plus
+
+# ──────────────────────────────────────────────
+# 데이터 설정
+# ──────────────────────────────────────────────
+use_real_data: true
+
+# BraTS2021 데이터 경로 (프로젝트 루트 기준 상대 경로)
+train_root: "src/data/archive"
+
+modality: "t1ce"
+image_size: 128
+
+# Step 1 학습과 동일한 환자 수를 사용해 rough mask 분포를 일치시킵니다.
+max_train_patients: 150
+
+num_samples: 300
+
+# ──────────────────────────────────────────────
+# RL 환경 설정
+# ──────────────────────────────────────────────
+max_steps: 30
+target_dsc: 0.88
+step_penalty: 0.005
+
+# ──────────────────────────────────────────────
+# PPO 하이퍼파라미터
+# ──────────────────────────────────────────────
+total_timesteps: 500000
+n_envs: 4
+n_steps: 512
+batch_size: 64
+n_epochs: 4
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.02
+learning_rate: 0.0003
+
+net_arch: [256, 256]
+
+# ──────────────────────────────────────────────
+# 저장 경로
+# ──────────────────────────────────────────────
+save_path: "checkpoints/ppo_refiner_unet3plus"
+log_path: "logs/ppo_unet3plus"
+unet_checkpoint: "checkpoints/unet3plus_best.pt"
+model_type: "unet3plus"
