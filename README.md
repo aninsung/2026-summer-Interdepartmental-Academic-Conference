@@ -74,10 +74,10 @@
 📄 **[Experiments History](EXPERIMENTS.md)**
 
 ### 종합 랭킹 및 백본별 성능 비교 (50명 2,902 슬라이스 평가)
-1. 🥇 **UNet 3+ (32ch + BatchNorm) + RL**: **`0.8327 DSC`** (RL 보정 파이프라인 1위 SOTA)
+1. 🥇 **UNet 3+ (32ch + BatchNorm) + RL**: **`0.8327 DSC`** (전체 1위 SOTA)
 2. 🥈 **Attention U-Net (MONAI) + RL**: **`0.8297 DSC`** (종합 2위)
 3. 🥉 **UNet++ (MONAI Basic) + RL**: **`0.8292 DSC`** (종합 3위)
-4. 💎 **SegResNet (MONAI ResNet)**: Rough Mask **`0.8491 DSC`** (단독 초기 백본 1위) / RL Refined **`0.7268 DSC`**
+4. ⚡ **SegResNet (MONAI ResNet) + RL**: **`0.8210 DSC`** (Rough `0.8111` ➔ RL `0.8210`, **+0.99%p 향상 / HD95 2.84px**)
 5. 4️⃣ **U-Net + RL**: **`0.8134 DSC`**
 
 ### 🖼️ SOTA 1위 (UNet 3+ + RL-Refiner) 시각화 샘플
