@@ -35,27 +35,41 @@
 
 ## 📈 2. 모델별 성능 분포 시각화 (DSC Boxplots)
 
-각 모델별로 전체 슬라이스의 DSC 성능 분포가 보정 전/후 어떻게 달라졌는지 보여주는 결과 파일 목록입니다.
+각 모델별로 전체 슬라이스의 DSC 성능 분포가 보정 전/후 어떻게 달라졌는지 보여주는 결과 파일 시각화입니다.
 
-* `results/dsc_boxplot_unet3plus.png` (UNet 3+ 박스플롯)
-* `results/dsc_boxplot_attention_unet.png` (Attention U-Net 박스플롯)
-* `results/dsc_boxplot_unetplusplus.png` (UNet++ 박스플롯)
-* `results/dsc_boxplot_unet.png` (U-Net 박스플롯)
+### 🥇 UNet 3+ (SOTA 1위) Boxplot
+![UNet 3+ Boxplot](results/dsc_boxplot_unet3plus.png)
+
+### 🥈 Attention U-Net Boxplot
+![Attention U-Net Boxplot](results/dsc_boxplot_attention_unet.png)
+
+### 🥉 UNet++ Boxplot
+![UNet++ Boxplot](results/dsc_boxplot_unetplusplus.png)
+
+### 4️⃣ U-Net Boxplot
+![U-Net Boxplot](results/dsc_boxplot_unet.png)
 
 ---
 
 ## 🖼️ 3. 정성적 시각화 비교 (Sample Comparison)
 
-최신 시각화 개선사항(가로형 전치 와이드 뷰, 18pt/15pt 확대 폰트 레이아웃)이 적용된 샘플 비교 이미지 목록입니다.
+최신 시각화 개선사항(가로형 전치 와이드 뷰, 18pt/15pt 확대 폰트 레이아웃)이 적용된 샘플 비교 이미지입니다.
 
 * **빨간색(Rough)**: 초기 백본이 뭉툭하게 예측한 마스크
 * **주황색(Morpho)**: 형태학적 연산으로 다듬은 마스크
 * **하늘색(RL)**: PPO 에이전트가 픽셀 단위로 미세 조정한 마스크
 
-* `results/sample_comparison_unet3plus.png`
-* `results/sample_comparison_attention_unet.png`
-* `results/sample_comparison_unetplusplus.png`
-* `results/sample_comparison_unet.png`
+### 🥇 UNet 3+ (SOTA 1위) Sample Comparison
+![UNet 3+ Sample Comparison](results/sample_comparison_unet3plus.png)
+
+### 🥈 Attention U-Net Sample Comparison
+![Attention U-Net Sample Comparison](results/sample_comparison_attention_unet.png)
+
+### 🥉 UNet++ Sample Comparison
+![UNet++ Sample Comparison](results/sample_comparison_unetplusplus.png)
+
+### 4️⃣ U-Net Sample Comparison
+![U-Net Sample Comparison](results/sample_comparison_unet.png)
 
 ---
 
