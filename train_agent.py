@@ -331,6 +331,12 @@ def load_real_data(
         elif model_type == "unetplusplus":
             from src.models.unetplusplus import build_unetplusplus
             model = build_unetplusplus().to(device)
+        elif model_type == "unet3plus":
+            from src.models.unet3plus import build_unet3plus
+            model = build_unet3plus(DSV=False).to(device)
+        elif model_type == "attention_unet":
+            from src.models.attention_unet import build_attention_unet
+            model = build_attention_unet().to(device)
         else:
             from src.models.unet import build_unet
             model = build_unet().to(device)
@@ -645,7 +651,7 @@ def main():
     parser.add_argument("--num_samples",    type=int, default=300)
     parser.add_argument("--unet_path",      type=str, default="checkpoints/segresnet_best.pt",
                         help="가중치 파일 경로 (checkpoints/unet_best.pt 또는 checkpoints/segresnet_best.pt)")
-    parser.add_argument("--model_type",     type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus"],
+    parser.add_argument("--model_type",     type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus", "unet++", "unet3plus", "unet3+", "attention_unet", "attunet"],
                         help="세그멘테이션 모델 종류 (기본값: segresnet)")
     # RL 환경
     parser.add_argument("--max_steps",      type=int,   default=30)
@@ -755,15 +761,27 @@ def main():
             else:
                 final_params[fn_key] = default_val
 
+    # unet3+ 와 unet3plus 표준화 및 unet++ 지원
+    if final_params.get("model_type") == "unet3+":
+        final_params["model_type"] = "unet3plus"
+    elif final_params.get("model_type") == "unet++":
+        final_params["model_type"] = "unetplusplus"
+    elif final_params.get("model_type") == "attunet":
+        final_params["model_type"] = "attention_unet"
+
     # model_type에 따라 기본 unet_path 및 save_path 자동 분기 매핑
     m_type = final_params.get("model_type", "segresnet")
     
     # 1. unet_path 자동 설정
-    if final_params.get("unet_path") in [None, "checkpoints/segresnet_best.pt", "checkpoints/unet_best.pt", "checkpoints/unetplusplus_best.pt"]:
+    if final_params.get("unet_path") in [None, "checkpoints/segresnet_best.pt", "checkpoints/unet_best.pt", "checkpoints/unetplusplus_best.pt", "checkpoints/unet3plus_best.pt", "checkpoints/attention_unet_best.pt"]:
         if m_type == "segresnet":
             final_params["unet_path"] = "checkpoints/segresnet_best.pt"
         elif m_type == "unetplusplus":
             final_params["unet_path"] = "checkpoints/unetplusplus_best.pt"
+        elif m_type == "unet3plus":
+            final_params["unet_path"] = "checkpoints/unet3plus_best.pt"
+        elif m_type == "attention_unet":
+            final_params["unet_path"] = "checkpoints/attention_unet_best.pt"
         else:
             final_params["unet_path"] = "checkpoints/unet_best.pt"
 

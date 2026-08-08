@@ -40,7 +40,7 @@ def train_unet(
     num_samples: int = 400,
     # 학습 설정
     epochs: int = 20,
-    batch_size: int = 16,
+    batch_size: int = 64,
     lr: float = 3e-4,
     save_path: str = "checkpoints/unet_best.pt",
     device: str = "auto",
@@ -89,8 +89,17 @@ def train_unet(
 
     log.info(f"학습 슬라이스: {len(train_ds)}  |  검증 슬라이스: {len(val_ds)}")
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=0, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    n_workers = min(8, os.cpu_count() or 4)
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=n_workers, pin_memory=True, persistent_workers=True,
+        prefetch_factor=4
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=n_workers, pin_memory=True, persistent_workers=True,
+        prefetch_factor=4
+    )
 
     # ── 모델 ────────────────────────────────────────────────
     model = build_unet().to(device)
@@ -184,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=400, help="합성 데이터 샘플 수 (use_real_data=False 시)")
     # 학습 관련
     parser.add_argument("--epochs",     type=int,   default=20)
-    parser.add_argument("--batch_size", type=int,   default=16)
+    parser.add_argument("--batch_size", type=int,   default=64)
     parser.add_argument("--lr",         type=float, default=3e-4)
     parser.add_argument("--save_path",  type=str,   default="checkpoints/unet_best.pt")
     args = parser.parse_args()

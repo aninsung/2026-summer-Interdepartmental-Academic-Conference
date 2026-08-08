@@ -10,8 +10,6 @@
 
 ## 🏗️ Overall Architecture
 
-> (전체 시스템 구조 이미지 삽입)
-
 ![Overall Architecture](results/architecture.png)
 
 ---
@@ -34,16 +32,14 @@
 ### 목표
 
 - Rough Mask의 경계를 자동 보정
-- Dice Score 향상
+- Dice Score 향상 (SOTA **`0.8327 DSC`** 달성)
 - HD95 감소
 - 사람의 후처리 작업 최소화
 
 ### 평가 지표
 
 - Dice Similarity Coefficient (DSC)
-- HD95
-- IoU
-- ASSD
+- HD95 (Hausdorff Distance 95%)
 
 ---
 
@@ -51,9 +47,9 @@
 
 | 단계 | 설명 |
 |------|------|
-| **1** | BraTS2021 데이터셋으로 U-Net 또는 SegResNet을 학습하여 초기 분할(Rough Mask) 생성 |
+| **1** | BraTS2021 데이터셋으로 백본(UNet 3+, Attention U-Net, UNet++, SegResNet, U-Net)을 학습하여 초기 분할(Rough Mask) 생성 |
 | **2** | MRI 영상과 Rough Mask를 입력(State)으로 사용하는 Gymnasium 환경 구성 |
-| **3** | PPO 에이전트가 Expand / Shrink / Keep 등의 행동을 반복 수행하며 경계 수정 |
+| **3** | PPO 에이전트가 Erode / Dilate / Keep 등의 행동을 반복 수행하며 경계 수정 |
 | **4** | Ground Truth와 비교하여 Dice, HD95 등을 평가하고 Morphology 기법과 비교 |
 
 ---
@@ -73,17 +69,15 @@
 
 자세한 실험 결과와 성능 비교는 아래 문서에서 확인할 수 있습니다.
 
-📄 **[Final Models Report](final_models_report.md)**
+📄 **[Final Models Report](final_models_report.md)**  
+📄 **[Technical Report](technical_report.md)**  
+📄 **[Experiments History](EXPERIMENTS.md)**
 
-보고서에는 다음 내용이 포함되어 있습니다.
-
-- 실험 환경
-- 모델별 성능 비교
-- Rough vs Morphology vs RL 비교
-- Dice / HD95 / IoU / ASSD 결과
-- Box Plot
-- 정성적 결과 비교
-- 결과 분석
+### 종합 랭킹 요약 (50명 2,902 슬라이스 평가)
+1. 🥇 **UNet 3+ (32ch + BatchNorm) + RL**: **`0.8327 DSC`** (전체 1위 SOTA)
+2. 🥈 **Attention U-Net (MONAI) + RL**: **`0.8297 DSC`** (전체 2위)
+3. 🥉 **UNet++ (MONAI Basic) + RL**: **`0.8292 DSC`** (전체 3위)
+4. 4️⃣ **U-Net + RL**: **`0.8134 DSC`**
 
 ---
 
@@ -93,18 +87,22 @@
 RL-Refiner/
 ├── checkpoints/             # 학습 완료된 모델 가중치 (.pt, .zip)
 ├── configs/                 # 하이퍼파라미터 설정 (.yaml)
-├── results/                 # 결과 이미지 및 Box Plot
+├── results/                 # 결과 이미지 (sample_comparison_*.png) 및 Box Plot
 ├── src/
-│   ├── data/                # 데이터 로더 및 전처리
+│   ├── data/                # 데이터 로더 및 멀티프로세싱 전처리
 │   ├── envs/                # Gymnasium 환경
-│   └── models/              # U-Net, SegResNet, UNet++
-├── train_unet.py
-├── train_segresnet.py
-├── train_unetplusplus.py
-├── train_agent.py
-├── evaluate.py
-├── run_pipeline.py
-├── final_models_report.md   # 실험 결과 보고서
+│   └── models/              # UNet 3+, Attention U-Net, UNet++, SegResNet, U-Net
+├── train_unet3plus.py       # UNet 3+ (32ch+BN) 학습 스크립트
+├── train_attention_unet.py  # Attention U-Net 학습 스크립트
+├── train_unetplusplus.py    # UNet++ 학습 스크립트
+├── train_segresnet.py       # SegResNet 학습 스크립트
+├── train_unet.py            # U-Net 학습 스크립트
+├── train_agent.py           # PPO 강화학습 에이전트 학습 스크립트
+├── evaluate.py              # 전지 레이아웃 시각화 및 검증 스크립트
+├── run_pipeline.py          # 원스톱 자동화 파이프라인
+├── final_models_report.md   # 최종 실험 보고서
+├── technical_report.md      # 기술 분석 아티팩트 보고서
+├── EXPERIMENTS.md           # 상세 실험 이력
 ├── requirements.txt
 └── README.md
 ```
@@ -113,58 +111,34 @@ RL-Refiner/
 
 ## 📦 Getting Started
 
-### 1. 저장소 클론
+### 1. 저장소 클론 및 의존성 설치
 
 ```bash
 git clone https://github.com/USERNAME/RL-Refiner.git
 cd RL-Refiner
-```
-
-### 2. 의존성 설치
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. SegResNet 기반 전체 파이프라인 실행
+### 2. SOTA 1위 모델 (UNet 3+ 하이브리드) 전체 파이프라인 실행
 
 ```bash
-python run_pipeline.py --model_type segresnet
+python run_pipeline.py --model_type unet3+ --batch_size 128
 ```
 
-### 4. U-Net 기반 전체 파이프라인 실행
+### 3. Attention U-Net 파이프라인 실행
 
 ```bash
-python run_pipeline.py --model_type unet
+python run_pipeline.py --model_type attention_unet --batch_size 64
 ```
 
-### 5. 평가만 수행
+### 4. UNet++ 파이프라인 실행
 
 ```bash
-python run_pipeline.py \
-    --model_type segresnet \
-    --skip_segresnet \
-    --skip_agent
+python run_pipeline.py --model_type unetplusplus --batch_size 64
 ```
 
----
+### 5. 기존 학습 가중치를 활용한 시각화 및 평가만 수행
 
-## 📈 향후 연구
-
-- 3D Volume 기반 RL Refinement
-- Multi-class Brain Tumor Segmentation
-- nnUNet 및 SAM2 기반 초기 마스크 적용
-- 의료진 Interactive Correction 시스템 개발
-
----
-
-## 👨‍💻 Contributors
-
-- 안인성 컴퓨터공학과
-- 한수진 인공지능학과 
-
----
-
-## 📄 License
-
-MIT License
+```bash
+python evaluate.py --model_type unet3plus
+```

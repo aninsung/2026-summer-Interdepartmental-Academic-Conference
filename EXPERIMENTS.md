@@ -396,3 +396,41 @@ python evaluate.py \
 | RL 보정 효과 | RL이 U-Net 기준 학습됨 → SegResNet 초기값 분포 외(OOD) → **DSC 하락** ❌ |
 
 > **RL Refiner 재학습 필요**: SegResNet Rough를 시작점으로 재학습하면 최종 DSC 0.85+ 목표 가능
+
+---
+
+## 🧪 실험 5 — 멀티 백본 최적화 및 UNet 3+ SOTA 달성 (최종 종합 벤치마크)
+
+> BraTS 2021 데이터셋 상에서 U-Net, UNet++, Attention U-Net, UNet 3+ 4개 백본에 대한 독립 파이프라인 전수 훈련 및 평가 벤치마크입니다.
+> 데이터 로더 가속화(`num_workers=8`), Attention Gate 래핑, UNet 3+의 32채널+BatchNorm 하이브리드 개편이 반영되었습니다.
+
+### 백본 모델 파라미터 및 구조 비교
+
+| 백본 모델 | 구현 출처 | 채널 구조 | 정규화 | 주요 메커니즘 |
+|:---|:---:|:---:|:---:|:---|
+| **U-Net** | 커스텀 | (16, 32, 64, 128) | InstanceNorm | Vanilla Skip Connection |
+| **UNet++** | MONAI Basic | (16, 32, 64, 128, 256) | BatchNorm | Dense Nested Skip Connections |
+| **Attention U-Net** | MONAI | (16, 32, 64, 128) | BatchNorm | Skip Connection Attention Gate |
+| **UNet 3+ (개편)** | 하이브리드 튜닝 | (32, 64, 128, 256) | **BatchNorm** | **Full-Scale Skip Connections** |
+
+### 최종 정량 평가 결과 (50명 환자, 2,902 슬라이스 전수 검증)
+
+| 모델 백본 | 방법 | DSC (Mean ± Std) ↑ | HD95 (Mean ± Std px) ↓ | 랭킹 |
+|:---|:---|:---:|:---:|:---:|
+| **UNet 3+ (32ch+BN)** 🌟 | Rough Mask | 0.8279 ± 0.1278 | 3.51 ± 7.10 | — |
+| | Morpho Refined | 0.8284 ± 0.1308 | 3.65 ± 7.15 | — |
+| | **RL Refined** | **0.8327 ± 0.1273** | **3.46 ± 7.11** | 🥇 **종합 1위 (SOTA)** |
+| **Attention U-Net** | Rough Mask | 0.8246 ± 0.1179 | 2.58 ± 2.28 | — |
+| | Morpho Refined | 0.8275 ± 0.1179 | 2.78 ± 2.56 | — |
+| | **RL Refined** | **0.8297 ± 0.1171** | **2.53 ± 2.31** | 🥈 **종합 2위** |
+| **UNet++** | Rough Mask | 0.8264 ± 0.1392 | 2.67 ± 2.47 | — |
+| | Morpho Refined | 0.8248 ± 0.1412 | 2.72 ± 2.53 | — |
+| | **RL Refined** | **0.8292 ± 0.1390** | **2.63 ± 2.49** | 🥉 **종합 3위** |
+| **U-Net** | Rough Mask | 0.8090 ± 0.1928 | 3.93 ± 9.17 | — |
+| | Morpho Refined | 0.8113 ± 0.1926 | 2.06 ± 1.91 | — |
+| | **RL Refined** | **0.8134 ± 0.1929** | **2.03 ± 1.92** | 4위 |
+
+### 주요 실험 시사점
+1. **UNet 3+ 채널/정규화 개편의 적중**: InstanceNorm ➔ BatchNorm 전환 및 32ch 확장을 통해 기존 0.800 미만에 머물던 UNet 3+가 전체 1위(0.8327 DSC)로 직행했습니다.
+2. **시각화 레이아웃 와이드 개편**: `evaluate.py` 의 시각화 매트릭스를 Transpose(가로형 전치) 및 18pt/15pt 폰트 확대로 갱신하여 비교 가독성을 확보했습니다.
+
