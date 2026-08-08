@@ -79,6 +79,12 @@
 3. 🥉 **UNet++ (MONAI Basic) + RL**: **`0.8292 DSC`** (전체 3위)
 4. 4️⃣ **U-Net + RL**: **`0.8134 DSC`**
 
+### 🖼️ SOTA 1위 (UNet 3+ + RL-Refiner) 시각화 샘플
+![UNet 3+ Sample Comparison](results/sample_comparison_unet3plus.png)
+
+### 📈 SOTA 1위 (UNet 3+ + RL-Refiner) 성능 분포 Boxplot
+![UNet 3+ Boxplot](results/dsc_boxplot_unet3plus.png)
+
 ---
 
 ## 📂 Project Structure
