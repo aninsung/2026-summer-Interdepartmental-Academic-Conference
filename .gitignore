@@ -3,12 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Large dataset, checkpoints, logs and results
+# Large dataset, checkpoints, and logs
 src/data/archive/
 src/data/archive (1)/
 checkpoints/
 logs/
-results/
 
 # Virtual environments
 .venv/
