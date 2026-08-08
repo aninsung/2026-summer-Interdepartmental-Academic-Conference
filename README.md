@@ -160,9 +160,8 @@ python run_pipeline.py \
 
 ## 👨‍💻 Contributors
 
-- 안인성
-- 컴퓨터공학부
-- 가천대학교
+- 안인성 컴퓨터공학과
+- 한수진 인공지능학과 
 
 ---
 
