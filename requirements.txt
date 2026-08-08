@@ -11,3 +11,4 @@ nibabel>=5.0.0        # NIfTI (.nii) 파일 입출력
 scikit-image>=0.21.0  # 슬라이스 리사이즈
 tensorboard>=2.14.0   # PPO 학습 로그 시각화
 tqdm>=4.66.0          # 진행 바
+torchsummary>=1.5.1

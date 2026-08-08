@@ -24,6 +24,8 @@ from src.data.brats2020_dataset import BraTS2020Dataset
 from src.models.unet import build_unet, compute_dice
 from src.models.segresnet import build_segresnet
 from src.models.unetplusplus import build_unetplusplus
+from src.models.unet3plus import build_unet3plus
+from src.models.attention_unet import build_attention_unet
 from src.envs.mask_refinement_env import MaskRefinementEnv, _dice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -164,6 +166,12 @@ def evaluate(
         elif model_type == "unetplusplus":
             unet = build_unetplusplus().to(device)
             log.info(f"UNet++ 로드: {unet_path}")
+        elif model_type == "unet3plus":
+            unet = build_unet3plus(DSV=False).to(device)
+            log.info(f"UNet 3+ 로드: {unet_path}")
+        elif model_type == "attention_unet":
+            unet = build_attention_unet().to(device)
+            log.info(f"Attention U-Net 로드: {unet_path}")
         else:
             unet = build_unet().to(device)
             log.info(f"U-Net 로드: {unet_path}")
@@ -284,11 +292,17 @@ def evaluate(
 
 def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=4, model_type="unet"):
     """샘플 시각화 및 DSC 분포 박스플롯 저장."""
-    # 1) 샘플별 마스크 비교
-    fig, axes = plt.subplots(num_show, 4, figsize=(14, num_show * 3.5))
+    # 1) 샘플별 마스크 비교 (행: 마스크 유형 4종, 열: 샘플 개수)
+    fig, axes = plt.subplots(4, num_show, figsize=(num_show * 4.0, 16))
     cols = ["MRI + GT", "Rough Mask", "Morpho Refined", "RL Refined"]
-    for ax, col in zip(axes[0], cols):
-        ax.set_title(col, fontsize=12, fontweight="bold")
+
+    # 각 열(샘플 번호) 위에 타이틀 부여
+    for col_idx in range(num_show):
+        axes[0, col_idx].set_title(f"Sample {col_idx + 1}", fontsize=18, fontweight="bold", pad=10)
+
+    # 각 행(마스크 유형) 좌측에 Y라벨(Row Label) 부여 (axis off 상태에서 ylabel이 날아가지 않도록 보정)
+    for row_idx, col_name in enumerate(cols):
+        axes[row_idx, 0].set_ylabel(col_name, fontsize=18, fontweight="bold", labelpad=15)
 
     for row in range(min(num_show, len(sample_masks))):
         img    = images[row]
@@ -315,36 +329,40 @@ def _plot_results(images, gt_masks, sample_masks, results, output_dir, num_show=
             ymin, ymax = 0, gt.shape[0] - 1
             xmin, xmax = 0, gt.shape[1] - 1
 
-        # MRI + GT 윤곽
-        axes[row, 0].imshow(img, cmap="gray", vmin=0, vmax=1)
-        axes[row, 0].contour(gt, levels=[0.5], colors="lime", linewidths=1.5)
-        axes[row, 0].axis("off")
+        # Row 0: MRI + GT
+        axes[0, row].imshow(img, cmap="gray", vmin=0, vmax=1)
+        axes[0, row].contour(gt, levels=[0.5], colors="lime", linewidths=2.0)
+        axes[0, row].set_xticks([])
+        axes[0, row].set_yticks([])
 
-        # Rough
-        axes[row, 1].imshow(img, cmap="gray", vmin=0, vmax=1)
-        axes[row, 1].contour(rough, levels=[0.5], colors="red", linewidths=1.5)
-        axes[row, 1].contour(gt, levels=[0.5], colors="lime", linewidths=1.0, linestyles="--")
-        axes[row, 1].set_xlabel(f"DSC={dsc_rough:.3f}", fontsize=9)
-        axes[row, 1].axis("off")
+        # Row 1: Rough
+        axes[1, row].imshow(img, cmap="gray", vmin=0, vmax=1)
+        axes[1, row].contour(rough, levels=[0.5], colors="red", linewidths=2.0)
+        axes[1, row].contour(gt, levels=[0.5], colors="lime", linewidths=1.2, linestyles="--")
+        axes[1, row].set_xlabel(f"DSC={dsc_rough:.3f}", fontsize=15, fontweight="bold")
+        axes[1, row].set_xticks([])
+        axes[1, row].set_yticks([])
 
-        # Morpho — 실제 morpho 마스크 사용
-        axes[row, 2].imshow(img, cmap="gray", vmin=0, vmax=1)
-        axes[row, 2].contour(morpho, levels=[0.5], colors="orange", linewidths=1.5)
-        axes[row, 2].contour(gt, levels=[0.5], colors="lime", linewidths=1.0, linestyles="--")
-        axes[row, 2].set_xlabel(f"DSC={dsc_morpho:.3f}", fontsize=9)
-        axes[row, 2].axis("off")
+        # Row 2: Morpho
+        axes[2, row].imshow(img, cmap="gray", vmin=0, vmax=1)
+        axes[2, row].contour(morpho, levels=[0.5], colors="orange", linewidths=2.0)
+        axes[2, row].contour(gt, levels=[0.5], colors="lime", linewidths=1.2, linestyles="--")
+        axes[2, row].set_xlabel(f"DSC={dsc_morpho:.3f}", fontsize=15, fontweight="bold")
+        axes[2, row].set_xticks([])
+        axes[2, row].set_yticks([])
 
-        # RL — 실제 rl 마스크 사용
-        axes[row, 3].imshow(img, cmap="gray", vmin=0, vmax=1)
-        axes[row, 3].contour(rl, levels=[0.5], colors="cyan", linewidths=1.5)
-        axes[row, 3].contour(gt, levels=[0.5], colors="lime", linewidths=1.0, linestyles="--")
-        axes[row, 3].set_xlabel(f"DSC={dsc_rl:.3f}", fontsize=9)
-        axes[row, 3].axis("off")
+        # Row 3: RL
+        axes[3, row].imshow(img, cmap="gray", vmin=0, vmax=1)
+        axes[3, row].contour(rl, levels=[0.5], colors="cyan", linewidths=2.0)
+        axes[3, row].contour(gt, levels=[0.5], colors="lime", linewidths=1.2, linestyles="--")
+        axes[3, row].set_xlabel(f"DSC={dsc_rl:.3f}", fontsize=15, fontweight="bold")
+        axes[3, row].set_xticks([])
+        axes[3, row].set_yticks([])
 
         # 각 서브플롯 축의 범위 설정하여 확대 적용
         for col_idx in range(4):
-            axes[row, col_idx].set_xlim(xmin, xmax)
-            axes[row, col_idx].set_ylim(ymax, ymin)  # Y축 반전 상태 유지
+            axes[col_idx, row].set_xlim(xmin, xmax)
+            axes[col_idx, row].set_ylim(ymax, ymin)  # Y축 반전 상태 유지
 
     plt.tight_layout()
     save_path = os.path.join(output_dir, f"sample_comparison_{model_type}.png")
@@ -384,7 +402,7 @@ if __name__ == "__main__":
     parser.add_argument("--agent_path", type=str, default="checkpoints/ppo_refiner")
     parser.add_argument("--unet_path",  type=str, default="checkpoints/segresnet_best.pt")
     parser.add_argument(
-        "--model_type", type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus"],
+        "--model_type", type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus", "unet++", "unet3plus", "unet3+", "attention_unet", "attunet"],
         help="로드할 세그멘테이션 모델 종류 (기본값: segresnet)",
     )
     parser.add_argument("--num_eval",   type=int, default=50)
@@ -393,14 +411,24 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # model_type에 따라 기본 경로 자동 분기 매핑
+    if args.model_type == "unet3+":
+        args.model_type = "unet3plus"
+    elif args.model_type == "unet++":
+        args.model_type = "unetplusplus"
+    elif args.model_type == "attunet":
+        args.model_type = "attention_unet"
     m_type = args.model_type
     
     # 1. unet_path 자동 설정
-    if args.unet_path in [None, "checkpoints/segresnet_best.pt", "checkpoints/unet_best.pt", "checkpoints/unetplusplus_best.pt"]:
+    if args.unet_path in [None, "checkpoints/segresnet_best.pt", "checkpoints/unet_best.pt", "checkpoints/unetplusplus_best.pt", "checkpoints/unet3plus_best.pt", "checkpoints/attention_unet_best.pt"]:
         if m_type == "segresnet":
             args.unet_path = "checkpoints/segresnet_best.pt"
         elif m_type == "unetplusplus":
             args.unet_path = "checkpoints/unetplusplus_best.pt"
+        elif m_type == "unet3plus":
+            args.unet_path = "checkpoints/unet3plus_best.pt"
+        elif m_type == "attention_unet":
+            args.unet_path = "checkpoints/attention_unet_best.pt"
         else:
             args.unet_path = "checkpoints/unet_best.pt"
 

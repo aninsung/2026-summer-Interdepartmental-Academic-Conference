@@ -17,6 +17,17 @@ def run_command(cmd, desc):
     log.info(f"✅ === 완료: {desc} ===\n")
 
 def main():
+    # CLI 인자의 '=' 형태 자동 유연 보정 (예: batch_size=64 -> --batch_size 64)
+    import sys
+    new_argv = []
+    for arg in sys.argv:
+        if "=" in arg and not arg.startswith("-"):
+            key, val = arg.split("=", 1)
+            new_argv += [f"--{key}", val]
+        else:
+            new_argv.append(arg)
+    sys.argv = new_argv
+
     parser = argparse.ArgumentParser(description="RL-Refiner End-to-End 파이프라인 실행 스크립트")
     parser.add_argument("--skip_segresnet", action="store_true", help="SegResNet 학습 단계(Step 1)를 건너뜁니다.")
     parser.add_argument("--skip_agent", action="store_true", help="RL 에이전트 학습 단계(Step 3)를 건너뜁니다.")
@@ -24,13 +35,21 @@ def main():
     
     # 모델 및 설정
     parser.add_argument("--config", type=str, default="configs/ppo_brats.yaml", help="Agent 학습용 YAML 설정 파일 경로")
-    parser.add_argument("--model_type", type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus"],
+    parser.add_argument("--model_type", type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus", "unet++", "unet3plus", "unet3+", "attention_unet", "attunet"],
                         help="세그멘테이션 백본 모델 (기본값: segresnet)")
     parser.add_argument("--batch_size", type=int, default=None, help="배치 크기 (기본값: 각 스크립트 기본값 사용)")
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한")
     parser.add_argument("--epochs", type=int, default=None, help="학습 에폭 수")
 
     args = parser.parse_args()
+
+    # unet3+ 및 unet++ 입력 호환성 보장
+    if args.model_type == "unet3+":
+        args.model_type = "unet3plus"
+    elif args.model_type == "unet++":
+        args.model_type = "unetplusplus"
+    elif args.model_type == "attunet":
+        args.model_type = "attention_unet"
 
     python_exec = sys.executable
 
@@ -53,6 +72,12 @@ def main():
         elif args.model_type == "unetplusplus":
             cmd_unetplusplus = [python_exec, "train_unetplusplus.py"] + extra_args
             run_command(cmd_unetplusplus, "Step 1: UNet++ (초기 모델) 학습")
+        elif args.model_type == "unet3plus":
+            cmd_unet3plus = [python_exec, "train_unet3plus.py"] + extra_args
+            run_command(cmd_unet3plus, "Step 1: UNet 3+ (초기 모델) 학습")
+        elif args.model_type == "attention_unet":
+            cmd_attention_unet = [python_exec, "train_attention_unet.py"] + extra_args
+            run_command(cmd_attention_unet, "Step 1: Attention U-Net (초기 모델) 학습")
         else:
             cmd_unet = [python_exec, "train_unet.py"] + extra_args
             run_command(cmd_unet, "Step 1: U-Net (초기 모델) 학습")
