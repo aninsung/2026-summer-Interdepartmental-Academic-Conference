@@ -10,7 +10,7 @@
 
 ## 🏗️ Overall Architecture
 
-![Overall Architecture](results/architecture.png)
+
 
 ---
 
