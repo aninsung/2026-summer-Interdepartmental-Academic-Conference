@@ -150,12 +150,12 @@ python run_pipeline.py --model_type unetplusplus --batch_size 64
 ### 5.  UNet 파이프라인 실행
 
 ```bash
-python evaluate.py --model_type unet
+python run_pipeline.py --model_type unet
 ```
 ### 6.  segresnet 파이프라인 실행
 
 ```bash
-python evaluate.py --model_type segresnet
+python run_pipeline.py --model_type segresnet
 ```
 
 ### 7.기존 학습 가중치를 활용한 시각화 및 평가만 수행
