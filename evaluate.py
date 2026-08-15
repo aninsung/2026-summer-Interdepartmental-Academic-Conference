@@ -93,6 +93,12 @@ def rl_refine(
     model_type: str = "unet",
 ) -> np.ndarray:
     """안전한 PPO 에이전트 보정: 최전 DSC 마스크를 쫓아 반환 (OOD/과불 화안정 안전장치)."""
+    refinement_mode = "small"
+    if model_type == "unetplusplus":
+        refinement_mode = "medium"
+    elif model_type == "segresnet":
+        refinement_mode = "large"
+        
     env = MaskRefinementEnv(
         images=image[None],
         gt_masks=gt_mask[None],
@@ -100,6 +106,7 @@ def rl_refine(
         uncertainty_maps=uncertainty_map[None],
         max_steps=max_steps,
         model_type=model_type,
+        refinement_mode=refinement_mode,
     )
     obs, _ = env.reset(seed=0)
 
@@ -158,6 +165,28 @@ def evaluate(
         )
 
     images, gt_masks, rough_masks = dataset.get_numpy_arrays()
+
+    # 크기별 맞춤형 전문가 평가를 위한 데이터셋 필터링 (True Expert 적용)
+    filtered_indices = []
+    for idx in range(len(gt_masks)):
+        gt = gt_masks[idx]
+        area = np.sum(gt)
+        if model_type == "attention_unet" and area < 300:
+            filtered_indices.append(idx)
+        elif model_type == "unetplusplus" and 300 <= area < 700:
+            filtered_indices.append(idx)
+        elif model_type == "segresnet" and area >= 700:
+            filtered_indices.append(idx)
+        elif model_type not in ["attention_unet", "unetplusplus", "segresnet"]:
+            filtered_indices.append(idx)
+            
+    if len(filtered_indices) > 0:
+        images = images[filtered_indices]
+        gt_masks = gt_masks[filtered_indices]
+        rough_masks = rough_masks[filtered_indices]
+        log.info(f"[{model_type.upper()} Expert] 평가 데이터 필터링 완료: {len(images)}개 슬라이스 사용")
+    else:
+        log.warning(f"[{model_type.upper()} Expert] 필터링 조건에 부합하는 슬라이스가 없습니다. 전체 데이터를 사용합니다.")
 
     # 세그멘테이션 모델 로드 (있으면)
     unet = None
