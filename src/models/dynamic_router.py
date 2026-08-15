@@ -60,6 +60,6 @@ class AdaptivePipeline(nn.Module):
             else:
                 out = self.expert_large(img_slice)
                 
-            rough_masks[i:i+1] = out
+            rough_masks[i:i+1] = torch.sigmoid(out)
             
         return rough_masks, class_preds

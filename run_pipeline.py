@@ -61,19 +61,40 @@ def main():
     else:
         log.info("⏭️  Stage 1: Shape Classifier 학습 단계를 건너뜁니다.\n")
 
-    # 2. Stage 2: Expert 백본 모델 3종 학습 (Attention U-Net, UNet++, SegResNet)
+    # 2. Stage 2: Expert 백본 모델 3종 학습 (Pre-training -> Fine-tuning 기법 적용)
     if not args.skip_experts:
-        # Small Expert (Attention U-Net)
-        cmd_att = [python_exec, "train_attention_unet.py"] + extra_args
-        run_command(cmd_att, "Stage 2 (Small): Attention U-Net (Class 0 Expert) 학습")
+        # ── Small Expert (Attention U-Net) ──
+        gen_path_att = "checkpoints/attention_unet_general.pt"
+        if not os.path.exists(gen_path_att):
+            cmd_att_gen = [python_exec, "train_attention_unet.py"] + extra_args + ["--save_path", gen_path_att]
+            run_command(cmd_att_gen, "Stage 2 (Small): Attention U-Net 일반 사전 학습 (General Pre-training)")
+        else:
+            log.info(f"ℹ️  기존 Attention U-Net 일반 사전 학습 가중치 발견 ({gen_path_att}) -> 사전 학습 생략")
         
-        # Medium Expert (UNet++)
-        cmd_unetpp = [python_exec, "train_unetplusplus.py"] + extra_args
-        run_command(cmd_unetpp, "Stage 2 (Medium): UNet++ (Class 1 Expert) 학습")
+        cmd_att_ft = [python_exec, "train_attention_unet.py"] + extra_args + ["--refinement_mode", "small", "--pretrained_path", gen_path_att]
+        run_command(cmd_att_ft, "Stage 2 (Small): Attention U-Net 소형 종양 특화 파인튜닝 (Fine-tuning)")
         
-        # Large Expert (SegResNet)
-        cmd_seg = [python_exec, "train_segresnet.py"] + extra_args
-        run_command(cmd_seg, "Stage 2 (Large): SegResNet (Class 2 Expert) 학습")
+        # ── Medium Expert (UNet++) ──
+        gen_path_unetpp = "checkpoints/unetplusplus_general.pt"
+        if not os.path.exists(gen_path_unetpp):
+            cmd_unetpp_gen = [python_exec, "train_unetplusplus.py"] + extra_args + ["--save_path", gen_path_unetpp]
+            run_command(cmd_unetpp_gen, "Stage 2 (Medium): UNet++ 일반 사전 학습 (General Pre-training)")
+        else:
+            log.info(f"ℹ️  기존 UNet++ 일반 사전 학습 가중치 발견 ({gen_path_unetpp}) -> 사전 학습 생략")
+            
+        cmd_unetpp_ft = [python_exec, "train_unetplusplus.py"] + extra_args + ["--refinement_mode", "medium", "--pretrained_path", gen_path_unetpp]
+        run_command(cmd_unetpp_ft, "Stage 2 (Medium): UNet++ 중형 종양 특화 파인튜닝 (Fine-tuning)")
+        
+        # ── Large Expert (SegResNet) ──
+        gen_path_seg = "checkpoints/segresnet_general.pt"
+        if not os.path.exists(gen_path_seg):
+            cmd_seg_gen = [python_exec, "train_segresnet.py"] + extra_args + ["--save_path", gen_path_seg]
+            run_command(cmd_seg_gen, "Stage 2 (Large): SegResNet 일반 사전 학습 (General Pre-training)")
+        else:
+            log.info(f"ℹ️  기존 SegResNet 일반 사전 학습 가중치 발견 ({gen_path_seg}) -> 사전 학습 생략")
+            
+        cmd_seg_ft = [python_exec, "train_segresnet.py"] + extra_args + ["--refinement_mode", "large", "--pretrained_path", gen_path_seg]
+        run_command(cmd_seg_ft, "Stage 2 (Large): SegResNet 대형 종양 특화 파인튜닝 (Fine-tuning)")
     else:
         log.info("⏭️  Stage 2: Expert 백본 모델 3종 학습 단계를 건너뜁니다.\n")
 

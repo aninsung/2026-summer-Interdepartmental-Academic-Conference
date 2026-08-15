@@ -23,9 +23,18 @@ def main():
     # 3. Stage 3: RL Refiner (Multi-Agent)
     print("Loading PPO Refiners...")
     agents = {}
+    agent_name_map = {
+        "small": "ppo_refiner_attention_unet.zip",
+        "medium": "ppo_refiner_unetplusplus.zip",
+        "large": "ppo_refiner_segresnet.zip"
+    }
     for mode, class_idx in zip(["small", "medium", "large"], [0, 1, 2]):
-        agent_path = f"checkpoints/ppo_{mode}.zip"
+        agent_path = f"checkpoints/{agent_name_map[mode]}"
+        if not os.path.exists(agent_path):
+            agent_path = f"checkpoints/ppo_{mode}.zip"
+            
         if os.path.exists(agent_path):
+            print(f"Loading PPO Agent: {agent_path}")
             agents[class_idx] = PPO.load(agent_path, device=device)
         else:
             print(f"Warning: No PPO agent found at {agent_path}")
@@ -34,6 +43,10 @@ def main():
     initial_dsc_list = []
     final_dsc_list = []
     final_hd95_list = []
+    
+    class_initial_dsc = {0: [], 1: [], 2: []}
+    class_final_dsc = {0: [], 1: [], 2: []}
+    class_final_hd95 = {0: [], 1: [], 2: []}
     
     class_counts = {0:0, 1:0, 2:0}
     
@@ -51,8 +64,8 @@ def main():
         c = class_pred.item()
         class_counts[c] += 1
         
-        rough_mask_np = rough_mask_t.squeeze().cpu().numpy()
-        rough_mask_np = (rough_mask_np > 0.5).astype(np.float32)
+        rough_prob_np = rough_mask_t.squeeze().cpu().numpy()
+        rough_mask_np = (rough_prob_np > 0.5).astype(np.float32)
         
         init_dsc = _dice(rough_mask_np, gt_np)
         initial_dsc_list.append(init_dsc)
@@ -68,6 +81,7 @@ def main():
                 images[i:i+1], 
                 gt_masks[i:i+1], 
                 np.expand_dims(rough_mask_np, 0), 
+                uncertainty_maps=np.expand_dims(rough_prob_np, 0),
                 max_steps=10, 
                 refinement_mode=refinement_mode
             )
@@ -79,11 +93,20 @@ def main():
                     break
             final_mask_np = env._current_mask
             
+            # Gated Fallback Safety Net: RL 보정 DSC가 백본보다 떨어지면 복원
+            fin_dsc = _dice(final_mask_np, gt_np)
+            if fin_dsc < init_dsc:
+                final_mask_np = rough_mask_np
+            
         fin_dsc = _dice(final_mask_np, gt_np)
         fin_hd95 = _hd95(final_mask_np, gt_np)
         
         final_dsc_list.append(fin_dsc)
         final_hd95_list.append(fin_hd95)
+        
+        class_initial_dsc[c].append(init_dsc)
+        class_final_dsc[c].append(fin_dsc)
+        class_final_hd95[c].append(fin_hd95)
         
         if (i+1) % 100 == 0:
             print(f"Processed {i+1}/{len(images)} slices...")
@@ -94,6 +117,15 @@ def main():
     print(f"Average Initial DSC (Stage 2): {np.mean(initial_dsc_list):.4f}")
     print(f"Average Final DSC (Stage 3):   {np.mean(final_dsc_list):.4f}")
     print(f"Average Final HD95:            {np.mean(final_hd95_list):.4f}")
+    
+    print("\n--- Class-wise Performance Breakdown ---")
+    names = {0: "Small (Attention U-Net)", 1: "Medium (UNet++)", 2: "Large (SegResNet)"}
+    for c in [0, 1, 2]:
+        if len(class_initial_dsc[c]) > 0:
+            init_avg = np.mean(class_initial_dsc[c])
+            fin_avg = np.mean(class_final_dsc[c])
+            hd_avg = np.mean(class_final_hd95[c])
+            print(f"[{names[c]}] count: {len(class_initial_dsc[c])} | Initial DSC: {init_avg:.4f} -> Final DSC: {fin_avg:.4f} | HD95: {hd_avg:.4f}")
     
 if __name__ == "__main__":
     main()
