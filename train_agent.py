@@ -294,6 +294,7 @@ def load_real_data(
     noise_seed: int = 42,
     unet_path: Optional[str] = None,
     model_type: str = "unet",
+    refinement_mode: str = "small",
 ):
     """실제 BraTS2020 데이터를 NumPy 배열로 반환."""
     from src.data.brats2020_dataset import BraTS2020Dataset
@@ -320,78 +321,84 @@ def load_real_data(
         [make_noisy_mask(gt, rng, max_morph_px=morph_px) for gt in gts], axis=0
     )
 
-    # 2. 실제 모델 예측 마스크 생성 (가중치가 있으면)
-    actual_roughs = synthetic_roughs.copy()  # 폴백용
-    if unet_path and os.path.exists(unet_path):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        log.info(f"세그멘테이션 모델({model_type}) 가중치 로드: {unet_path} (Device: {device})")
-        if model_type == "segresnet":
-            from src.models.segresnet import build_segresnet
-            model = build_segresnet().to(device)
-        elif model_type == "unetplusplus":
-            from src.models.unetplusplus import build_unetplusplus
-            model = build_unetplusplus().to(device)
-        elif model_type == "unet3plus":
-            from src.models.unet3plus import build_unet3plus
-            model = build_unet3plus(DSV=False).to(device)
-        elif model_type == "attention_unet":
-            from src.models.attention_unet import build_attention_unet
-            model = build_attention_unet().to(device)
-        else:
-            from src.models.unet import build_unet
-            model = build_unet().to(device)
+    # 2. 실제 모델 예측 마스크 생성 (AdaptivePipeline 사용)
+    actual_roughs = synthetic_roughs.copy()
+    actual_uncerts = np.zeros_like(synthetic_roughs)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    from src.models.dynamic_router import AdaptivePipeline
+    log.info(f"AdaptivePipeline 3-Stage 라우터 로드 중... (Device: {device})")
+    pipeline = AdaptivePipeline(device)
+    
+    batch_size = 64
+    num_slices = len(imgs)
+    preds = []
+    class_preds_all = []
+    log.info("학습 데이터에 대한 AdaptivePipeline 초안 마스크 생성 중...")
+    with torch.no_grad():
+        for start_idx in range(0, num_slices, batch_size):
+            end_idx = min(start_idx + batch_size, num_slices)
+            batch_imgs = imgs[start_idx:end_idx]
+            batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device)
+            
+            rough_masks_t, class_preds = pipeline(batch_t)
+            batch_preds_bin = (rough_masks_t > 0.5).float().squeeze(1).cpu().numpy()
+            preds.append(batch_preds_bin)
+            class_preds_all.extend(class_preds.cpu().numpy().tolist())
+            
+    actual_roughs = np.concatenate(preds, axis=0)
+    class_preds_all = np.array(class_preds_all)
+    log.info(f"AdaptivePipeline 초안 마스크 생성 완료 (개수: {len(actual_roughs)})")
+
+    # 3. Shape Class (refinement_mode) 에 따른 필터링
+    target_class = {"small": 0, "medium": 1, "large": 2}[refinement_mode.lower()]
+    mask_indices = (class_preds_all == target_class)
+    
+    imgs = imgs[mask_indices]
+    gts = gts[mask_indices]
+    synthetic_roughs = synthetic_roughs[mask_indices]
+    actual_roughs = actual_roughs[mask_indices]
+    actual_uncerts = actual_uncerts[mask_indices]
+    
+    if len(imgs) == 0:
+        raise ValueError(f"해당 클래스({refinement_mode})로 분류된 데이터가 하나도 없습니다!")
         
-        model.load_state_dict(torch.load(unet_path, map_location=device))
-        model.eval()
+    log.info(f"'{refinement_mode}' (Class {target_class}) 필터링 완료: {len(imgs)}개 슬라이스 사용")
 
-        batch_size = 64
-        num_slices = len(imgs)
-        preds = []
-        log.info("학습 데이터에 대한 실제 모델 예측 마스크 생성 중...")
-        with torch.no_grad():
-            for start_idx in range(0, num_slices, batch_size):
-                end_idx = min(start_idx + batch_size, num_slices)
-                batch_imgs = imgs[start_idx:end_idx]
-                batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device)
-                batch_preds = model(batch_t)
-                batch_preds = (torch.sigmoid(batch_preds) > 0.5).float().squeeze(1).cpu().numpy()
-                preds.append(batch_preds)
-        actual_roughs = np.concatenate(preds, axis=0)
-        log.info(f"실제 모델 예측 마스크 생성 완료 (개수: {len(actual_roughs)})")
-
-        # 데이터 믹스업: 실제 예측값 50% + 합성 노이즈 50%
-        # → 실제 예측 1회 + 합성 1회 = 1:1 비율 (일반화 향상을 위해 합성 비중 증가)
-        imgs = np.concatenate([imgs, imgs], axis=0)
-        gts = np.concatenate([gts, gts], axis=0)
-        roughs = np.concatenate([actual_roughs, synthetic_roughs], axis=0)
-        
-        # 순열(permutation) 믹스
-        perm = rng.permutation(len(imgs))
-        imgs = imgs[perm]
-        gts = gts[perm]
-        roughs = roughs[perm]
-        log.info(f"실제 예측 50% + 합성 노이즈 50% 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
-    else:
-        roughs = synthetic_roughs
-
-    return imgs, gts, roughs
+    # 데이터 믹스업: 실제 예측값 50% + 합성 노이즈 50%
+    # → 실제 예측 1회 + 합성 1회 = 1:1 비율 (일반화 향상을 위해 합성 비중 증가)
+    imgs = np.concatenate([imgs, imgs], axis=0)
+    gts = np.concatenate([gts, gts], axis=0)
+    roughs = np.concatenate([actual_roughs, synthetic_roughs], axis=0)
+    uncerts_all = np.concatenate([actual_uncerts, np.zeros_like(synthetic_roughs)], axis=0)
+    
+    # 순열(permutation) 믹스
+    perm = rng.permutation(len(imgs))
+    imgs = imgs[perm]
+    gts = gts[perm]
+    roughs = roughs[perm]
+    uncerts_all = uncerts_all[perm]
+    log.info(f"실제 예측 50% + 합성 노이즈 50% 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
+    
+    return imgs, gts, roughs, uncerts_all
 
 
 # ──────────────────────────────────────────────
 # VecEnv 빌더
 # ──────────────────────────────────────────────
 
-def make_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penalty=0.01, model_type="unet"):
+def make_env_fn(images, gt_masks, rough_masks, uncertainty_maps, max_steps, target_dsc, step_penalty=0.01, model_type="unet"):
     """MaskRefinementEnv 팩토리 함수 반환."""
     def _init():
         return MaskRefinementEnv(
             images=images,
             gt_masks=gt_masks,
             rough_masks=rough_masks,
+            uncertainty_maps=uncertainty_maps,
             max_steps=max_steps,
             target_dsc=target_dsc,
-            step_penalty=step_penalty,
-            model_type=model_type,
+            step_penalty=0.01,
+            model_type="adaptive_pipeline",
         )
     return _init
 
@@ -441,6 +448,8 @@ def train_agent(
     plateau_check_freq:  int   = 4096,        # Plateau 확인 주기 (스텝)
     # Stop #3: Milestone Snapshot (중단 없이 자동 저장)
     milestone_ratios:    list  = None,        # 저장 비율 목록 (기본 [0.25, 0.5, 0.75])
+    # 모드
+    refinement_mode:     str   = "small",     # "small", "medium", "large"
 ) -> None:
     from stable_baselines3 import PPO
     from stable_baselines3.common.env_util import make_vec_env
@@ -456,16 +465,17 @@ def train_agent(
 
     # ── 데이터 로드 ──────────────────────────────────────────
     if use_real_data:
-        images, gt_masks, rough_masks = load_real_data(
+        images, gt_masks, rough_masks, uncertainty_maps = load_real_data(
             train_root=train_root,
             modality=modality,
             target_size=image_size,
             max_patients=max_train_patients,
             unet_path=unet_path,
             model_type=model_type,
+            refinement_mode=refinement_mode,
         )
     else:
-        images, gt_masks, rough_masks = load_synthetic_data(
+        images, gt_masks, rough_masks, uncertainty_maps = load_synthetic_data(
             num_samples=num_samples,
             image_size=image_size,
         )
@@ -475,30 +485,31 @@ def train_agent(
 
     # Train / Val 분할 (80 / 20)
     split = int(N * 0.8)
-    tr_img,  tr_gt,  tr_rough  = images[:split],  gt_masks[:split],  rough_masks[:split]
-    val_img, val_gt, val_rough = images[split:],  gt_masks[split:],  rough_masks[split:]
+    tr_img,  tr_gt,  tr_rough, tr_uncert  = images[:split],  gt_masks[:split],  rough_masks[:split], uncertainty_maps[:split]
+    val_img, val_gt, val_rough, val_uncert = images[split:],  gt_masks[split:],  rough_masks[split:], uncertainty_maps[split:]
 
     # ── VecEnv 생성 ─────────────────────────────────────────
-    train_env_fn = make_env_fn(tr_img,  tr_gt,  tr_rough,  max_steps, target_dsc, step_penalty, model_type=model_type)
-    val_env_fn   = make_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc, step_penalty, model_type=model_type)
+    # (더 이상 사용되지 않는 make_env_fn은 무시하고 아래의 make_monitored_env_fn을 사용합니다)
 
     # Monitor wrapper 적용 팩토리
-    def make_monitored_env_fn(images, gt_masks, rough_masks, max_steps, target_dsc, step_penalty, model_type):
+    def make_monitored_env_fn(images, gt_masks, rough_masks, uncertainty_maps, max_steps, target_dsc, step_penalty, model_type, refinement_mode):
         def _init():
             env = MaskRefinementEnv(
                 images=images,
                 gt_masks=gt_masks,
                 rough_masks=rough_masks,
+                uncertainty_maps=uncertainty_maps,
                 max_steps=max_steps,
                 target_dsc=target_dsc,
                 step_penalty=step_penalty,
                 model_type=model_type,
+                refinement_mode=refinement_mode,
             )
             return Monitor(env)
         return _init
 
-    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, max_steps, target_dsc, step_penalty, model_type), n_envs=n_envs)
-    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, max_steps, target_dsc, step_penalty, model_type)])
+    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, tr_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode), n_envs=n_envs)
+    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, val_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode)])
 
     # ── PPO 에이전트 ─────────────────────────────────────────
     # TensorBoard 설치 여부 확인
@@ -689,6 +700,9 @@ def main():
     parser.add_argument("--milestone_ratios",    type=float, nargs="+",
                         default=None,
                         help="마일스톤 저장 비율 (0~1). 예: 0.25 0.5 0.75")
+    # 모드
+    parser.add_argument("--refinement_mode",     type=str, default="small", choices=["small", "medium", "large"],
+                        help="학습할 PPO 에이전트의 타겟 Shape Class (small, medium, large)")
 
     args = parser.parse_args()
 
@@ -733,6 +747,7 @@ def main():
         "plateau_patience":    "plateau_patience",
         "plateau_check_freq":  "plateau_check_freq",
         "milestone_ratios":    "milestone_ratios",
+        "refinement_mode":     "refinement_mode",
     }
 
     # 최종 파라미터: YAML 기본값 → CLI 인자로 override

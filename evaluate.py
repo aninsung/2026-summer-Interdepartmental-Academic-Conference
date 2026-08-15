@@ -88,6 +88,7 @@ def rl_refine(
     image: np.ndarray,
     rough_mask: np.ndarray,
     gt_mask: np.ndarray,
+    uncertainty_map: np.ndarray,
     max_steps: int = 20,
     model_type: str = "unet",
 ) -> np.ndarray:
@@ -96,6 +97,7 @@ def rl_refine(
         images=image[None],
         gt_masks=gt_mask[None],
         rough_masks=rough_mask[None],
+        uncertainty_maps=uncertainty_map[None],
         max_steps=max_steps,
         model_type=model_type,
     )
@@ -148,7 +150,7 @@ def evaluate(
     except Exception as e:
         log.warning(f"데이터 로드 실패 ({e}). 학습 데이터 폴더에서 평가용 데이터를 로드합니다.")
         dataset = BraTS2020Dataset(
-            root_dir=r"src/data/archive",
+            root_dir=r"src/data/archive/BraTS2021_Training_Data",
             modality="t1ce",
             target_size=128,
             max_patients=num_eval,
@@ -202,13 +204,18 @@ def evaluate(
         img = images[i]
         gt = gt_masks[i]
 
-        # 초기 마스크 결정
+        # 초기 마스크 및 불확실성 결정
+        uncert = None
         if unet is not None:
             img_t = torch.from_numpy(img).unsqueeze(0).unsqueeze(0).to(device)
             with torch.no_grad():
-                rough = (torch.sigmoid(unet(img_t)) > 0.5).float().squeeze().cpu().numpy()
+                logits = unet(img_t)
+                probs = torch.sigmoid(logits)
+                rough = (probs > 0.5).float().squeeze().cpu().numpy()
+                uncert = (1.0 - 2.0 * torch.abs(probs - 0.5)).squeeze().cpu().numpy()
         else:
             rough = rough_masks[i]
+            uncert = np.zeros_like(rough)
 
         # 전통 보정
         morpho = morphological_refine(rough)
@@ -217,7 +224,7 @@ def evaluate(
         if agent is not None:
             rough_dsc  = _dice(rough, gt)
             morpho_dsc = _dice(morpho, gt)
-            rl_mask = rl_refine(agent, img, rough, gt, max_steps=max_steps, model_type=model_type)
+            rl_mask = rl_refine(agent, img, rough, gt, uncert, max_steps=max_steps, model_type=model_type)
             rl_dsc  = _dice(rl_mask, gt)
             # rough 와 morpho 중 더 나은 것을 baseline으로 fallback
             best_baseline_dsc  = max(rough_dsc, morpho_dsc)

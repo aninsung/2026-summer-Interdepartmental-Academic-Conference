@@ -113,20 +113,18 @@ def train_attention_unet(
 
         return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
 
-    n_workers = min(8, os.cpu_count() or 4)
+    n_workers = 0
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=n_workers, pin_memory=True, persistent_workers=True,
-        prefetch_factor=4,
+        num_workers=n_workers, pin_memory=True,
         collate_fn=augment_batch,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=n_workers, pin_memory=True, persistent_workers=True,
-        prefetch_factor=4,
+        num_workers=n_workers, pin_memory=True,
         collate_fn=augment_batch,
     )
-    log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}, prefetch_factor=4")
+    log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
 
     # ── 모델 ────────────────────────────────────────────────
     model = build_attention_unet(
