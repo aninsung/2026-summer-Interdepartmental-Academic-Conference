@@ -107,10 +107,12 @@ RL-Refiner/
 ├── checkpoints/             # 학습 완료된 모델 가중치 (.pt, .zip)
 ├── configs/                 # 하이퍼파라미터 설정 (.yaml)
 ├── results/                 # 결과 이미지 (sample_comparison_*.png) 및 Box Plot
+├── logs/                    # TensorBoard 로그 및 훈련 기록 폴더
 ├── src/
 │   ├── data/                # 데이터 로더 및 멀티프로세싱 전처리
 │   ├── envs/                # Gymnasium 환경
 │   └── models/              # UNet 3+, Attention U-Net, UNet++, SegResNet, U-Net
+├── train_shape_classifier.py # Stage 1: 종양 크기 분류 판별기 학습 스크립트
 ├── train_unet3plus.py       # UNet 3+ (32ch+BN) 학습 스크립트
 ├── train_attention_unet.py  # Attention U-Net 학습/파인튜닝 스크립트
 ├── train_unetplusplus.py    # UNet++ 학습/파인튜닝 스크립트
@@ -119,6 +121,7 @@ RL-Refiner/
 ├── train_agent.py           # PPO 강화학습 에이전트 학습 스크립트
 ├── evaluate.py              # 단일 백본 시각화 및 검증 스크립트
 ├── evaluate_pipeline.py     # 전체 3-Stage 동적 라우팅 파이프라인 최종 성능 평가 스크립트
+├── generate_ppt_slides.py   # 학술제 발표용 PPT 슬라이드 생성 스크립트
 ├── run_pipeline.py          # 원스톱 자동화 파이프라인
 ├── final_models_report.md   # 최종 실험 보고서
 ├── technical_report.md      # 기술 분석 아티팩트 보고서
