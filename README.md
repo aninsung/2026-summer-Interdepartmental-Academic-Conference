@@ -85,6 +85,19 @@
 | **Large** (>=700px) | SegResNet | 249 | 0.9226 | **0.9261** | **+0.0035 (+0.35%p)** 📈 | **0.9915 px** |
 | **전체 평균 (Total)** | **동적 라우팅 파이프라인** | **1,171** | 0.7860 | **0.7938** | **+0.0078 (+0.78%p)** 📈 | **4.2583 px** |
 
+### 🖼️ 3-Stage Routing Pipeline 크기 클래스별 보정 시각화 샘플
+
+각 크기 클래스별 맞춤형 PPO 에이전트가 뇌종양 마스크의 경계를 정교하게 수정(하늘색)한 샘플 비교 이미지입니다.
+
+#### 1. Small 종양 보정 샘플 (Attention U-Net + PPO)
+![Small Sample](results/sample_comparison_attention_unet.png)
+
+#### 2. Medium 종양 보정 샘플 (UNet++ + PPO)
+![Medium Sample](results/sample_comparison_unetplusplus.png)
+
+#### 3. Large 종양 보정 샘플 (SegResNet + PPO)
+![Large Sample](results/sample_comparison_segresnet.png)
+
 ---
 
 ## 📂 Project Structure
