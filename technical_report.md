@@ -19,6 +19,8 @@
    * 가져오신 경량 코드에 기반하되, 채널 폭을 **`(32, 64, 128, 256)`**으로 적절히 늘리고 **`InstanceNorm2d` ➔ `BatchNorm2d`**로 전격 교체하여 일반화 성능과 수렴 속도를 동시에 획득하여 SOTA(최고 성능)를 확보했습니다.
 3. **Attention U-Net 의료 영상 표준 융합**:
    * 의료 AI 영상 표준 라이브러리인 **MONAI의 AttentionUnet** 모듈을 래핑 연동하여, 기존 커스텀 레이어 대비 학습 수렴 안정성과 디바이스 최적화를 보장받았습니다.
+4. **동적 라우팅 파이프라인(Dynamic Routing Pipeline) 설계**:
+   * 종양 크기를 판별하는 분류기(Shape Classifier)를 도입하여, 종양 크기(Small, Medium, Large)에 따라 최적의 백본(Attention U-Net, UNet++, SegResNet)과 맞춤형 PPO 에이전트를 동적으로 매핑하는 **3단계(3-Stage) 파이프라인 구조**를 새롭게 고안 및 이식(`evaluate_pipeline.py`) 하였습니다. 실제 의료 현장과 동일하게 Ground Truth 없이도 에이전트가 자율적으로 판단하여 정밀하게 보정할 수 있도록 설계했습니다.
 
 ---
 

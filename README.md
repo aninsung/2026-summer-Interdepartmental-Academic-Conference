@@ -43,14 +43,16 @@
 
 ---
 
-## ⚙️ Pipeline
+## ⚙️ Pipeline (Dynamic Routing Architecture)
 
-| 단계 | 설명 |
-|------|------|
-| **1** | BraTS2021 데이터셋으로 백본(UNet 3+, Attention U-Net, UNet++, SegResNet, U-Net)을 학습하여 초기 분할(Rough Mask) 생성 |
-| **2** | MRI 영상과 Rough Mask를 입력(State)으로 사용하는 Gymnasium 환경 구성 |
-| **3** | PPO 에이전트가 Erode / Dilate / Keep 등의 행동을 반복 수행하며 경계 수정 |
-| **4** | Ground Truth와 비교하여 Dice, HD95 등을 평가하고 Morphology 기법과 비교 |
+본 프로젝트는 입력된 종양 이미지의 특징을 분석하여 최적의 모델과 보정 에이전트를 동적으로 선택하는 **3-Stage Adaptive Pipeline** 구조를 사용합니다.
+
+| 단계 | 과정 | 설명 |
+|:---:|:---|:---|
+| **1** | **크기 판별 (Classification)** | 입력된 뇌종양 MRI(T1ce) 영상을 Shape Classifier(YOLO / ResNet 기반)에 통과시켜 종양의 크기(Small, Medium, Large)를 Class 0, 1, 2로 판별합니다. |
+| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(예: U-Net, UNet++, SegResNet 등)을 선택해 초기 분할(Rough Mask)을 수행합니다. |
+| **3** | **맞춤형 RL 보정 (Refinement)** | 분할된 결과(크기)에 따라 각기 다르게 학습된 맞춤형 PPO 에이전트(Small, Middle, Large)를 투입하여 마스크 경계를 팽창/침식하며 정밀하게 보정합니다. (실제 환경에서는 Ground Truth가 없으므로 에이전트의 자율적 판단에 의존합니다.) |
+| **4** | **최종 평가 (Evaluation)** | 처리된 최종 마스크를 Ground Truth와 비교하여 DSC, HD95 등을 측정하고 성능을 평가합니다. (`evaluate_pipeline.py`) |
 
 ---
 
@@ -129,37 +131,30 @@ cd RL-Refiner
 pip install -r requirements.txt
 ```
 
-### 2. SOTA 1위 모델 (UNet 3+ 하이브리드) 전체 파이프라인 실행
+### 2. 전체 파이프라인 자동 실행 (Dynamic Routing)
+
+크기 분류기(Classifier)부터 Expert 백본, 그리고 맞춤형 RL 에이전트 및 평가까지 전체 3-Stage 파이프라인을 한 번에 자동 실행합니다.
 
 ```bash
-python run_pipeline.py --model_type unet3+ --batch_size 128
+python run_pipeline.py --batch_size 64
 ```
 
-### 3. Attention U-Net 파이프라인 실행
+### 3. 특정 단계 건너뛰기 (Skip Options)
+
+이미 학습된 가중치가 있거나 특정 부분만 다시 학습/평가하고 싶을 때 유용합니다.
 
 ```bash
-python run_pipeline.py --model_type attention_unet --batch_size 64
+# 분류기와 백본 학습은 건너뛰고, RL 에이전트부터 다시 학습 후 평가
+python run_pipeline.py --skip_classifier --skip_experts
+
+# 모든 학습을 건너뛰고 최종 평가(Evaluation)만 바로 실행
+python run_pipeline.py --skip_classifier --skip_experts --skip_agents
 ```
 
-### 4. UNet++ 파이프라인 실행
+### 4. 기존 단일 모델 개별 평가 및 시각화
+
+동적 라우팅이 아닌, 단일 모델에 대한 성능만 검증하고 시각화할 때 사용합니다.
 
 ```bash
-python run_pipeline.py --model_type unetplusplus --batch_size 64
-```
-
-### 5.  UNet 파이프라인 실행
-
-```bash
-python run_pipeline.py --model_type unet
-```
-### 6.  segresnet 파이프라인 실행
-
-```bash
-python run_pipeline.py --model_type segresnet
-```
-
-### 7.기존 학습 가중치를 활용한 시각화 및 평가만 수행
-
-```bash
-python evaluate.py --model_type [원하는 모델이름]
+python evaluate.py --model_type [원하는 모델이름: unet3plus / attention_unet / segresnet 등]
 ```
