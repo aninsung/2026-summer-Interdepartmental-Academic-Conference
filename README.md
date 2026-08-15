@@ -50,8 +50,8 @@
 | 단계 | 과정 | 설명 |
 |:---:|:---|:---|
 | **1** | **크기 판별 (Classification)** | 입력된 뇌종양 MRI(T1ce) 영상을 Shape Classifier(YOLO / ResNet 기반)에 통과시켜 종양의 크기(Small, Medium, Large)를 Class 0, 1, 2로 판별합니다. |
-| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(예: U-Net, UNet++, SegResNet 등)을 선택해 초기 분할(Rough Mask)을 수행합니다. |
-| **3** | **맞춤형 RL 보정 (Refinement)** | 분할된 결과(크기)에 따라 각기 다르게 학습된 맞춤형 PPO 에이전트(Small, Middle, Large)를 투입하여 마스크 경계를 팽창/침식하며 정밀하게 보정합니다. (실제 환경에서는 Ground Truth가 없으므로 에이전트의 자율적 판단에 의존합니다.) |
+| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(Attention U-Net, UNet++, SegResNet)을 선택해 초기 분할(Rough Mask)을 수행합니다. <br>**[True Expert 기법]** 일반 사전 학습(General Pre-train) 완료 후 각 크기별로 데이터를 필터링하여 미세 조정(Fine-tuning)을 수행함으로써 크기별 가중치 특화를 극대화합니다. |
+| **3** | **맞춤형 RL 보정 (Refinement)** | 분할된 결과(크기)에 따라 각기 다르게 학습된 맞춤형 PPO 에이전트를 투입하여 마스크 경계를 정밀하게 보정합니다. <br>**Small 모드**에서는 4채널 입력 상태(MRI, 마스크, 소프트 확률 맵, Sobel 에지 맵)와 연속 행동 공간(Continuous PPO)을 적용하여 정밀 경계 제어 성능을 극대화했으며, **Medium/Large 모드**는 기존 3채널 이산 행동 공간 에이전트를 적용하고 공통적으로 안전 복원용 Gated Fallback을 탑재했습니다. |
 | **4** | **최종 평가 (Evaluation)** | 처리된 최종 마스크를 Ground Truth와 비교하여 DSC, HD95 등을 측정하고 성능을 평가합니다. (`evaluate_pipeline.py`) |
 
 ---
