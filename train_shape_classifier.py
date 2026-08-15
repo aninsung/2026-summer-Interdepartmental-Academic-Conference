@@ -1,4 +1,5 @@
 import os
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,17 +10,23 @@ from src.models.shape_classifier import build_shape_classifier
 import time
 
 def main():
+    parser = argparse.ArgumentParser(description="Shape Classifier Training")
+    parser.add_argument("--train_root", type=str, default="src/data/archive/BraTS2021_Training_Data", help="데이터셋 경로")
+    parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한 (None이면 전체)")
+    parser.add_argument("--batch_size", type=int, default=64, help="배치 크기")
+    parser.add_argument("--epochs", type=int, default=15, help="에폭 수")
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     
-    # 1. 원본 데이터셋 로드 (최대 100명의 환자 = 약 6,000장 이상의 슬라이스)
-    #    평가를 빨리 확인하기 위해 100명으로 제한하여 훈련합니다.
-    print("Loading BraTS Dataset...")
+    # 1. 원본 데이터셋 로드
+    print(f"Loading BraTS Dataset from {args.train_root}...")
     brats_dataset = BraTS2020Dataset(
-        root_dir="src/data/archive/BraTS2021_Training_Data",
+        root_dir=args.train_root,
         modality="t1ce",
         target_size=128,
-        max_patients=100, 
+        max_patients=args.max_train_patients, 
         simulate_rough=False # GT 기반으로 넓이를 재므로 상관없음
     )
     
@@ -32,8 +39,8 @@ def main():
     val_size = total_size - train_size
     train_set, val_set = random_split(shape_dataset, [train_size, val_size])
     
-    train_loader = DataLoader(train_set, batch_size=64, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_set, batch_size=64, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
     
     # 3. 모델 초기화
     model = build_shape_classifier(num_classes=3).to(device)
@@ -41,7 +48,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
     # 4. 훈련 루프
-    num_epochs = 15
+    num_epochs = args.epochs
     best_val_acc = 0.0
     os.makedirs("checkpoints", exist_ok=True)
     

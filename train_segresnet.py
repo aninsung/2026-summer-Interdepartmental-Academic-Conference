@@ -55,16 +55,27 @@ def train_segresnet(
     device: str = "auto",
     use_bce_dice: bool = True,
     augment: bool = True,
+    refinement_mode: str = None, # Added for True Expert filtering
+    pretrained_path: str = "",   # Added for Fine-tuning
 ) -> None:
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
     log.info(f"Device: {device}")
 
+    # Fine-tuning 설정 조율
+    if refinement_mode and pretrained_path:
+        if epochs == 20:
+            epochs = 8
+        if lr == 3e-4:
+            lr = 5e-5
+        log.info(f"🔧 [Fine-Tuning Mode] 자동 설정 변경: epochs={epochs}, lr={lr:.1e}")
+
     # ── 데이터 ──────────────────────────────────────────────
     if use_real_data:
         log.info("실제 BraTS2021 데이터 사용")
         from src.data.brats2020_dataset import BraTS2020Dataset
+        import numpy as np
 
         full_ds = BraTS2020Dataset(
             root_dir=train_root,
@@ -73,6 +84,25 @@ def train_segresnet(
             max_patients=max_train_patients,
             simulate_rough=True,
         )
+        
+        # 크기별 맞춤형 전문가 학습을 위한 데이터셋 필터링 (True Expert 적용)
+        if refinement_mode:
+            ref_m = refinement_mode.lower()
+            filtered = []
+            for sample in full_ds._samples:
+                # sample = (img_sl, gt_sl, rough_sl, has_et)
+                gt = sample[1]
+                area = np.sum(gt)
+                if ref_m == "small" and area < 300:
+                    filtered.append(sample)
+                elif ref_m == "medium" and 300 <= area < 700:
+                    filtered.append(sample)
+                elif ref_m == "large" and area >= 700:
+                    filtered.append(sample)
+            
+            old_len = len(full_ds._samples)
+            full_ds._samples = filtered
+            log.info(f"[{refinement_mode.upper()} Expert] 필터링 완료: {len(full_ds._samples)}개 슬라이스 사용 (기존 {old_len} 중)")
         # BraTS2021은 별도 val 폴더가 없음 → train 데이터 80/20 분할
         if val_root and val_root != train_root and val_root != "":
             try:
@@ -152,6 +182,10 @@ def train_segresnet(
         init_filters=init_filters,
         dropout_prob=dropout_prob,
     ).to(device)
+
+    if pretrained_path and os.path.exists(pretrained_path):
+        log.info(f"Loading pre-trained weights from {pretrained_path} for fine-tuning...")
+        model.load_state_dict(torch.load(pretrained_path, map_location=device))
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"SegResNet 파라미터 수: {n_params:,}  (init_filters={init_filters})")
@@ -287,6 +321,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--max_val_patients", type=int, default=None, help="검증 환자 수 제한 (None=전체)"
+    )
+    parser.add_argument(
+        "--refinement_mode", type=str, default=None, choices=["small", "medium", "large"], help="True Expert 학습을 위한 타겟 크기 클래스"
+    )
+    parser.add_argument(
+        "--pretrained_path", type=str, default="", help="파인튜닝할 사전 학습 가중치 경로"
     )
     # SegResNet 구조
     parser.add_argument(

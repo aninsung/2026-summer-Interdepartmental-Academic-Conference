@@ -16,7 +16,7 @@ Episode: 최대 max_steps 스텝, DSC >= target_dsc 이면 조기 종료
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt
+from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt, gaussian_filter, sobel
 
 
 def _dice(a: np.ndarray, b: np.ndarray, smooth: float = 1e-5) -> float:
@@ -92,7 +92,7 @@ class MaskRefinementEnv(gym.Env):
         images: np.ndarray,        # (N, H, W) float32
         gt_masks: np.ndarray,      # (N, H, W) float32
         rough_masks: np.ndarray,   # (N, H, W) float32
-        uncertainty_maps: np.ndarray = None, # (N, H, W) float32
+        uncertainty_maps: np.ndarray = None, # (N, H, W) float32 (Soft Probability Maps)
         max_steps: int = 20,
         target_dsc: float = 0.88,
         step_penalty: float = 0.005,
@@ -104,10 +104,14 @@ class MaskRefinementEnv(gym.Env):
         self.images = images
         self.gt_masks = gt_masks
         self.rough_masks = rough_masks
+        
+        # Soft Probability Maps 설정 (없으면 rough_masks에 가우시안 블러 적용하여 시뮬레이션)
         if uncertainty_maps is not None:
-            self.uncertainty_maps = uncertainty_maps
+            self.probability_maps = uncertainty_maps.copy()
         else:
-            self.uncertainty_maps = np.zeros_like(images)
+            self.probability_maps = np.zeros_like(images)
+            for i in range(len(rough_masks)):
+                self.probability_maps[i] = gaussian_filter(rough_masks[i].astype(float), sigma=2.0)
             
         self.max_steps = max_steps
         self.target_dsc = target_dsc
@@ -118,21 +122,43 @@ class MaskRefinementEnv(gym.Env):
         N, H, W = images.shape
         self.H, self.W = H, W
 
-        # (3, H, W) 이미지 형태로 관측 공간 정의 (small인 경우 64x64 Zoom-in)
-        crop_size = 64 if self.refinement_mode == "small" else self.H
-        self.observation_space = spaces.Box(
-            low=0.0, high=1.0,
-            shape=(3, crop_size, crop_size),
-            dtype=np.float32
-        )
+        # 이미지 그래디언트 맵 (Sobel Edge Map) 미리 계산
+        self.edge_maps = np.zeros_like(images)
+        for i in range(len(images)):
+            img = images[i]
+            edge_x = sobel(img, axis=0)
+            edge_y = sobel(img, axis=1)
+            edge = np.sqrt(edge_x**2 + edge_y**2)
+            e_min, e_max = edge.min(), edge.max()
+            if e_max > e_min:
+                edge = (edge - e_min) / (e_max - e_min)
+            self.edge_maps[i] = edge
+
+        # 관측 공간 정의 (small은 4채널 64x64 Zoom-in, 그 외는 기존 체크포인트와 호환되는 3채널 128x128)
+        if self.refinement_mode == "small":
+            self.observation_space = spaces.Box(
+                low=0.0, high=1.0,
+                shape=(4, 64, 64),
+                dtype=np.float32
+            )
+        else:
+            self.observation_space = spaces.Box(
+                low=0.0, high=1.0,
+                shape=(3, self.H, self.W),
+                dtype=np.float32
+            )
         
-        # 8개 섹터, 각 섹터별 5개 행동 (수축/유지/팽창) - 통합 적용
-        self.action_space = spaces.MultiDiscrete([5] * 8)
+        # 8개 섹터, 각 섹터별 행동 정의 (small은 연속 행동 공간 Box, 그 외는 이산 MultiDiscrete)
+        if self.refinement_mode == "small":
+            self.action_space = spaces.Box(low=-2.0, high=2.0, shape=(8,), dtype=np.float32)
+        else:
+            self.action_space = spaces.MultiDiscrete([5] * 8)
 
         self._idx = 0
         self._current_mask: np.ndarray = np.zeros((H, W), dtype=np.float32)
         self._current_image: np.ndarray = np.zeros((H, W), dtype=np.float32)
-        self._current_uncertainty: np.ndarray = np.zeros((H, W), dtype=np.float32)
+        self._current_prob: np.ndarray = np.zeros((H, W), dtype=np.float32)
+        self._current_edge: np.ndarray = np.zeros((H, W), dtype=np.float32)
         self._current_gt: np.ndarray = np.zeros((H, W), dtype=np.float32)
         self._step_count = 0
         self._prev_dsc = 0.0
@@ -140,8 +166,8 @@ class MaskRefinementEnv(gym.Env):
 
     # ── 내부 유틸 ──────────────────────────────────────────
     def _obs(self) -> np.ndarray:
-        obs = np.stack([self._current_image, self._current_mask, self._current_uncertainty], axis=0).astype(np.float32)
         if self.refinement_mode == "small":
+            obs = np.stack([self._current_image, self._current_mask, self._current_prob, self._current_edge], axis=0).astype(np.float32)
             y_indices, x_indices = np.where(self._current_mask > 0.5)
             if len(y_indices) > 0:
                 cy, cx = int(y_indices.mean()), int(x_indices.mean())
@@ -152,7 +178,7 @@ class MaskRefinementEnv(gym.Env):
             y1, y2 = max(0, cy - half), min(self.H, cy + half)
             x1, x2 = max(0, cx - half), min(self.W, cx + half)
             
-            cropped = np.zeros((3, 64, 64), dtype=np.float32)
+            cropped = np.zeros((4, 64, 64), dtype=np.float32)
             pad_y1 = half - (cy - y1)
             pad_y2 = 64 - (half - (y2 - cy))
             pad_x1 = half - (cx - x1)
@@ -160,7 +186,10 @@ class MaskRefinementEnv(gym.Env):
             
             cropped[:, pad_y1:pad_y2, pad_x1:pad_x2] = obs[:, y1:y2, x1:x2]
             return cropped
-        return obs
+        else:
+            # 기존 3채널 체크포인트 가중치와 호환되는 3개 채널 반환 (MRI, 마스크, 0-Uncertainty)
+            obs = np.stack([self._current_image, self._current_mask, np.zeros_like(self._current_image)], axis=0).astype(np.float32)
+            return obs
 
     # ── Gymnasium API ──────────────────────────────────────
     def reset(self, *, seed=None, options=None):
@@ -172,10 +201,17 @@ class MaskRefinementEnv(gym.Env):
 
         self._current_image = self.images[self._idx].copy()
         self._current_mask = self.rough_masks[self._idx].copy()
-        self._current_uncertainty = self.uncertainty_maps[self._idx].copy()
+        self._current_prob = self.probability_maps[self._idx].copy()
+        self._current_edge = self.edge_maps[self._idx].copy()
         self._current_gt = self.gt_masks[self._idx].copy()
         self._step_count = 0
         
+        # 초기 Rough 마스크 백업 및 허용 경계 제약용 마스크 사전 계산 (+-2 픽셀 범위)
+        self._initial_rough_mask = self._current_mask.copy()
+        struct_limit = np.ones((3, 3), dtype=bool)
+        self._min_mask_limit = binary_erosion(self._initial_rough_mask.astype(bool), structure=struct_limit, iterations=2).astype(np.float32)
+        self._max_mask_limit = binary_dilation(self._initial_rough_mask.astype(bool), structure=struct_limit, iterations=2).astype(np.float32)
+
         # Boundary-Band calculation for reward
         struct = np.ones((7, 7), dtype=bool)
         dilated_gt = binary_dilation(self._current_gt.astype(bool), structure=struct)
@@ -212,8 +248,18 @@ class MaskRefinementEnv(gym.Env):
         new_mask = self._current_mask.copy()
         action_penalty = 0.0
         
+        # 행동 매핑: 연속 공간인 경우 [-2, 2] 실수값을 반올림 후 [0, 4] 정수로 변환
+        mapped_actions = []
         for i in range(8):
-            act = int(action[i])
+            if self.refinement_mode == "small":
+                act_val = action[i]
+                act = int(np.clip(np.round(act_val), -2, 2) + 2)
+            else:
+                act = int(action[i])
+            mapped_actions.append(act)
+
+        for i in range(8):
+            act = mapped_actions[i]
             sector_pixels = (sectors == i)
             
             # Medium/Large: 보수적 조정 (큰 변형인 0, 4 선택 시 페널티 부여 및 작은 변형으로 강제)
@@ -241,38 +287,46 @@ class MaskRefinementEnv(gym.Env):
         new_mask_bool = binary_dilation(new_mask_bool, structure=struct, iterations=1) # Opening
         new_mask = new_mask_bool.astype(np.float32)
 
-        num_non_keep = sum([1 for a in action if int(a) != 2])
+        # ── 수색 영역 제한 (Boundary Band Constraint) ──
+        # 초기 Rough 마스크 대비 +-2 픽셀 범위를 넘지 못하도록 클리핑
+        new_mask = np.maximum(self._min_mask_limit, np.minimum(new_mask, self._max_mask_limit))
+
+        num_non_keep = sum([1 for a in mapped_actions if a != 2])
         step_cost = num_non_keep * (self.step_penalty / 8.0)
         is_keep_and_good = (num_non_keep == 0 and self._prev_dsc >= 0.85)
 
         new_dsc = _dice(new_mask, self._current_gt)
         new_boundary_dsc = _dice(new_mask * self._boundary_band, self._current_gt * self._boundary_band)
 
-        # ── 보상: Shape Class (refinement_mode) 기반 고정 보상 ────────────────
+        # ── 보상: 크기 비례 보상 (Size-normalized Reward) 및 Asymmetric Penalty ──
         delta_dsc = new_dsc - self._prev_dsc
         delta_boundary_dsc = new_boundary_dsc - self._prev_boundary_dsc
         
+        # 종양 크기 가중치 계산 (면적이 작을수록 보상 증폭, 최대 3배)
+        tumor_area = max(1.0, float(np.sum(self._current_gt)))
+        size_scale = max(0.5, min(3.0, 300.0 / tumor_area))
+        
+        # 감점 페널티 비대칭 적용 (하락 시 감점 2배)
+        dsc_weight = delta_dsc if delta_dsc >= 0 else delta_dsc * 2.0
+        boundary_weight = delta_boundary_dsc if delta_boundary_dsc >= 0 else delta_boundary_dsc * 2.0
+
         if self.refinement_mode == "large":
             # Large: HD95-Focused (보수적 조정 & 외곽 이상치 제거 집중)
-            reward = delta_dsc * 10.0 + delta_boundary_dsc * 10.0
+            reward = (dsc_weight * 10.0 + boundary_weight * 10.0) * size_scale
             hd95_val = _hd95(new_mask, self._current_gt)
             reward -= hd95_val * 0.05
             reward -= action_penalty * 0.5
             
         elif self.refinement_mode == "medium":
             # Medium: Conservative (경계 DSC 위주 및 액션 페널티 적용)
-            reward = (delta_dsc * 0.3 + delta_boundary_dsc * 0.7) * 30.0 
-            if delta_boundary_dsc < 0 or delta_dsc < 0:
-                reward *= 2.0
+            reward = (dsc_weight * 0.3 + boundary_weight * 0.7) * 30.0 * size_scale
             if self._step_count % 5 == 0 or num_non_keep == 0:
                 reward -= _hd95(new_mask, self._current_gt) * 0.02
             reward -= action_penalty * 0.5
             
         else:
             # Small: Aggressive (전통적인 전역 및 경계 DSC 향상 위주)
-            reward = (delta_dsc * 0.3 + delta_boundary_dsc * 0.7) * 30.0 
-            if delta_boundary_dsc < 0 or delta_dsc < 0:
-                reward *= 2.0
+            reward = (dsc_weight * 0.3 + boundary_weight * 0.7) * 30.0 * size_scale
             if self._step_count % 5 == 0 or num_non_keep == 0:
                 reward -= _hd95(new_mask, self._current_gt) * 0.01
 

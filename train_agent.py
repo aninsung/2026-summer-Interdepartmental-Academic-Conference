@@ -313,19 +313,20 @@ def load_real_data(
 
     rng = np.random.default_rng(noise_seed)
 
-    # 1. 합성 노이즈 마스크 생성 (평가와 동일한 노이즈 세기 적용)
+    # 1. 합성 노이즈 마스크 및 시뮬레이션된 확률 맵 생성
     from src.data.brats2020_dataset import make_noisy_mask
+    from scipy.ndimage import gaussian_filter
     morph_px = 5  # train/eval 동일: max_morph_px=5 (분포 일치)
-    log.info(f"학습 데이터에 대한 합성 노이즈 마스크 생성 중... (max_morph_px={morph_px})")
+    log.info(f"학습 데이터에 대한 합성 노이즈 마스크 및 시뮬레이션 확률 맵 생성 중... (max_morph_px={morph_px})")
     synthetic_roughs = np.stack(
         [make_noisy_mask(gt, rng, max_morph_px=morph_px) for gt in gts], axis=0
     )
+    synthetic_probs = np.zeros_like(synthetic_roughs)
+    for i in range(len(synthetic_roughs)):
+        synthetic_probs[i] = gaussian_filter(synthetic_roughs[i].astype(float), sigma=2.0)
 
-    # 2. 실제 모델 예측 마스크 생성 (AdaptivePipeline 사용)
-    actual_roughs = synthetic_roughs.copy()
-    actual_uncerts = np.zeros_like(synthetic_roughs)
+    # 2. 실제 모델 예측 마스크 및 Sigmoid 확률 맵 생성 (AdaptivePipeline 사용)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
     from src.models.dynamic_router import AdaptivePipeline
     log.info(f"AdaptivePipeline 3-Stage 라우터 로드 중... (Device: {device})")
     pipeline = AdaptivePipeline(device)
@@ -333,8 +334,9 @@ def load_real_data(
     batch_size = 64
     num_slices = len(imgs)
     preds = []
+    probs = []
     class_preds_all = []
-    log.info("학습 데이터에 대한 AdaptivePipeline 초안 마스크 생성 중...")
+    log.info("학습 데이터에 대한 AdaptivePipeline 초안 마스크 및 확률 맵 생성 중...")
     with torch.no_grad():
         for start_idx in range(0, num_slices, batch_size):
             end_idx = min(start_idx + batch_size, num_slices)
@@ -343,10 +345,14 @@ def load_real_data(
             
             rough_masks_t, class_preds = pipeline(batch_t)
             batch_preds_bin = (rough_masks_t > 0.5).float().squeeze(1).cpu().numpy()
+            batch_preds_prob = rough_masks_t.squeeze(1).cpu().numpy()
+            
             preds.append(batch_preds_bin)
+            probs.append(batch_preds_prob)
             class_preds_all.extend(class_preds.cpu().numpy().tolist())
             
     actual_roughs = np.concatenate(preds, axis=0)
+    actual_probs = np.concatenate(probs, axis=0)
     class_preds_all = np.array(class_preds_all)
     log.info(f"AdaptivePipeline 초안 마스크 생성 완료 (개수: {len(actual_roughs)})")
 
@@ -357,8 +363,9 @@ def load_real_data(
     imgs = imgs[mask_indices]
     gts = gts[mask_indices]
     synthetic_roughs = synthetic_roughs[mask_indices]
+    synthetic_probs = synthetic_probs[mask_indices]
     actual_roughs = actual_roughs[mask_indices]
-    actual_uncerts = actual_uncerts[mask_indices]
+    actual_probs = actual_probs[mask_indices]
     
     if len(imgs) == 0:
         raise ValueError(f"해당 클래스({refinement_mode})로 분류된 데이터가 하나도 없습니다!")
@@ -370,17 +377,17 @@ def load_real_data(
     imgs = np.concatenate([imgs, imgs], axis=0)
     gts = np.concatenate([gts, gts], axis=0)
     roughs = np.concatenate([actual_roughs, synthetic_roughs], axis=0)
-    uncerts_all = np.concatenate([actual_uncerts, np.zeros_like(synthetic_roughs)], axis=0)
+    probs_all = np.concatenate([actual_probs, synthetic_probs], axis=0)
     
     # 순열(permutation) 믹스
     perm = rng.permutation(len(imgs))
     imgs = imgs[perm]
     gts = gts[perm]
     roughs = roughs[perm]
-    uncerts_all = uncerts_all[perm]
+    probs_all = probs_all[perm]
     log.info(f"실제 예측 50% + 합성 노이즈 50% 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
     
-    return imgs, gts, roughs, uncerts_all
+    return imgs, gts, roughs, probs_all
 
 
 # ──────────────────────────────────────────────
