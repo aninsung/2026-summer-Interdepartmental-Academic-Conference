@@ -75,7 +75,19 @@
 📄 **[Technical Report](technical_report.md)**  
 📄 **[Experiments History](EXPERIMENTS.md)**
 
-### 종합 랭킹 및 듀얼 SOTA 백본 성능 비교 (50명 2,902 슬라이스 평가)
+### ⚙️ 3-Stage Adaptive Pipeline 최종 성능 결과 (20명 1,171 슬라이스 평가)
+본 프로젝트의 핵심 구조인 3단계 동적 라우팅 및 4채널 연속 PPO 보정을 적용한 최종 파이프라인의 성능 검증 결과입니다. (`evaluate_pipeline.py` 실행 결과)
+
+| 종양 크기 분류 (크기 기준) | Expert 백본 모델 | 평가 슬라이스 수 | 초기 DSC (Stage 2) | **최종 DSC (Stage 3)** | 성능 변화 (DSC) | **보정 후 HD95** |
+|:---:|:---|:---:|:---:|:---:|:---:|:---:|
+| **Small** (<300px) | Attention U-Net | 430 | 0.5990 | **0.6144** | **+0.0154 (+1.54%p)** 🚀 | **9.1517 px** |
+| **Medium** (300px~700px) | UNet++ | 492 | 0.8803 | **0.8835** | **+0.0032 (+0.32%p)** 📈 | **1.6349 px** |
+| **Large** (>=700px) | SegResNet | 249 | 0.9226 | **0.9261** | **+0.0035 (+0.35%p)** 📈 | **0.9915 px** |
+| **전체 평균 (Total)** | **동적 라우팅 파이프라인** | **1,171** | 0.7860 | **0.7938** | **+0.0078 (+0.78%p)** 📈 | **4.2583 px** |
+
+---
+
+### 종합 랭킹 및 듀얼 SOTA 백본 성능 비교 (50명 2,902 슬라이스 독립 평가)
 
 | 순위 | 백본 모델 (+ RL-Refiner) | **DSC (높을수록 좋음 ↑)** | **HD95 (낮을수록 좋음 ↓)** | **표준편차 (안정성)** | SOTA 분류 / 평가 |
 |:---:|:---|:---:|:---:|:---:|:---|
@@ -105,12 +117,13 @@ RL-Refiner/
 │   ├── envs/                # Gymnasium 환경
 │   └── models/              # UNet 3+, Attention U-Net, UNet++, SegResNet, U-Net
 ├── train_unet3plus.py       # UNet 3+ (32ch+BN) 학습 스크립트
-├── train_attention_unet.py  # Attention U-Net 학습 스크립트
-├── train_unetplusplus.py    # UNet++ 학습 스크립트
-├── train_segresnet.py       # SegResNet 학습 스크립트
+├── train_attention_unet.py  # Attention U-Net 학습/파인튜닝 스크립트
+├── train_unetplusplus.py    # UNet++ 학습/파인튜닝 스크립트
+├── train_segresnet.py       # SegResNet 학습/파인튜닝 스크립트
 ├── train_unet.py            # U-Net 학습 스크립트
 ├── train_agent.py           # PPO 강화학습 에이전트 학습 스크립트
-├── evaluate.py              # 전지 레이아웃 시각화 및 검증 스크립트
+├── evaluate.py              # 단일 백본 시각화 및 검증 스크립트
+├── evaluate_pipeline.py     # 전체 3-Stage 동적 라우팅 파이프라인 최종 성능 평가 스크립트
 ├── run_pipeline.py          # 원스톱 자동화 파이프라인
 ├── final_models_report.md   # 최종 실험 보고서
 ├── technical_report.md      # 기술 분석 아티팩트 보고서
@@ -126,8 +139,8 @@ RL-Refiner/
 ### 1. 저장소 클론 및 의존성 설치
 
 ```bash
-git clone https://github.com/USERNAME/RL-Refiner.git
-cd RL-Refiner
+git clone https://github.com/aninsung/2026-summer-Interdepartmental-Academic-Conference.git
+cd 2026-summer-Interdepartmental-Academic-Conference
 pip install -r requirements.txt
 ```
 
