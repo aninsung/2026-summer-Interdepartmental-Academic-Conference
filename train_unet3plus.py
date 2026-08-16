@@ -5,8 +5,7 @@ Step 1: UNet 3+ (UNet3+) 학습 스크립트
 사용 예시:
   # 실제 BraTS2021 데이터 (기본값)
   python train_unet3plus.py
-
-
+"""
 
 import os
 import sys
@@ -44,6 +43,8 @@ def train_unet3plus(
     use_bce_dice: bool = True,
     augment: bool = True,
     use_dsv: bool = False,
+    refinement_mode: str = None,
+    pretrained_path: str = None,
 ) -> None:
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,6 +55,7 @@ def train_unet3plus(
     if use_real_data:
         log.info("실제 BraTS2021 데이터 사용")
         from src.data.brats2020_dataset import BraTS2020Dataset
+        import numpy as np
         full_ds = BraTS2020Dataset(
             root_dir=train_root,
             modality=modality,
@@ -61,6 +63,45 @@ def train_unet3plus(
             max_patients=max_train_patients,
             simulate_rough=True,
         )
+        
+        # 크기별 맞춤형 전문가 학습을 위한 데이터셋 필터링 (True Expert 적용)
+        if refinement_mode:
+            ref_m = refinement_mode.lower()
+            filtered = []
+            for sample in full_ds._samples:
+                # sample = (img_sl, gt_sl, rough_sl, has_et)
+                gt = sample[1]
+                area = np.sum(gt)
+                if ref_m == "small" and 0 < area < 300:
+                    # 64x64 Zoom-in Patch 추출 (Small Expert 전용)
+                    img_sl, gt_sl, rough_sl, has_et = sample
+                    y_indices, x_indices = np.where(gt_sl > 0)
+                    cy = int(np.mean(y_indices)) if len(y_indices) > 0 else gt_sl.shape[0] // 2
+                    cx = int(np.mean(x_indices)) if len(x_indices) > 0 else gt_sl.shape[1] // 2
+                    
+                    # 64x64 Crop
+                    patch_size = 64
+                    half = patch_size // 2
+                    H, W = gt_sl.shape
+                    y1 = max(0, min(H - patch_size, cy - half))
+                    x1 = max(0, min(W - patch_size, cx - half))
+                    y2 = y1 + patch_size
+                    x2 = x1 + patch_size
+                    
+                    crop_img = img_sl[y1:y2, x1:x2]
+                    crop_gt = gt_sl[y1:y2, x1:x2]
+                    crop_rough = rough_sl[y1:y2, x1:x2]
+                    
+                    filtered.append((crop_img, crop_gt, crop_rough, has_et))
+                elif ref_m == "medium" and 300 <= area < 700:
+                    filtered.append(sample)
+                elif ref_m == "large" and area >= 700:
+                    filtered.append(sample)
+            
+            old_len = len(full_ds._samples)
+            full_ds._samples = filtered
+            log.info(f"[{refinement_mode.upper()} Expert] 필터링 완료: {len(full_ds._samples)}개 슬라이스 사용 (기존 {old_len} 중)")
+            
         if val_root and val_root != train_root and val_root != "":
             try:
                 val_ds = BraTS2020Dataset(
@@ -133,6 +174,10 @@ def train_unet3plus(
         out_channels=1,
         DSV=use_dsv
     ).to(device)
+
+    if pretrained_path and os.path.exists(pretrained_path):
+        log.info(f"사전 학습된 가중치 로드 중: {pretrained_path}")
+        model.load_state_dict(torch.load(pretrained_path, map_location=device))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if use_bce_dice:
@@ -269,6 +314,8 @@ if __name__ == "__main__":
     parser.add_argument("--no_bce_dice", action="store_true", default=False, help="DiceLoss만 사용")
     parser.add_argument("--no_augment", action="store_true", default=False, help="Data Augmentation 비활성화")
     parser.add_argument("--use_dsv", action="store_true", default=False, help="Deep Supervision(DSV) 활성화")
+    parser.add_argument("--refinement_mode", type=str, default=None, choices=["small", "medium", "large"], help="크기별 특화 모드")
+    parser.add_argument("--pretrained_path", type=str, default=None, help="사전 학습 가중치 파일 경로")
     
     args = parser.parse_args()
     if args.no_bce_dice:

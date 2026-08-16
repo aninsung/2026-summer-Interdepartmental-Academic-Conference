@@ -110,10 +110,6 @@ def rl_refine(
     )
     obs, _ = env.reset(seed=0)
 
-    # best_mask: 에피소드 전체에서 DSC가 가장 높았던 마스크 추적
-    best_dsc = _dice(rough_mask, gt_mask)
-    best_mask = rough_mask.copy()
-
     for _ in range(max_steps):
         action, _ = model.predict(obs, deterministic=True)
         if isinstance(action, (np.ndarray, list)):
@@ -121,14 +117,10 @@ def rl_refine(
         else:
             act_input = int(action)
         obs, _, terminated, truncated, info = env.step(act_input)
-        step_dsc = info.get("dsc", _dice(env._current_mask, gt_mask))
-        if step_dsc > best_dsc:
-            best_dsc = step_dsc
-            best_mask = env._current_mask.copy()
         if terminated or truncated:
             break
 
-    return best_mask
+    return env._current_mask.copy()
 
 
 # ── 평가 루프 ─────────────────────────────────────────────────────────────────

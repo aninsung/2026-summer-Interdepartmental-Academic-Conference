@@ -16,6 +16,7 @@ import argparse
 import logging
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 # 프로젝트 루트를 경로에 추가
@@ -26,6 +27,25 @@ from src.models.segresnet import BCEDiceLoss, DiceLoss, compute_dice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+class FocalTverskyLoss(nn.Module):
+    def __init__(self, alpha: float = 0.3, beta: float = 0.7, gamma: float = 2.0, smooth: float = 1e-5):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        inputs = torch.sigmoid(inputs).view(-1)
+        targets = targets.view(-1)
+
+        tp = (inputs * targets).sum()
+        fp = (inputs * (1.0 - targets)).sum()
+        fn = ((1.0 - inputs) * targets).sum()
+
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        return (1.0 - tversky) ** self.gamma
 
 
 def train_attention_unet(
@@ -47,6 +67,8 @@ def train_attention_unet(
     augment: bool = True,
     refinement_mode: str = None, # Added for True Expert filtering
     pretrained_path: str = "",   # Added for Fine-tuning
+    tversky_alpha: float = 0.3,
+    tversky_beta: float = 0.7,
 ) -> None:
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -82,8 +104,27 @@ def train_attention_unet(
                 # sample = (img_sl, gt_sl, rough_sl, has_et)
                 gt = sample[1]
                 area = np.sum(gt)
-                if ref_m == "small" and area < 300:
-                    filtered.append(sample)
+                if ref_m == "small" and 0 < area < 300:
+                    # 64x64 Zoom-in Patch 추출 (Small Expert 전용)
+                    img_sl, gt_sl, rough_sl, has_et = sample
+                    y_indices, x_indices = np.where(gt_sl > 0)
+                    cy = int(np.mean(y_indices)) if len(y_indices) > 0 else gt_sl.shape[0] // 2
+                    cx = int(np.mean(x_indices)) if len(x_indices) > 0 else gt_sl.shape[1] // 2
+                    
+                    # 64x64 Crop
+                    patch_size = 64
+                    half = patch_size // 2
+                    H, W = gt_sl.shape
+                    y1 = max(0, min(H - patch_size, cy - half))
+                    x1 = max(0, min(W - patch_size, cx - half))
+                    y2 = y1 + patch_size
+                    x2 = x1 + patch_size
+                    
+                    crop_img = img_sl[y1:y2, x1:x2]
+                    crop_gt = gt_sl[y1:y2, x1:x2]
+                    crop_rough = rough_sl[y1:y2, x1:x2]
+                    
+                    filtered.append((crop_img, crop_gt, crop_rough, has_et))
                 elif ref_m == "medium" and 300 <= area < 700:
                     filtered.append(sample)
                 elif ref_m == "large" and area >= 700:
@@ -91,7 +132,7 @@ def train_attention_unet(
             
             old_len = len(full_ds._samples)
             full_ds._samples = filtered
-            log.info(f"[{refinement_mode.upper()} Expert] 필터링 완료: {len(full_ds._samples)}개 슬라이스 사용 (기존 {old_len} 중)")
+            log.info(f"[{refinement_mode.upper()} Expert] 필터링 완료: {len(full_ds._samples)}개 64x64 패치 슬라이스 사용 (기존 {old_len} 중)")
         if val_root and val_root != train_root and val_root != "":
             try:
                 val_ds = BraTS2020Dataset(
@@ -167,7 +208,10 @@ def train_attention_unet(
         model.load_state_dict(torch.load(pretrained_path, map_location=device))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    if use_bce_dice:
+    if refinement_mode == "small":
+        criterion = FocalTverskyLoss(alpha=tversky_alpha, beta=tversky_beta, gamma=2.0)
+        log.info(f"손실 함수: FocalTverskyLoss (alpha={tversky_alpha}, beta={tversky_beta}, gamma=2.0)")
+    elif use_bce_dice:
         criterion = BCEDiceLoss(bce_weight=0.5)
         log.info("손실 함수: BCEDiceLoss (BCE 0.5 + Dice 0.5)")
     else:
@@ -275,6 +319,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_val_patients", type=int, default=None, help="검증 환자 수 제한")
     parser.add_argument("--refinement_mode", type=str, default=None, choices=["small", "medium", "large"], help="True Expert 학습을 위한 타겟 크기 클래스")
     parser.add_argument("--pretrained_path", type=str, default="", help="파인튜닝할 사전 학습 가중치 경로")
+    parser.add_argument("--tversky_alpha", type=float, default=0.3, help="FocalTverskyLoss alpha")
+    parser.add_argument("--tversky_beta", type=float, default=0.7, help="FocalTverskyLoss beta")
     # 학습 관련
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
