@@ -1,22 +1,20 @@
 """
 Step 2: RL 환경 설계 (Gymnasium 기반 커스텀 환경)
 
-State  : [image(1,H,W), current_mask(1,H,W)] → 채널 concat → (2, H, W) 이미지
-         CnnPolicy가 GPU에서 효율적으로 처리할 수 있는 형태
-Action : 경계 픽셀을 기준으로 5-class 액션 (기존 3-class → 5-class 확장)
-         0 = 강하게 수축 (erode 2px)
-         1 = 약하게 수축 (erode 1px)
-         2 = 유지 (keep)
-         3 = 약하게 팽창 (dilate 1px)
-         4 = 강하게 팽창 (dilate 2px)
-Reward : Boundary-DSC 기반 보상 강화 + HD95 패널티
+State  : [image, current_mask, soft_probability, (optional edge)]
+         - Medium/Large: (3, H, W) [Image, Current Mask, Soft Prob Map]
+         - Small (Zoom-in): (4, 64, 64) [Zoomed Image, Mask, Prob, Edge Map]
+Action : 8방위 섹터별 마스크 수축/팽창 조절
+         - Medium/Large: MultiDiscrete([5]*8) (0=강수축 2px, 1=약수축 1px, 2=유지, 3=약팽창 1px, 4=강팽창 2px)
+         - Small: Box(-2.0, 2.0, shape=(8,)) 연속적 픽셀 조절
+Reward : Boundary-DSC 기반 보상 강화 + HD95(px 단위) 패널티 + 위상 최적화
 Episode: 최대 max_steps 스텝, DSC >= target_dsc 이면 조기 종료
 """
 
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt, gaussian_filter, sobel
+from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt, gaussian_filter, sobel, label
 
 
 def _dice(a: np.ndarray, b: np.ndarray, smooth: float = 1e-5) -> float:
@@ -168,8 +166,13 @@ class MaskRefinementEnv(gym.Env):
     def _obs(self) -> np.ndarray:
         if self.refinement_mode == "small":
             obs = np.stack([self._current_image, self._current_mask, self._current_prob, self._current_edge], axis=0).astype(np.float32)
-            y_indices, x_indices = np.where(self._current_mask > 0.5)
-            if len(y_indices) > 0:
+            
+            # Find connected components to avoid center-of-mass falling in empty space between disconnected components
+            lbl, num_features = label(self._current_mask > 0.5)
+            if num_features > 0:
+                component_sizes = [np.sum(lbl == k) for k in range(1, num_features + 1)]
+                largest_k = np.argmax(component_sizes) + 1
+                y_indices, x_indices = np.where(lbl == largest_k)
                 cy, cx = int(y_indices.mean()), int(x_indices.mean())
             else:
                 cy, cx = self.H // 2, self.W // 2
@@ -336,6 +339,9 @@ class MaskRefinementEnv(gym.Env):
         else:
             reward -= step_cost
 
+        old_prev_dsc = self._prev_dsc
+        old_prev_boundary_dsc = self._prev_boundary_dsc
+
         self._current_mask = new_mask
         self._prev_dsc = new_dsc
         self._prev_boundary_dsc = new_boundary_dsc
@@ -347,7 +353,8 @@ class MaskRefinementEnv(gym.Env):
         info = {
             "dsc": new_dsc,
             "boundary_dsc": new_boundary_dsc,
-            "prev_dsc": self._prev_dsc,
+            "prev_dsc": old_prev_dsc,
+            "prev_boundary_dsc": old_prev_boundary_dsc,
             "delta_dsc": delta_dsc,
             "delta_boundary": delta_boundary_dsc,
         }
