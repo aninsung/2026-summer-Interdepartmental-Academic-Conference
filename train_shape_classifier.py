@@ -11,7 +11,7 @@ import time
 
 def main():
     parser = argparse.ArgumentParser(description="Shape Classifier Training")
-    parser.add_argument("--train_root", type=str, default="src/data/archive/BraTS2021_Training_Data", help="데이터셋 경로")
+    parser.add_argument("--train_root", type=str, default="src/data/archive", help="데이터셋 경로")
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한 (None이면 전체)")
     parser.add_argument("--batch_size", type=int, default=64, help="배치 크기")
     parser.add_argument("--epochs", type=int, default=15, help="에폭 수")

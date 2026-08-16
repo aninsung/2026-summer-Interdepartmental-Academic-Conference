@@ -11,7 +11,7 @@ def main():
     print(f"Device: {device}")
     
     # 1. Dataset Load (Test size)
-    dataset = BraTS2020Dataset(root_dir='src/data/archive/BraTS2021_Training_Data', modality='t1ce', target_size=128, max_patients=20, simulate_rough=False)
+    dataset = BraTS2020Dataset(root_dir='src/data/archive', modality='t1ce', target_size=128, max_patients=20, simulate_rough=False)
     
     # Extract arrays
     images, gt_masks, _ = dataset.get_numpy_arrays()
