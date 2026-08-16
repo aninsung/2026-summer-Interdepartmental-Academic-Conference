@@ -157,7 +157,7 @@ def evaluate(
     except Exception as e:
         log.warning(f"데이터 로드 실패 ({e}). 학습 데이터 폴더에서 평가용 데이터를 로드합니다.")
         dataset = BraTS2020Dataset(
-            root_dir=r"src/data/archive/BraTS2021_Training_Data",
+            root_dir=r"src/data/archive",
             modality="t1ce",
             target_size=128,
             max_patients=num_eval,

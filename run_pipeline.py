@@ -46,7 +46,7 @@ def main():
 
     log.info("🚀 RL-Refiner 3-Stage Dynamic Routing 파이프라인 전체 실행을 시작합니다.")
 
-    extra_args = ["--train_root", "src/data/archive/BraTS2021_Training_Data"]
+    extra_args = ["--train_root", "src/data/archive"]
     if args.batch_size is not None:
         extra_args += ["--batch_size", str(args.batch_size)]
     if args.max_train_patients is not None:
@@ -100,7 +100,7 @@ def main():
 
     # 3. Stage 3: 맞춤형 PPO 에이전트 3종 학습
     if not args.skip_agents:
-        agent_base_cmd = [python_exec, "train_agent.py", "--config", args.config, "--train_root", "src/data/archive/BraTS2021_Training_Data"]
+        agent_base_cmd = [python_exec, "train_agent.py", "--config", args.config, "--train_root", "src/data/archive"]
         
         # Small Agent
         run_command(agent_base_cmd + ["--model_type", "attention_unet", "--refinement_mode", "small"], 

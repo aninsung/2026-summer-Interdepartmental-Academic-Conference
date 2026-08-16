@@ -73,9 +73,22 @@ def _find_patient_dirs(root: str) -> List[Path]:
     BraTS2021: BraTS2021_XXXXX
     """
     root_path = Path(root)
+    if not root_path.exists():
+        if root_path.name == "BraTS2021_Training_Data" and root_path.parent.exists():
+            root_path = root_path.parent
+        elif (Path("src/data/archive")).exists():
+            root_path = Path("src/data/archive")
+        elif (Path(__file__).parent / "archive").exists():
+            root_path = Path(__file__).parent / "archive"
+        else:
+            return []
+
+    if (root_path / "BraTS2021_Training_Data").is_dir():
+        root_path = root_path / "BraTS2021_Training_Data"
+
     dirs = sorted([
         p for p in root_path.iterdir()
-        if p.is_dir() and ("BraTS20" in p.name or "BraTS2021" in p.name)
+        if p.is_dir() and ("BraTS20" in p.name or "BraTS2021" in p.name) and p.name != "BraTS2021_Training_Data"
     ])
     return dirs
 
