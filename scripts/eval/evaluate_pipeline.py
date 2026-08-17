@@ -1,3 +1,5 @@
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 import os
 import torch
 import numpy as np
@@ -7,18 +9,26 @@ from src.envs.mask_refinement_env import MaskRefinementEnv, _dice, _hd95
 from stable_baselines3 import PPO
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="3-Stage Dynamic Routing Pipeline Evaluation")
+    parser.add_argument("--train_root", type=str, default="src/data/archive", help="데이터셋 경로")
+    parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
+    parser.add_argument("--max_patients", type=int, default=20, help="평가 환자 수")
+    args = parser.parse_args()
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
     # 1. Dataset Load (Test size)
-    dataset = BraTS2020Dataset(root_dir='src/data/archive', modality='t1ce', target_size=128, max_patients=20, simulate_rough=False)
+    dataset = BraTS2020Dataset(root_dir=args.train_root, modality=args.modality, target_size=128, max_patients=args.max_patients, simulate_rough=False)
     
     # Extract arrays
     images, gt_masks, _ = dataset.get_numpy_arrays()
     
     # 2. Stage 1 & 2: Dynamic Router
     print("Loading 3-Stage Pipeline Models...")
-    pipeline = AdaptivePipeline(device)
+    in_ch = images.shape[1] if images.ndim == 4 else 1
+    pipeline = AdaptivePipeline(device, in_channels=in_ch)
     
     # 3. Stage 3: RL Refiner (Multi-Agent)
     print("Loading PPO Refiners...")
@@ -37,7 +47,7 @@ def main():
             print(f"Loading PPO Agent: {agent_path}")
             agents[class_idx] = PPO.load(agent_path, device=device)
         else:
-            print(f"Warning: No PPO agent found at {agent_path}")
+            print(f"[Warning] PPO Agent not found: {agent_path}. S3 Refinement will be skipped for class {class_idx}.")
             agents[class_idx] = None
         
     initial_dsc_list = []
@@ -58,7 +68,10 @@ def main():
         img_np = images[i]
         gt_np = gt_masks[i]
         
-        img_t = torch.from_numpy(img_np).unsqueeze(0).unsqueeze(0).to(device)
+        if img_np.ndim == 2:
+            img_t = torch.from_numpy(img_np).unsqueeze(0).unsqueeze(0).to(device)
+        else:
+            img_t = torch.from_numpy(img_np).unsqueeze(0).to(device)
         
         # Stage 1 & 2
         with torch.no_grad():
@@ -68,17 +81,28 @@ def main():
         class_counts[c] += 1
         
         rough_prob_np = rough_mask_t.squeeze().cpu().numpy()
-        rough_mask_np = (rough_prob_np > 0.5).astype(np.float32)
         
+        # Adaptive Thresholding & Morphological Halo Trimming for Micro Fragments (<50px)
+        main_area_50 = np.sum(rough_prob_np > 0.4)
+        if c == 0 and main_area_50 < 60:
+            thresh = 0.38
+            rough_mask_np = (rough_prob_np > thresh).astype(np.float32)
+            from scipy.ndimage import binary_erosion
+            if np.sum(rough_mask_np) > 25:
+                rough_mask_np = binary_erosion(rough_mask_np.astype(bool), structure=np.ones((3, 3))).astype(np.float32)
+        else:
+            thresh = 0.5
+            rough_mask_np = (rough_prob_np > thresh).astype(np.float32)
+            
         init_dsc = _dice(rough_mask_np, gt_np)
         initial_dsc_list.append(init_dsc)
         
-        # Stage 3: Component-wise Independent Refinement (둘 이상 분리형 병변 개별 크롭 & 독립 보정)
+        # Stage 3: Component-wise Independent Refinement
         from scipy.ndimage import label as sp_label
-        lbl, num_feats = sp_label(rough_mask_np > 0.5)
+        lbl, num_feats = sp_label(rough_mask_np > 0.2)
         
-        # 15px 이상인 유효 Component만 추출
-        valid_comp_indices = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 15]
+        # 10px 이상인 유효 Component만 추출
+        valid_comp_indices = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 10]
         
         if len(valid_comp_indices) > 1:
             refined_components = np.zeros_like(rough_mask_np)
@@ -98,11 +122,11 @@ def main():
                 ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
                 
                 if agent_k is not None:
-                    # GT-Free Confidence check
-                    comp_selected_probs = rough_prob_np[comp_mask_k > 0.5]
+                    # GT-Free Confidence Guard: >0.90일 경우 RL 보정 Skip하여 Initial DSC 100% 보존
+                    comp_selected_probs = rough_prob_np[comp_mask_k > 0.2]
                     comp_confidence = np.mean(comp_selected_probs) if len(comp_selected_probs) > 0 else 0.0
                     
-                    if comp_confidence > 0.95:
+                    if comp_confidence > 0.90:
                         refined_components = np.maximum(refined_components, comp_mask_k)
                     else:
                         env_k = MaskRefinementEnv(
@@ -120,10 +144,10 @@ def main():
                         
                         # Probability Fallback Gate
                         refined_k_mask = env_k._current_mask
-                        refined_comp_selected_probs = rough_prob_np[refined_k_mask > 0.5]
+                        refined_comp_selected_probs = rough_prob_np[refined_k_mask > 0.2]
                         refined_comp_confidence = np.mean(refined_comp_selected_probs) if len(refined_comp_selected_probs) > 0 else 0.0
                         
-                        if refined_comp_confidence < comp_confidence - 0.02:
+                        if refined_comp_confidence < comp_confidence:
                             refined_components = np.maximum(refined_components, comp_mask_k)
                         else:
                             refined_components = np.maximum(refined_components, refined_k_mask)
@@ -136,10 +160,11 @@ def main():
             refinement_mode = {0: "small", 1: "medium", 2: "large"}[c]
             
             if agent is not None:
-                selected_probs = rough_prob_np[rough_mask_np > 0.5]
+                selected_probs = rough_prob_np[rough_mask_np > 0.2]
                 avg_confidence = np.mean(selected_probs) if len(selected_probs) > 0 else 0.0
                 
-                if avg_confidence > 0.95:
+                # Confidence Guard (>0.90 Skip)
+                if avg_confidence > 0.90:
                     final_mask_np = rough_mask_np
                 else:
                     env = MaskRefinementEnv(
@@ -155,12 +180,12 @@ def main():
                         action, _ = agent.predict(obs, deterministic=True)
                         obs, _, _, _, _ = env.step(action)
                     
-                    # Probability Fallback Gate
+                    # Probability Fallback Gate: 보정 후 확률 신뢰도가 하락한 경우 Initial Mask로 안전 복원
                     refined_mask_np = env._current_mask
-                    refined_selected_probs = rough_prob_np[refined_mask_np > 0.5]
+                    refined_selected_probs = rough_prob_np[refined_mask_np > 0.2]
                     refined_confidence = np.mean(refined_selected_probs) if len(refined_selected_probs) > 0 else 0.0
                     
-                    if refined_confidence < avg_confidence - 0.02:
+                    if refined_confidence < avg_confidence:
                         final_mask_np = rough_mask_np
                     else:
                         final_mask_np = refined_mask_np

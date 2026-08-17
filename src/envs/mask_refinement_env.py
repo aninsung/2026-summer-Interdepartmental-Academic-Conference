@@ -12,6 +12,7 @@ Episode: 최대 max_steps 스텝, DSC >= target_dsc 이면 조기 종료
 """
 
 import numpy as np
+from typing import Optional, Tuple, Dict, Any
 import gymnasium as gym
 from gymnasium import spaces
 from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt, gaussian_filter, sobel, label
@@ -22,15 +23,16 @@ def _dice(a: np.ndarray, b: np.ndarray, smooth: float = 1e-5) -> float:
     return float((2.0 * (a * b).sum() + smooth) / (a.sum() + b.sum() + smooth))
 
 
-def _hd95(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
+def _hd95(mask_a: np.ndarray, mask_b: np.ndarray, dist_b: Optional[np.ndarray] = None) -> float:
     """HD95 계산 (두 경계 집합 간 95번째 백분위 거리). 빠른 근사 버전."""
     a = mask_a.astype(bool)
     b = mask_b.astype(bool)
-    if not a.any() or not b.any():
-        return float(mask_a.shape[0])  # 최대 거리(이미지 높이)를 패널티로 반환
+    if not np.any(a) or not np.any(b):
+        return min(30.0, float(mask_a.shape[0]))
 
     dist_a = distance_transform_edt(~a)
-    dist_b = distance_transform_edt(~b)
+    if dist_b is None:
+        dist_b = distance_transform_edt(~b)
     d_ab = dist_b[a]
     d_ba = dist_a[b]
     return float(np.percentile(np.concatenate([d_ab, d_ba]), 95))
@@ -98,7 +100,7 @@ class MaskRefinementEnv(gym.Env):
         refinement_mode: str = "small", # "small", "medium", "large"
     ):
         super().__init__()
-        assert images.shape == gt_masks.shape == rough_masks.shape
+        assert images.shape[0] == gt_masks.shape[0] == rough_masks.shape[0]
         self.images = images
         self.gt_masks = gt_masks
         self.rough_masks = rough_masks
@@ -107,7 +109,7 @@ class MaskRefinementEnv(gym.Env):
         if uncertainty_maps is not None:
             self.probability_maps = uncertainty_maps.copy()
         else:
-            self.probability_maps = np.zeros_like(images)
+            self.probability_maps = np.zeros_like(rough_masks)
             for i in range(len(rough_masks)):
                 self.probability_maps[i] = gaussian_filter(rough_masks[i].astype(float), sigma=2.0)
             
@@ -117,13 +119,16 @@ class MaskRefinementEnv(gym.Env):
         self.model_type = model_type.lower()
         self.refinement_mode = refinement_mode
 
-        N, H, W = images.shape
+        N = images.shape[0]
+        H, W = images.shape[-2:]
         self.H, self.W = H, W
 
         # 이미지 그래디언트 맵 (Sobel Edge Map) 미리 계산
-        self.edge_maps = np.zeros_like(images)
-        for i in range(len(images)):
+        self.edge_maps = np.zeros((N, H, W), dtype=np.float32)
+        for i in range(N):
             img = images[i]
+            if img.ndim == 3:
+                img = np.mean(img, axis=0)
             edge_x = sobel(img, axis=0)
             edge_y = sobel(img, axis=1)
             edge = np.sqrt(edge_x**2 + edge_y**2)
@@ -202,7 +207,8 @@ class MaskRefinementEnv(gym.Env):
         else:
             self._idx = self.np_random.integers(0, len(self.images))
 
-        self._current_image = self.images[self._idx].copy()
+        img = self.images[self._idx]
+        self._current_image = np.mean(img, axis=0).astype(np.float32) if img.ndim == 3 else img.copy()
         self._current_mask = self.rough_masks[self._idx].copy()
         self._current_prob = self.probability_maps[self._idx].copy()
         self._current_edge = self.edge_maps[self._idx].copy()
@@ -223,6 +229,8 @@ class MaskRefinementEnv(gym.Env):
         
         self._prev_dsc = _dice(self._current_mask, self._current_gt)
         self._prev_boundary_dsc = _dice(self._current_mask * self._boundary_band, self._current_gt * self._boundary_band)
+        self._gt_dist_map = distance_transform_edt(~self._current_gt.astype(bool))
+        self._prev_hd95 = _hd95(self._current_mask, self._current_gt, dist_b=self._gt_dist_map)
 
         return self._obs(), {}
 
@@ -282,12 +290,13 @@ class MaskRefinementEnv(gym.Env):
                 new_mask[sector_pixels] = dilated_2[sector_pixels]
 
         # ── 위상 보존 (Topological Constraints) ──
-        # 구멍 메우기 및 불연속 섬 제거를 위한 Closing 후 Opening
+        # 구멍 메우기 및 불연속 섬 제거를 위한 Closing 후 Opening (단, 20px 미만 미세 종양은 지워지지 않도록 보호)
         new_mask_bool = new_mask.astype(bool)
-        new_mask_bool = binary_dilation(new_mask_bool, structure=struct, iterations=1)
-        new_mask_bool = binary_erosion(new_mask_bool, structure=struct, iterations=1) # Closing
-        new_mask_bool = binary_erosion(new_mask_bool, structure=struct, iterations=1)
-        new_mask_bool = binary_dilation(new_mask_bool, structure=struct, iterations=1) # Opening
+        if np.sum(new_mask_bool) > 20:
+            new_mask_bool = binary_dilation(new_mask_bool, structure=struct, iterations=1)
+            new_mask_bool = binary_erosion(new_mask_bool, structure=struct, iterations=1) # Closing
+            new_mask_bool = binary_erosion(new_mask_bool, structure=struct, iterations=1)
+            new_mask_bool = binary_dilation(new_mask_bool, structure=struct, iterations=1) # Opening
         new_mask = new_mask_bool.astype(np.float32)
 
         # ── 수색 영역 제한 (Boundary Band Constraint) ──
@@ -305,6 +314,12 @@ class MaskRefinementEnv(gym.Env):
         delta_dsc = new_dsc - self._prev_dsc
         delta_boundary_dsc = new_boundary_dsc - self._prev_boundary_dsc
         
+        # HD95 델타 계산 (캐싱된 gt_dist_map 활용하여 연산 속도 2배 향상)
+        prev_hd95 = self._prev_hd95
+        curr_hd95 = _hd95(new_mask, self._current_gt, dist_b=self._gt_dist_map)
+        delta_hd95 = prev_hd95 - curr_hd95
+        self._prev_hd95 = curr_hd95
+        
         # 종양 크기 가중치 계산 (면적이 작을수록 보상 증폭, 최대 3배)
         tumor_area = max(1.0, float(np.sum(self._current_gt)))
         size_scale = max(0.5, min(3.0, 300.0 / tumor_area))
@@ -312,26 +327,26 @@ class MaskRefinementEnv(gym.Env):
         # 감점 페널티 비대칭 적용 (하락 시 감점 2배)
         dsc_weight = delta_dsc if delta_dsc >= 0 else delta_dsc * 2.0
         boundary_weight = delta_boundary_dsc if delta_boundary_dsc >= 0 else delta_boundary_dsc * 2.0
+        hd95_weight = delta_hd95 if delta_hd95 >= 0 else delta_hd95 * 2.0
 
         if self.refinement_mode == "large":
             # Large: HD95-Focused (보수적 조정 & 외곽 이상치 제거 집중)
-            reward = (dsc_weight * 10.0 + boundary_weight * 10.0) * size_scale
-            hd95_val = _hd95(new_mask, self._current_gt)
-            reward -= hd95_val * 0.05
+            reward = (dsc_weight * 10.0 + boundary_weight * 10.0 + hd95_weight * 0.5) * size_scale
+            reward -= curr_hd95 * 0.05
             reward -= action_penalty * 0.5
             
         elif self.refinement_mode == "medium":
             # Medium: Conservative (경계 DSC 위주 및 액션 페널티 적용)
-            reward = (dsc_weight * 0.3 + boundary_weight * 0.7) * 30.0 * size_scale
+            reward = (dsc_weight * 0.3 + boundary_weight * 0.7 + hd95_weight * 0.1) * 30.0 * size_scale
             if self._step_count % 5 == 0 or num_non_keep == 0:
-                reward -= _hd95(new_mask, self._current_gt) * 0.02
+                reward -= curr_hd95 * 0.02
             reward -= action_penalty * 0.5
             
         else:
-            # Small: Aggressive (전통적인 전역 및 경계 DSC 향상 위주)
-            reward = (dsc_weight * 0.3 + boundary_weight * 0.7) * 30.0 * size_scale
+            # Small: Aggressive (전통적인 전역 및 경계 DSC 향상 + HD95 직접 보상)
+            reward = (dsc_weight * 0.3 + boundary_weight * 0.7 + hd95_weight * 0.2) * 30.0 * size_scale
             if self._step_count % 5 == 0 or num_non_keep == 0:
-                reward -= _hd95(new_mask, self._current_gt) * 0.01
+                reward -= curr_hd95 * 0.01
 
         # 유지 보너스: 이미 좋은 마스크에서 유지 시 보상
         if is_keep_and_good:

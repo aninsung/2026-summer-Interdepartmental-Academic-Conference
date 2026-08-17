@@ -1,13 +1,10 @@
 """
-Step 1: Attention U-Net 학습 스크립트
-Attention U-Net을 기반으로 초기 마스크 생성기를 학습합니다.
+Step 1: UNet 3+ (UNet3+) 학습 스크립트
+개량된 UNet3+ 모델을 기반으로 초기 마스크 생성기를 학습합니다.
 
 사용 예시:
   # 실제 BraTS2021 데이터 (기본값)
-  python train_attention_unet.py
-
-  # 환자 수 제한 + 커스텀 저장 경로
-  python train_attention_unet.py --max_train_patients 100 --save_path checkpoints/attention_unet_best.pt
+  python train_unet3plus.py
 """
 
 import os
@@ -16,39 +13,19 @@ import argparse
 import logging
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 # 프로젝트 루트를 경로에 추가
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.models.attention_unet import build_attention_unet
+from src.models.unet3plus import build_unet3plus
 from src.models.segresnet import BCEDiceLoss, DiceLoss, compute_dice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-class FocalTverskyLoss(nn.Module):
-    def __init__(self, alpha: float = 0.3, beta: float = 0.7, gamma: float = 2.0, smooth: float = 1e-5):
-        super().__init__()
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.smooth = smooth
 
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        inputs = torch.sigmoid(inputs).view(-1)
-        targets = targets.view(-1)
-
-        tp = (inputs * targets).sum()
-        fp = (inputs * (1.0 - targets)).sum()
-        fn = ((1.0 - inputs) * targets).sum()
-
-        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
-        return (1.0 - tversky) ** self.gamma
-
-
-def train_attention_unet(
+def train_unet3plus(
     # 데이터 설정
     use_real_data: bool = True,
     train_root: str = "src/data/archive",
@@ -61,27 +38,18 @@ def train_attention_unet(
     epochs: int = 20,
     batch_size: int = 64,
     lr: float = 3e-4,
-    save_path: str = "checkpoints/attention_unet_best.pt",
+    save_path: str = "checkpoints/unet3plus_best.pt",
     device: str = "auto",
     use_bce_dice: bool = True,
     augment: bool = True,
-    refinement_mode: str = None, # Added for True Expert filtering
-    pretrained_path: str = "",   # Added for Fine-tuning
-    tversky_alpha: float = 0.3,
-    tversky_beta: float = 0.7,
+    use_dsv: bool = False,
+    refinement_mode: str = None,
+    pretrained_path: str = None,
 ) -> None:
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
     log.info(f"Device: {device}")
-
-    # Fine-tuning 설정 조율
-    if refinement_mode and pretrained_path:
-        if epochs == 20:
-            epochs = 8
-        if lr == 3e-4:
-            lr = 5e-5
-        log.info(f"🔧 [Fine-Tuning Mode] 자동 설정 변경: epochs={epochs}, lr={lr:.1e}")
 
     # ── 데이터 ──────────────────────────────────────────────
     if use_real_data:
@@ -120,7 +88,7 @@ def train_attention_unet(
                     y2 = y1 + patch_size
                     x2 = x1 + patch_size
                     
-                    crop_img = img_sl[y1:y2, x1:x2]
+                    crop_img = img_sl[:, y1:y2, x1:x2] if img_sl.ndim == 3 else img_sl[y1:y2, x1:x2]
                     crop_gt = gt_sl[y1:y2, x1:x2]
                     crop_rough = rough_sl[y1:y2, x1:x2]
                     
@@ -132,7 +100,8 @@ def train_attention_unet(
             
             old_len = len(full_ds._samples)
             full_ds._samples = filtered
-            log.info(f"[{refinement_mode.upper()} Expert] 필터링 완료: {len(full_ds._samples)}개 64x64 패치 슬라이스 사용 (기존 {old_len} 중)")
+            log.info(f"[{refinement_mode.upper()} Expert] 필터링 완료: {len(full_ds._samples)}개 슬라이스 사용 (기존 {old_len} 중)")
+            
         if val_root and val_root != train_root and val_root != "":
             try:
                 val_ds = BraTS2020Dataset(
@@ -184,34 +153,46 @@ def train_attention_unet(
 
         return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
 
-    n_workers = 0
+    n_workers = min(8, os.cpu_count() or 4)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=n_workers, pin_memory=True,
+        num_workers=n_workers, pin_memory=True, persistent_workers=True,
+        prefetch_factor=4,
         collate_fn=augment_batch,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=n_workers, pin_memory=True,
+        num_workers=n_workers, pin_memory=True, persistent_workers=True,
+        prefetch_factor=4,
         collate_fn=augment_batch,
     )
-    log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
+    log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}, prefetch_factor=4")
 
     # ── 모델 ────────────────────────────────────────────────
-    model = build_attention_unet(
-        in_channels=1,
+    sample_item = train_ds[0]
+    sample_img = sample_item["image"]
+    in_ch = sample_img.shape[0] if sample_img.ndim == 3 else 1
+    model = build_unet3plus(
+        in_channels=in_ch,
         out_channels=1,
+        DSV=use_dsv
     ).to(device)
 
     if pretrained_path and os.path.exists(pretrained_path):
-        log.info(f"Loading pre-trained weights from {pretrained_path} for fine-tuning...")
-        model.load_state_dict(torch.load(pretrained_path, map_location=device))
+        log.info(f"사전 학습된 가중치 로드 중: {pretrained_path}")
+        state_dict = torch.load(pretrained_path, map_location=device)
+        model_state = model.state_dict()
+        for k, v in list(state_dict.items()):
+            if k in model_state and model_state[k].shape != v.shape:
+                log.warning(f"Shape mismatch for {k}: checkpoint {v.shape} vs model {model_state[k].shape}. Adapting weights...")
+                if v.ndim == 4 and v.shape[1] == 1 and model_state[k].shape[1] > 1:
+                    state_dict[k] = v.repeat(1, model_state[k].shape[1], 1, 1) / model_state[k].shape[1]
+                else:
+                    del state_dict[k]
+        model.load_state_dict(state_dict, strict=False)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    if refinement_mode == "small":
-        criterion = FocalTverskyLoss(alpha=tversky_alpha, beta=tversky_beta, gamma=2.0)
-        log.info(f"손실 함수: FocalTverskyLoss (alpha={tversky_alpha}, beta={tversky_beta}, gamma=2.0)")
-    elif use_bce_dice:
+    if use_bce_dice:
         criterion = BCEDiceLoss(bce_weight=0.5)
         log.info("손실 함수: BCEDiceLoss (BCE 0.5 + Dice 0.5)")
     else:
@@ -223,6 +204,8 @@ def train_attention_unet(
     use_amp = (device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     log.info(f"AMP(FP16 혼합 정밀도): {'✅ 활성화' if use_amp else '❌ 비활성화 (CPU)'}")
+    if use_dsv:
+        log.info("Deep Supervision(DSV) 활성화됨: 모든 스케일 예측에 손실 함수 적용")
 
     best_val_dsc = 0.0
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
@@ -254,9 +237,18 @@ def train_attention_unet(
             img = batch["image"].to(device, non_blocking=True)
             gt  = batch["gt_mask"].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
+            
             with torch.amp.autocast("cuda", enabled=use_amp):
-                pred = model(img)
-                loss = criterion(pred, gt)
+                if use_dsv:
+                    preds = model(img) # list of tensors
+                    loss = 0.0
+                    for p in preds:
+                        loss += criterion(p, gt)
+                    loss = loss / len(preds)
+                else:
+                    pred = model(img)
+                    loss = criterion(pred, gt)
+                    
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -289,8 +281,15 @@ def train_attention_unet(
             for batch in val_iter:
                 img = batch["image"].to(device, non_blocking=True)
                 gt  = batch["gt_mask"].to(device, non_blocking=True)
+                
                 with torch.amp.autocast("cuda", enabled=use_amp):
-                    pred = torch.sigmoid(model(img))
+                    if use_dsv:
+                        preds = model(img)
+                        # 평가 시에는 가장 고해상도 예측 맵인 dec0의 출력(0번째 원소)을 사용합니다.
+                        pred = torch.sigmoid(preds[0])
+                    else:
+                        pred = torch.sigmoid(model(img))
+                        
                 pred_bin = (pred > 0.5).float()
                 val_dsc += compute_dice(pred_bin, gt)
             if USE_TQDM:
@@ -304,32 +303,31 @@ def train_attention_unet(
             torch.save(model.state_dict(), save_path)
             log.info(f"  ✔ Best model saved (val_DSC={best_val_dsc:.4f})")
 
-    log.info(f"\n=== Attention U-Net 학습 완료. Best val DSC: {best_val_dsc:.4f} ===")
+    log.info(f"\n=== UNet 3+ 학습 완료. Best val DSC: {best_val_dsc:.4f} ===")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Step 1: Train Attention U-Net (MONAI style Custom)")
+    parser = argparse.ArgumentParser(description="Step 1: Train UNet 3+ (UNet3Plus)")
     # 데이터 관련
     parser.add_argument("--use_real_data", action="store_true", default=True, help="실제 데이터 사용")
     parser.add_argument("--train_root", type=str, default="src/data/archive")
     parser.add_argument("--val_root", type=str, default="", help="비워두면 train 80/20 분할")
-    parser.add_argument("--modality", type=str, default="t1ce", choices=["t1ce", "t1", "t2", "flair"])
+    parser.add_argument("--modality", type=str, default="t1ce", )
     parser.add_argument("--target_size", type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한")
     parser.add_argument("--max_val_patients", type=int, default=None, help="검증 환자 수 제한")
-    parser.add_argument("--refinement_mode", type=str, default=None, choices=["small", "medium", "large"], help="True Expert 학습을 위한 타겟 크기 클래스")
-    parser.add_argument("--pretrained_path", type=str, default="", help="파인튜닝할 사전 학습 가중치 경로")
-    parser.add_argument("--tversky_alpha", type=float, default=0.3, help="FocalTverskyLoss alpha")
-    parser.add_argument("--tversky_beta", type=float, default=0.7, help="FocalTverskyLoss beta")
     # 학습 관련
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--save_path", type=str, default="checkpoints/attention_unet_best.pt")
+    parser.add_argument("--save_path", type=str, default="checkpoints/unet3plus_best.pt")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--use_bce_dice", action="store_true", default=True, help="BCE+Dice 사용")
     parser.add_argument("--no_bce_dice", action="store_true", default=False, help="DiceLoss만 사용")
     parser.add_argument("--no_augment", action="store_true", default=False, help="Data Augmentation 비활성화")
+    parser.add_argument("--use_dsv", action="store_true", default=False, help="Deep Supervision(DSV) 활성화")
+    parser.add_argument("--refinement_mode", type=str, default=None, help="크기별 특화 모드")
+    parser.add_argument("--pretrained_path", type=str, default=None, help="사전 학습 가중치 파일 경로")
     
     args = parser.parse_args()
     if args.no_bce_dice:
@@ -339,4 +337,4 @@ if __name__ == "__main__":
     d.pop("no_bce_dice", None)
     d.pop("no_augment", None)
     
-    train_attention_unet(**d)
+    train_unet3plus(**d)

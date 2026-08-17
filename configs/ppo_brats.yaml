@@ -12,8 +12,8 @@ use_real_data: true
 # train_agent.py 에서 80/20 분할합니다.
 train_root: "src/data/archive"
 
-# MRI 모달리티: t1ce (Gadolinium 조영 T1, 종양 대비 가장 선명)
-modality: "t1ce"
+# MRI 모달리티: t1ce+flair (T1ce + FLAIR 2채널 입력)
+modality: "t1ce+flair"
 
 # 2D 슬라이스 해상도
 image_size: 128
@@ -36,8 +36,8 @@ step_penalty: 0.005       # 0.01 → 0.005: 탐색 억제 완화
 # ──────────────────────────────────────────────
 # PPO 하이퍼파라미터
 # ──────────────────────────────────────────────
-total_timesteps: 500000   # 500K: 100명 데이터 기준 충분한 반복 학습
-n_envs: 4
+total_timesteps: 80000    # 80K: 빠른 고속 강화학습 수렴 및 시간 절감 (약 2~3분 내 수렴)
+n_envs: 8                 # 병렬 환경 수를 8개로 확장하여 학습 속도 극대화
 n_steps: 512
 batch_size: 64
 n_epochs: 4

@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from scipy.ndimage import label, center_of_mass
 
 # 프로젝트 루트를 Python 패스에 추가
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from src.models.attention_unet import build_attention_unet
 from src.models.unet3plus import build_unet3plus
@@ -135,7 +135,7 @@ def crop_zoom_patch(img: np.ndarray, gt: np.ndarray, rough: np.ndarray, patch_si
     y2 = y1 + patch_size
     x2 = x1 + patch_size
 
-    crop_img = img[y1:y2, x1:x2]
+    crop_img = img[:, y1:y2, x1:x2] if img.ndim == 3 else img[y1:y2, x1:x2]
     crop_gt = gt[y1:y2, x1:x2]
     crop_rough = rough[y1:y2, x1:x2]
     return crop_img, crop_gt, crop_rough

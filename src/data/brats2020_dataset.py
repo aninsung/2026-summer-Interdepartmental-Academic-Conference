@@ -241,13 +241,19 @@ class BraTS2020Dataset(Dataset):
         total_slices = 0
         skipped = 0
 
+        # 모달리티 파싱 (단일 't1ce' 또는 복합 't1ce+flair', 't1ce+t2' 등 지원)
+        if isinstance(self.modality, str):
+            self.modality_list = [m.strip() for m in self.modality.replace(',', '+').split('+')]
+        else:
+            self.modality_list = list(self.modality)
+
         for pdir in _iter:
             pid = pdir.name
 
-            mod_path = _find_modality_file(pdir, pid, self.modality)
+            mod_paths = [_find_modality_file(pdir, pid, m) for m in self.modality_list]
             seg_path = _find_seg_file(pdir, pid)
 
-            if mod_path is None or seg_path is None:
+            if any(p is None for p in mod_paths) or seg_path is None:
                 skipped += 1
                 if hasattr(_iter, 'write'):
                     _iter.write(f"  [SKIP] 파일 없음: {pid}")
@@ -256,9 +262,9 @@ class BraTS2020Dataset(Dataset):
                 continue
 
             try:
-                # 볼륨 로드
-                mod_vol = _normalize_volume(_load_volume(str(mod_path)))  # (H,W,D)
-                seg_vol = _load_volume(str(seg_path))                     # (H,W,D) 레이블
+                # 볼륨 로드 및 정규화
+                mod_vols = [_normalize_volume(_load_volume(str(p))) for p in mod_paths] # list of (H,W,D)
+                seg_vol = _load_volume(str(seg_path))                                   # (H,W,D) 레이블
 
                 # 해당 환자의 전체 볼륨에 레이블 4(ET)가 존재하는지 체크
                 has_et = bool((seg_vol == 4.0).any())
@@ -266,12 +272,21 @@ class BraTS2020Dataset(Dataset):
                 # 유효 슬라이스 선택
                 valid_zs = _select_slices(seg_vol, self.min_tumor_ratio)
                 for z in valid_zs:
-                    img_sl = mod_vol[:, :, z]                            # (H,W)
-                    gt_sl  = (seg_vol[:, :, z] > 0).astype(np.float32)  # 이진화
+                    if len(mod_vols) == 1:
+                        img_sl = mod_vols[0][:, :, z]                            # (H,W)
+                        if self.target_size > 0:
+                            img_sl = self._resize(img_sl)
+                    else:
+                        channels = []
+                        for m_vol in mod_vols:
+                            c_sl = m_vol[:, :, z]
+                            if self.target_size > 0:
+                                c_sl = self._resize(c_sl)
+                            channels.append(c_sl)
+                        img_sl = np.stack(channels, axis=0)                     # (C,H,W)
 
-                    # 리사이즈
+                    gt_sl  = (seg_vol[:, :, z] > 0).astype(np.float32)          # 이진화
                     if self.target_size > 0:
-                        img_sl = self._resize(img_sl)
                         gt_sl  = self._resize(gt_sl, is_mask=True)
 
                     # rough_mask 생성
@@ -317,8 +332,13 @@ class BraTS2020Dataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         img, gt, rough, has_et = self._samples[idx]
+        if img.ndim == 2:
+            img_tensor = torch.from_numpy(img).unsqueeze(0)  # (1,H,W)
+        else:
+            img_tensor = torch.from_numpy(img)              # (C,H,W)
+            
         return {
-            "image":      torch.from_numpy(img).unsqueeze(0),    # (1,H,W)
+            "image":      img_tensor,
             "gt_mask":    torch.from_numpy(gt).unsqueeze(0),     # (1,H,W)
             "rough_mask": torch.from_numpy(rough).unsqueeze(0),  # (1,H,W)
             "has_et":     has_et,

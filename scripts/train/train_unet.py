@@ -1,12 +1,12 @@
 """
 Step 1: U-Net 학습 스크립트
-합성 데이터 또는 실제 BraTS2020 데이터로 초기 마스크 생성기를 학습합니다.
+합성 데이터 또는 실제 BraTS2021 데이터로 초기 마스크 생성기를 학습합니다.
 
 사용 예시:
   # 합성 데이터 (기본값)
   python train_unet.py
 
-  # 실제 BraTS2020 데이터
+  # 실제 BraTS2021 데이터
   python train_unet.py --use_real_data --max_train_patients 50
 """
 
@@ -19,7 +19,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 # 프로젝트 루트를 경로에 추가
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from src.models.unet import build_unet, DiceLoss, compute_dice
 
@@ -185,7 +185,7 @@ if __name__ == "__main__":
                         default="src/data/archive")
     parser.add_argument("--val_root",   type=str, default="",
                         help="BraTS2021은 별도 val 폴더 없음. 비워두면 train 80/20 분할.")
-    parser.add_argument("--modality",   type=str, default="t1ce", choices=["t1ce","t1","t2","flair"])
+    parser.add_argument("--modality",   type=str, default="t1ce", )
     parser.add_argument("--target_size",type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한 (None=전체)")
     parser.add_argument("--max_val_patients",   type=int, default=None, help="검증 환자 수 제한 (None=전체)")

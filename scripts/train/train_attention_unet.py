@@ -1,13 +1,13 @@
 """
-Step 1: UNet++ (Nested U-Net) 학습 스크립트
-MONAI BasicUNetPlusPlus를 기반으로 초기 마스크 생성기를 학습합니다.
+Step 1: Attention U-Net 학습 스크립트
+Attention U-Net을 기반으로 초기 마스크 생성기를 학습합니다.
 
 사용 예시:
   # 실제 BraTS2021 데이터 (기본값)
-  python train_unetplusplus.py
+  python train_attention_unet.py
 
   # 환자 수 제한 + 커스텀 저장 경로
-  python train_unetplusplus.py --max_train_patients 100 --save_path checkpoints/unetplusplus_best.pt
+  python train_attention_unet.py --max_train_patients 100 --save_path checkpoints/attention_unet_best.pt
 """
 
 import os
@@ -16,19 +16,39 @@ import argparse
 import logging
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 # 프로젝트 루트를 경로에 추가
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.models.unetplusplus import build_unetplusplus
+from src.models.attention_unet import build_attention_unet
 from src.models.segresnet import BCEDiceLoss, DiceLoss, compute_dice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
+class FocalTverskyLoss(nn.Module):
+    def __init__(self, alpha: float = 0.3, beta: float = 0.7, gamma: float = 2.0, smooth: float = 1e-5):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
 
-def train_unetplusplus(
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        inputs = torch.sigmoid(inputs).view(-1)
+        targets = targets.view(-1)
+
+        tp = (inputs * targets).sum()
+        fp = (inputs * (1.0 - targets)).sum()
+        fn = ((1.0 - inputs) * targets).sum()
+
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        return (1.0 - tversky) ** self.gamma
+
+
+def train_attention_unet(
     # 데이터 설정
     use_real_data: bool = True,
     train_root: str = "src/data/archive",
@@ -39,14 +59,16 @@ def train_unetplusplus(
     max_val_patients: int = None,
     # 학습 설정
     epochs: int = 20,
-    batch_size: int = 16,
+    batch_size: int = 64,
     lr: float = 3e-4,
-    save_path: str = "checkpoints/unetplusplus_best.pt",
+    save_path: str = "checkpoints/attention_unet_best.pt",
     device: str = "auto",
     use_bce_dice: bool = True,
     augment: bool = True,
     refinement_mode: str = None, # Added for True Expert filtering
     pretrained_path: str = "",   # Added for Fine-tuning
+    tversky_alpha: float = 0.3,
+    tversky_beta: float = 0.7,
 ) -> None:
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -82,7 +104,7 @@ def train_unetplusplus(
                 # sample = (img_sl, gt_sl, rough_sl, has_et)
                 gt = sample[1]
                 area = np.sum(gt)
-                if ref_m == "small" and area < 300:
+                if ref_m == "small" and 0 < area < 300:
                     filtered.append(sample)
                 elif ref_m == "medium" and 300 <= area < 700:
                     filtered.append(sample)
@@ -124,7 +146,6 @@ def train_unetplusplus(
 
     # ── Data Augmentation ──────────────────────────────────
     def augment_batch(batch):
-        import torch
         images = torch.stack([b["image"] for b in batch])
         gt_masks = torch.stack([b["gt_mask"] for b in batch])
         rough_masks = torch.stack([b["rough_mask"] for b in batch])
@@ -158,17 +179,32 @@ def train_unetplusplus(
     log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
 
     # ── 모델 ────────────────────────────────────────────────
-    model = build_unetplusplus(
-        in_channels=1,
+    sample_item = train_ds[0]
+    sample_img = sample_item["image"]
+    in_ch = sample_img.shape[0] if sample_img.ndim == 3 else 1
+    model = build_attention_unet(
+        in_channels=in_ch,
         out_channels=1,
     ).to(device)
 
     if pretrained_path and os.path.exists(pretrained_path):
         log.info(f"Loading pre-trained weights from {pretrained_path} for fine-tuning...")
-        model.load_state_dict(torch.load(pretrained_path, map_location=device))
+        state_dict = torch.load(pretrained_path, map_location=device)
+        model_state = model.state_dict()
+        for k, v in list(state_dict.items()):
+            if k in model_state and model_state[k].shape != v.shape:
+                log.warning(f"Shape mismatch for {k}: checkpoint {v.shape} vs model {model_state[k].shape}. Adapting weights...")
+                if v.ndim == 4 and v.shape[1] == 1 and model_state[k].shape[1] > 1:
+                    state_dict[k] = v.repeat(1, model_state[k].shape[1], 1, 1) / model_state[k].shape[1]
+                else:
+                    del state_dict[k]
+        model.load_state_dict(state_dict, strict=False)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    if use_bce_dice:
+    if refinement_mode == "small":
+        criterion = FocalTverskyLoss(alpha=tversky_alpha, beta=tversky_beta, gamma=2.0)
+        log.info(f"손실 함수: FocalTverskyLoss (alpha={tversky_alpha}, beta={tversky_beta}, gamma=2.0)")
+    elif use_bce_dice:
         criterion = BCEDiceLoss(bce_weight=0.5)
         log.info("손실 함수: BCEDiceLoss (BCE 0.5 + Dice 0.5)")
     else:
@@ -179,7 +215,7 @@ def train_unetplusplus(
     # ── AMP (자동 혼합 정밀도) ──────────────────────────────
     use_amp = (device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    log.info(f"AMP(FP16 혼합 정밀도): {'✅ 활성화' if use_amp else '❌ 비활성화 (CPU)'})")
+    log.info(f"AMP(FP16 혼합 정밀도): {'✅ 활성화' if use_amp else '❌ 비활성화 (CPU)'}")
 
     best_val_dsc = 0.0
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else ".", exist_ok=True)
@@ -261,26 +297,28 @@ def train_unetplusplus(
             torch.save(model.state_dict(), save_path)
             log.info(f"  ✔ Best model saved (val_DSC={best_val_dsc:.4f})")
 
-    log.info(f"\n=== UNet++ 학습 완료. Best val DSC: {best_val_dsc:.4f} ===")
+    log.info(f"\n=== Attention U-Net 학습 완료. Best val DSC: {best_val_dsc:.4f} ===")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Step 1: Train UNet++ (MONAI)")
+    parser = argparse.ArgumentParser(description="Step 1: Train Attention U-Net (MONAI style Custom)")
     # 데이터 관련
     parser.add_argument("--use_real_data", action="store_true", default=True, help="실제 데이터 사용")
     parser.add_argument("--train_root", type=str, default="src/data/archive")
     parser.add_argument("--val_root", type=str, default="", help="비워두면 train 80/20 분할")
-    parser.add_argument("--modality", type=str, default="t1ce", choices=["t1ce", "t1", "t2", "flair"])
+    parser.add_argument("--modality", type=str, default="t1ce", )
     parser.add_argument("--target_size", type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한")
     parser.add_argument("--max_val_patients", type=int, default=None, help="검증 환자 수 제한")
-    parser.add_argument("--refinement_mode", type=str, default=None, choices=["small", "medium", "large"], help="True Expert 학습을 위한 타겟 크기 클래스")
+    parser.add_argument("--refinement_mode", type=str, default=None, help="True Expert 학습을 위한 타겟 크기 클래스")
     parser.add_argument("--pretrained_path", type=str, default="", help="파인튜닝할 사전 학습 가중치 경로")
+    parser.add_argument("--tversky_alpha", type=float, default=0.3, help="FocalTverskyLoss alpha")
+    parser.add_argument("--tversky_beta", type=float, default=0.7, help="FocalTverskyLoss beta")
     # 학습 관련
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--save_path", type=str, default="checkpoints/unetplusplus_best.pt")
+    parser.add_argument("--save_path", type=str, default="checkpoints/attention_unet_best.pt")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--use_bce_dice", action="store_true", default=True, help="BCE+Dice 사용")
     parser.add_argument("--no_bce_dice", action="store_true", default=False, help="DiceLoss만 사용")
@@ -294,4 +332,4 @@ if __name__ == "__main__":
     d.pop("no_bce_dice", None)
     d.pop("no_augment", None)
     
-    train_unetplusplus(**d)
+    train_attention_unet(**d)
