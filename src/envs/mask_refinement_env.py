@@ -98,8 +98,10 @@ class MaskRefinementEnv(gym.Env):
         step_penalty: float = 0.005,
         model_type: str = "unet",
         refinement_mode: str = "small", # "small", "medium", "large"
+        confidence_threshold: float = 0.85, # RL-Refiner 진입을 결정하는 기준값
     ):
         super().__init__()
+        self.confidence_threshold = confidence_threshold
         assert images.shape[0] == gt_masks.shape[0] == rough_masks.shape[0]
         self.images = images
         self.gt_masks = gt_masks

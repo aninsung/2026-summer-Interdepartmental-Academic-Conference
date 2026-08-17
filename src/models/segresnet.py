@@ -23,7 +23,7 @@ from monai.networks.layers.factories import Dropout
 from monai.networks.layers.utils import get_act_layer, get_norm_layer
 from monai.utils import UpsampleMode
 
-__all__ = ["SegResNet", "SegResNetVAE", "build_segresnet", "BCEDiceLoss"]
+__all__ = ["SegResNet", "SegResNetVAE", "build_segresnet", "BCEDiceLoss", "BoundaryLoss"]
 
 
 class SegResNet(nn.Module):
@@ -63,7 +63,7 @@ class SegResNet(nn.Module):
         use_conv_final: bool = True,
         blocks_down: tuple = (1, 2, 2, 4),
         blocks_up: tuple = (1, 1, 1),
-        upsample_mode: UpsampleMode | str = UpsampleMode.NONTRAINABLE,
+        upsample_mode: UpsampleMode | str = UpsampleMode.PIXELSHUFFLE,
     ):
         super().__init__()
 
@@ -368,3 +368,39 @@ class BCEDiceLoss(nn.Module):
         dice_loss = 1.0 - dsc.mean()
 
         return self.bce_weight * bce_loss + (1 - self.bce_weight) * dice_loss
+
+from src.envs.mask_refinement_env import _hd95
+
+class BoundaryLoss(nn.Module):
+    """
+    경계 보정을 위한 Dice + HD95 복합 손실 함수.
+    - Large 종양 등 면적이 넓어 Dice는 높지만 끝부분 경계 오차가 큰 경우를 보완.
+    """
+    def __init__(self, smooth: float = 1e-5):
+        super().__init__()
+        self.smooth = smooth
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # 1. Dice Loss 파트 (로짓에 시그모이드 적용)
+        pred_sig = torch.sigmoid(pred)
+        pred_flat = pred_sig.view(-1)
+        target_flat = target.view(-1)
+        dice = (2.0 * (pred_flat * target_flat).sum() + self.smooth) / \
+               (pred_flat.sum() + target_flat.sum() + self.smooth)
+        
+        # 2. HD95 파트
+        import scipy.ndimage as ndimage
+        import numpy as np
+        
+        pred_mask = (pred_sig[0, 0] > 0.5).detach().cpu().numpy()
+        target_mask = (target[0, 0] > 0.5).detach().cpu().numpy()
+        
+        struct = np.ones((3, 3))
+        boundary_pred = (ndimage.binary_dilation(pred_mask, struct) ^ ndimage.binary_erosion(pred_mask, struct))
+        boundary_gt = (ndimage.binary_dilation(target_mask, struct) ^ ndimage.binary_erosion(target_mask, struct))
+        
+        hd95_val = _hd95(boundary_pred, boundary_gt)
+        hd95_penalty = torch.tensor(hd95_val / max(pred.shape[-2:]), dtype=torch.float32, device=pred.device)
+        
+        # 0.7 Dice Loss + 0.3 HD95 Penalty
+        return 0.7 * (1.0 - dice) + 0.3 * hd95_penalty
