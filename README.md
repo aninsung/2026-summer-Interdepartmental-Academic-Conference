@@ -50,7 +50,7 @@
 | 단계 | 과정 | 설명 |
 |:---:|:---|:---|
 | **1** | **크기 판별 (Classification)** | 입력된 뇌종양 MRI(T1ce) 영상을 Shape Classifier(YOLO / ResNet 기반)에 통과시켜 종양의 크기(Small, Medium, Large)를 Class 0, 1, 2로 판별합니다. |
-| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(Attention U-Net, UNet++, SegResNet)을 선택해 초기 분할(Rough Mask)을 수행합니다. <br>**[True Expert 기법]** 일반 사전 학습(General Pre-train) 완료 후 각 크기별로 데이터를 필터링하여 미세 조정(Fine-tuning)을 수행함으로써 크기별 가중치 특화를 극대화합니다. |
+| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(Attention U-Net, UNet++, SegResNet)을 선택해 초기 분할(Rough Mask)을 수행합니다. <br>**[최적화된 학습 전략]** 전체 학습 시간 단축을 위해 **Small 모델(Attention U-Net)**에만 일반 사전 학습(Pre-train) 후 파인튜닝을 적용하며, **Medium / Large 모델**은 크기별 특화 데이터로 바로 단독 학습하도록 설계되었습니다. |
 | **3** | **맞춤형 RL 보정 (Refinement)** | 분할된 결과(크기)에 따라 각기 다르게 학습된 맞춤형 PPO 에이전트를 투입하여 마스크 경계를 정밀하게 보정합니다. <br>**Small 모드**에서는 4채널 입력 상태(MRI, 마스크, 소프트 확률 맵, Sobel 에지 맵)와 연속 행동 공간(Continuous PPO)을 적용하여 정밀 경계 제어 성능을 극대화했으며, **Medium/Large 모드**는 기존 3채널 이산 행동 공간 에이전트를 적용하고 공통적으로 안전 복원용 Gated Fallback을 탑재했습니다. |
 | **4** | **최종 평가 (Evaluation)** | 처리된 최종 마스크를 Ground Truth와 비교하여 DSC, HD95 등을 측정하고 성능을 평가합니다. (`evaluate_pipeline.py`) |
 
@@ -223,9 +223,11 @@ pip install -r requirements.txt
 크기 분류기부터 Expert 백본, 맞춤형 RL 에이전트, 평가까지 전체 3-Stage 파이프라인을 자동 실행합니다.
 
 ```bash
-# 동적 라우팅 파이프라인 실행 (모든 단계 자동화)
+# 동적 라우팅 파이프라인 자동 실행 (빠른 실험을 위해 기본 학습 환자 210명 제한 적용됨)
 python run_pipeline.py --batch_size 64
 ```
+
+> **💡 Windows 환경 지원**: DataLoader의 `num_workers=0` 처리를 통해 Windows 환경에서의 멀티프로세싱(Pickling) 에러를 완벽하게 방지하도록 최적화되어 있습니다.
 
 ### 5. 개별 스크립트 실행 (선택사항)
 
