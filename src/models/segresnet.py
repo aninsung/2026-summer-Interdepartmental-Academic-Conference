@@ -335,6 +335,7 @@ def build_segresnet(
         in_channels=in_channels,
         out_channels=out_channels,
         dropout_prob=dropout_prob,
+        upsample_mode="nontrainable",
     )
     return model
 

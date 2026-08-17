@@ -677,7 +677,7 @@ def main():
     parser.add_argument("--num_samples",    type=int, default=300)
     parser.add_argument("--unet_path",      type=str, default="checkpoints/segresnet_best.pt",
                         help="가중치 파일 경로 (checkpoints/unet_best.pt 또는 checkpoints/segresnet_best.pt)")
-    parser.add_argument("--model_type",     type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus", "unet++", "unet3plus", "unet3+", "attention_unet", "attunet"],
+    parser.add_argument("--model_type",     type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus", "unet++", "unet3plus", "unet3+", "attention_unet", "attunet", "caranet"],
                         help="세그멘테이션 모델 종류 (기본값: segresnet)")
     # RL 환경
     parser.add_argument("--max_steps",      type=int,   default=30)
@@ -803,7 +803,7 @@ def main():
     m_type = final_params.get("model_type", "segresnet")
     
     # 1. unet_path 자동 설정
-    if final_params.get("unet_path") in [None, "checkpoints/segresnet_best.pt", "checkpoints/unet_best.pt", "checkpoints/unetplusplus_best.pt", "checkpoints/unet3plus_best.pt", "checkpoints/attention_unet_best.pt"]:
+    if final_params.get("unet_path") in [None, "checkpoints/segresnet_best.pt", "checkpoints/unet_best.pt", "checkpoints/unetplusplus_best.pt", "checkpoints/unet3plus_best.pt", "checkpoints/attention_unet_best.pt", "checkpoints/caranet_best.pt"]:
         if m_type == "segresnet":
             final_params["unet_path"] = "checkpoints/segresnet_best.pt"
         elif m_type == "unetplusplus":
@@ -812,6 +812,8 @@ def main():
             final_params["unet_path"] = "checkpoints/unet3plus_best.pt"
         elif m_type == "attention_unet":
             final_params["unet_path"] = "checkpoints/attention_unet_best.pt"
+        elif m_type == "caranet":
+            final_params["unet_path"] = "checkpoints/caranet_best.pt"
         else:
             final_params["unet_path"] = "checkpoints/unet_best.pt"
 

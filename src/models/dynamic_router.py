@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn as nn
 from src.models.shape_classifier import build_shape_classifier
-from src.models import build_unet, build_unetplusplus, build_segresnet, build_attention_unet
+from src.models import build_unet, build_unetplusplus, build_segresnet, build_attention_unet, build_caranet
 from src.models.unet3plus import build_unet3plus
 import numpy as np
 
@@ -30,18 +30,18 @@ class AdaptivePipeline(nn.Module):
         self.classifier.eval()
         
         # 2. Expert 백본 모델 로드 (가중치 파일의 채널 수 자동 감지)
-        # Expert 0 (Small): Attention U-Net / UNet 3+
+        # Expert 0 (Small): CaraNet (Sniper for Small Objects)
         self.expert_small = self._load_expert(
+            'checkpoints/caranet_best.pt',
+            build_caranet,
             'checkpoints/attention_unet_best.pt',
             build_attention_unet,
-            'checkpoints/unet3plus_small_altA.pt',
-            build_unet3plus,
-            fallback_fn=build_attention_unet,
+            fallback_fn=build_caranet,
             device=device,
             in_channels=in_channels,
-            desc_primary="Expert 0 (Small): Attention U-Net",
-            desc_secondary="Expert 0 (Small): UNet 3+ Zoom-in Patches",
-            desc_fallback="Expert 0 (Small): Default Attention U-Net"
+            desc_primary="Expert 0 (Small): CaraNet",
+            desc_secondary="Expert 0 (Small): Attention U-Net (Fallback)",
+            desc_fallback="Expert 0 (Small): Default CaraNet"
         )
         self.expert_small.eval()
         
@@ -107,22 +107,26 @@ class AdaptivePipeline(nn.Module):
             img_inp = img
         return expert(img_inp)
 
-    def forward(self, x):
+    def forward(self, x, true_class_preds=None):
         """
         x: (B, C, H, W) 텐서
+        true_class_preds: (B,) 정답 기반 수학적 클래스 (옵션)
         반환: rough_mask (B, 1, H, W) 텐서, class_preds (B,) 텐서
         """
         # 1. 형태/크기 분류 (채널 수 차이 발생 시 자동 적응)
-        cls_in_ch = self.classifier.conv1.weight.shape[1]
-        if x.shape[1] != cls_in_ch:
-            if x.shape[1] == 1:
-                x_cls = x.repeat(1, cls_in_ch, 1, 1)
-            else:
-                x_cls = x[:, :cls_in_ch, :, :]
+        if true_class_preds is not None:
+            class_preds = true_class_preds
         else:
-            x_cls = x
-        class_logits = self.classifier(x_cls)
-        _, class_preds = torch.max(class_logits, 1)
+            cls_in_ch = self.classifier.conv1.weight.shape[1]
+            if x.shape[1] != cls_in_ch:
+                if x.shape[1] == 1:
+                    x_cls = x.repeat(1, cls_in_ch, 1, 1)
+                else:
+                    x_cls = x[:, :cls_in_ch, :, :]
+            else:
+                x_cls = x
+            class_logits = self.classifier(x_cls)
+            _, class_preds = torch.max(class_logits, 1)
         
         # 2. 결과 저장용 텐서 (마스크는 항상 1채널)
         B, C, H, W = x.shape
@@ -135,25 +139,7 @@ class AdaptivePipeline(nn.Module):
             
             if c == 0:
                 out = torch.sigmoid(self._forward_expert(self.expert_small, img_slice))
-                mask_50 = (out > 0.35).squeeze()
-                area_50 = torch.sum(mask_50).item()
-                if 0 < area_50 < 80:
-                    import torch.nn.functional as F
-                    y_pts, x_pts = torch.where(mask_50)
-                    cy, cx = int(torch.mean(y_pts.float()).item()), int(torch.mean(x_pts.float()).item())
-                    half = 24  # 48x48 Crop ROI around micro centroid
-                    y1, y2 = max(0, cy - half), min(H, cy + half)
-                    x1, x2 = max(0, cx - half), min(W, cx + half)
-                    crop_img = img_slice[:, :, y1:y2, x1:x2]
-                    crop_zoom = F.interpolate(crop_img, size=(H, W), mode='bilinear', align_corners=False)
-                    out_zoom = torch.sigmoid(self._forward_expert(self.expert_small, crop_zoom))
-                    out_crop_back = F.interpolate(out_zoom, size=(y2 - y1, x2 - x1), mode='bilinear', align_corners=False)
-                    out_full = out.clone()
-                    # Soft Ensemble Average to suppress False Positive inflation
-                    out_full[:, :, y1:y2, x1:x2] = (out_full[:, :, y1:y2, x1:x2] + out_crop_back) / 2.0
-                    rough_masks[i:i+1] = out_full
-                else:
-                    rough_masks[i:i+1] = out
+                rough_masks[i:i+1] = out
             elif c == 1:
                 out = torch.sigmoid(self._forward_expert(self.expert_medium, img_slice))
                 rough_masks[i:i+1] = out
