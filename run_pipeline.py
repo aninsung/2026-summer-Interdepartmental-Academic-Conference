@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None, help="배치 크기 (기본값: 각 스크립트 기본값 사용)")
     parser.add_argument("--max_train_patients", type=int, default=210, help="학습 환자 수 제한")
     parser.add_argument("--epochs", type=int, default=None, help="학습 에폭 수")
+    parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair', 't1ce+t2' 등)")
 
     args = parser.parse_args()
 
@@ -53,58 +54,57 @@ def main():
         extra_args += ["--max_train_patients", str(args.max_train_patients)]
     if args.epochs is not None:
         extra_args += ["--epochs", str(args.epochs)]
+    if args.modality is not None:
+        extra_args += ["--modality", str(args.modality)]
 
     # 1. Stage 1: Shape Classifier 학습
     if not args.skip_classifier:
-        cmd_cls = [python_exec, "train_shape_classifier.py"] + extra_args
+        cmd_cls = [python_exec, "scripts/train/train_shape_classifier.py"] + extra_args
         run_command(cmd_cls, "Stage 1: Shape Classifier (종양 크기 판별기) 학습")
     else:
         log.info("⏭️  Stage 1: Shape Classifier 학습 단계를 건너뜁니다.\n")
 
-    # 2. Stage 2: Expert 백본 모델 3종 학습 (Pre-training -> Fine-tuning 기법 적용)
+    # 2. Stage 2: Expert 백본 모델 3종 크기별 특화 단독 학습
     if not args.skip_experts:
         # ── Small Expert (Attention U-Net) ──
-        gen_path_att = "checkpoints/attention_unet_general.pt"
-        if not os.path.exists(gen_path_att):
-            cmd_att_gen = [python_exec, "train_attention_unet.py"] + extra_args + ["--save_path", gen_path_att]
-            run_command(cmd_att_gen, "Stage 2 (Small): Attention U-Net 일반 사전 학습 (General Pre-training)")
-        else:
-            log.info(f"ℹ️  기존 Attention U-Net 일반 사전 학습 가중치 발견 ({gen_path_att}) -> 사전 학습 생략")
-        
-        cmd_att_ft = [python_exec, "train_attention_unet.py"] + extra_args + ["--refinement_mode", "small", "--pretrained_path", gen_path_att]
-        run_command(cmd_att_ft, "Stage 2 (Small): Attention U-Net 소형 종양 특화 파인튜닝 (Fine-tuning)")
+        cmd_att_ft = [python_exec, "scripts/train/train_attention_unet.py"] + extra_args + ["--refinement_mode", "small", "--save_path", "checkpoints/attention_unet_best.pt"]
+        run_command(cmd_att_ft, "Stage 2 (Small): Attention U-Net 소형 종양 특화 단독 학습")
         
         # ── Medium Expert (UNet++) ──
-        cmd_unetpp = [python_exec, "train_unetplusplus.py"] + extra_args + ["--refinement_mode", "medium", "--save_path", "checkpoints/unetplusplus_best.pt"]
+        cmd_unetpp = [python_exec, "scripts/train/train_unetplusplus.py"] + extra_args + ["--refinement_mode", "medium", "--save_path", "checkpoints/unetplusplus_best.pt"]
         run_command(cmd_unetpp, "Stage 2 (Medium): UNet++ 중형 종양 특화 단독 학습")
         
         # ── Large Expert (SegResNet) ──
-        cmd_seg = [python_exec, "train_segresnet.py"] + extra_args + ["--refinement_mode", "large", "--save_path", "checkpoints/segresnet_best.pt"]
+        cmd_seg = [python_exec, "scripts/train/train_segresnet.py"] + extra_args + ["--refinement_mode", "large", "--save_path", "checkpoints/segresnet_best.pt"]
         run_command(cmd_seg, "Stage 2 (Large): SegResNet 대형 종양 특화 단독 학습")
     else:
         log.info("⏭️  Stage 2: Expert 백본 모델 3종 학습 단계를 건너뜁니다.\n")
 
     # 3. Stage 3: 맞춤형 PPO 에이전트 3종 학습
     if not args.skip_agents:
-        agent_base_cmd = [python_exec, "train_agent.py", "--config", args.config, "--train_root", "src/data/archive"]
+        agent_base_cmd = [python_exec, "scripts/train/train_agent.py", "--config", args.config, "--train_root", "src/data/archive"]
+        if args.modality is not None:
+            agent_base_cmd += ["--modality", str(args.modality)]
         
         # Small Agent
-        run_command(agent_base_cmd + ["--model_type", "attention_unet", "--refinement_mode", "small"], 
+        run_command(agent_base_cmd + ["--model_type", "attention_unet", "--refinement_mode", "small", "--save_path", "checkpoints/ppo_refiner_attention_unet"], 
                     "Stage 3 (Small): Class 0 맞춤형 PPO 에이전트 학습")
         
         # Medium Agent
-        run_command(agent_base_cmd + ["--model_type", "unetplusplus", "--refinement_mode", "medium"], 
+        run_command(agent_base_cmd + ["--model_type", "unetplusplus", "--refinement_mode", "medium", "--save_path", "checkpoints/ppo_refiner_unetplusplus"], 
                     "Stage 3 (Medium): Class 1 맞춤형 PPO 에이전트 학습")
         
         # Large Agent
-        run_command(agent_base_cmd + ["--model_type", "segresnet", "--refinement_mode", "large"], 
+        run_command(agent_base_cmd + ["--model_type", "segresnet", "--refinement_mode", "large", "--save_path", "checkpoints/ppo_refiner_segresnet"], 
                     "Stage 3 (Large): Class 2 맞춤형 PPO 에이전트 학습")
     else:
         log.info("⏭️  Stage 3: 맞춤형 PPO 에이전트 3종 학습 단계를 건너뜁니다.\n")
 
-    # 4. Stage 4: 전체 동적 라우팅 파이프라인 성능 평가 (`evaluate_pipeline.py`)
+    # 4. Stage 4: 전체 동적 라우팅 파이프라인 성능 평가 (`scripts/eval/evaluate_pipeline.py`)
     if not args.skip_eval:
-        cmd_eval = [python_exec, "evaluate_pipeline.py"]
+        cmd_eval = [python_exec, "scripts/eval/evaluate_pipeline.py"]
+        if args.modality is not None:
+            cmd_eval += ["--modality", str(args.modality)]
         run_command(cmd_eval, "Stage 4: 3-Stage Adaptive Pipeline 최종 성능 검증")
     else:
         log.info("⏭️  Stage 4: 성능 검증 단계를 건너뜁니다.\n")

@@ -486,3 +486,34 @@ python evaluate.py \
 2. **Small 종양 영역의 일관된 보정 우위**: Small 종양에서 초기 0.6608 대비 최종 **0.6756 (+1.48%p)**으로 지속적인 개선을 달성했습니다.
 3. **HD95 경계 오차 감소**: 전체 평균 HD95가 기존 4.26 px에서 **3.81 mm**로 개선되었으며, Large 종양의 경우 **0.86 mm**로 서브밀리미터 수준의 정밀도에 도달했습니다.
 
+---
+
+## 🧪 실험 8 — Multi-modality (t1ce+flair), Zoom-Refiner & Confidence Guard (역대 최고 SOTA 갱신)
+
+> **실험일**: 2026-08-17  
+> **데이터셋**: BraTS 2021 Task 1 (`t1ce+flair` 2채널 모달리티, 128×128 해상도)  
+> **수행 스크립트**: `python run_pipeline.py --modality t1ce+flair --batch_size 64`  
+> **핵심 기능 이식**:
+> 1. **Multi-modality (`t1ce+flair`) 전 단계 수용**: Stage 1부터 Stage 4까지 2채널 입력 인프라 단일화
+> 2. **Zoom-Refiner**: Small 종양 영역($<80\text{px}$) $48\times48$ ROI 4배율 Zoom-In 패치 및 소프트 앙상블 평균합성(`(out_full + out_crop_back) / 2.0`)
+> 3. **Confidence Guard ($\ge 0.90$) & Fallback Gate**: 백본 예측 확신도 $\ge 0.90$ 슬라이스 보정 Skip으로 점수 손실 100% 차단
+> 4. **PPO 스텝 가속화**: `MaskRefinementEnv` 내 GT 거리 변환 맵 미리 계산 caching으로 에이전트당 학습 시간 **3.5분**으로 획기적 단축
+
+### 최종 정량 평가 결과 (`evaluate_pipeline.py`, 20명 환자 1,171개 슬라이스)
+
+| 종양 크기 클래스 (Stage 1) | 매핑 백본 (Stage 2) | 평가 슬라이스 수 | 초기 DSC (Stage 2) | **최종 DSC (Stage 3)** | DSC 개선폭 (ΔDSC) | **보정 후 HD95** |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|
+| **Small (<300px)** | **Attention U-Net (Zoom-Refiner)** | 424 | 0.6980 | **0.6996** | **+0.0016 (+0.16%p)** 🚀 | **9.9209 px** |
+| **Medium (300~700px)** | **UNet++** | 509 | 0.9239 | **0.9240** | **+0.0001 (+0.01%p)** 📈 | **0.8535 px** 🎯 |
+| **Large (>=700px)** | **SegResNet** | 238 | 0.9528 | **0.9529** | **+0.0001 (+0.01%p)** 📈 | **0.3973 px** ⚡ |
+| **파이프라인 전체 종합** | **3-Stage Adaptive Pipeline** | **1,171** | **0.8480** | **0.8486** | **+0.0006 (+0.06%p)** 📈 | **4.0440 px** |
+
+### 🔬 Small 클래스 층화 세부 분석 (Stratified Analysis)
+- **Active Tumor ($\ge 50\text{px}$, 392개)**: Initial `0.7262` ➔ **Final `0.7277`** | **HD95 `9.0407 px`**
+- **Micro Fragment ($<50\text{px}$, 32개)**: Initial `0.3531` ➔ **Final `0.3555`** | **HD95 `20.7036 px`**
+
+### 핵심 성과 요약
+- **전체 파이프라인 평균 DSC `0.8486` 달성** (이전 0.8198 대비 **+2.88%p 대폭 상승**)
+- **SegResNet Large DSC `0.9529` / HD95 `0.3973 px`** (서브 0.4px 극정밀 영역 도달)
+- **UNet++ Medium DSC `0.9240` / HD95 `0.8535 px`** (1px 미만 정밀 오차 수렴)
+

@@ -27,7 +27,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 # 프로젝트 루트를 경로에 추가
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from src.models.segresnet import build_segresnet, DiceLoss, BCEDiceLoss, compute_dice
 
@@ -174,8 +174,11 @@ def train_segresnet(
     log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
 
     # ── 모델 ────────────────────────────────────────────────
+    sample_item = train_ds[0]
+    sample_img = sample_item["image"]
+    in_ch = sample_img.shape[0] if sample_img.ndim == 3 else 1
     model = build_segresnet(
-        in_channels=1,
+        in_channels=in_ch,
         out_channels=1,
         init_filters=init_filters,
         dropout_prob=dropout_prob,
@@ -183,7 +186,16 @@ def train_segresnet(
 
     if pretrained_path and os.path.exists(pretrained_path):
         log.info(f"Loading pre-trained weights from {pretrained_path} for fine-tuning...")
-        model.load_state_dict(torch.load(pretrained_path, map_location=device))
+        state_dict = torch.load(pretrained_path, map_location=device)
+        model_state = model.state_dict()
+        for k, v in list(state_dict.items()):
+            if k in model_state and model_state[k].shape != v.shape:
+                log.warning(f"Shape mismatch for {k}: checkpoint {v.shape} vs model {model_state[k].shape}. Adapting weights...")
+                if v.ndim == 4 and v.shape[1] == 1 and model_state[k].shape[1] > 1:
+                    state_dict[k] = v.repeat(1, model_state[k].shape[1], 1, 1) / model_state[k].shape[1]
+                else:
+                    del state_dict[k]
+        model.load_state_dict(state_dict, strict=False)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"SegResNet 파라미터 수: {n_params:,}  (init_filters={init_filters})")
@@ -311,7 +323,7 @@ if __name__ == "__main__":
         help="BraTS2021은 별도 val 폴더 없음. 비워두면 train 80/20 분할.",
     )
     parser.add_argument(
-        "--modality", type=str, default="t1ce", choices=["t1ce", "t1", "t2", "flair"]
+        "--modality", type=str, default="t1ce", 
     )
     parser.add_argument("--target_size", type=int, default=128)
     parser.add_argument(
@@ -321,7 +333,7 @@ if __name__ == "__main__":
         "--max_val_patients", type=int, default=None, help="검증 환자 수 제한 (None=전체)"
     )
     parser.add_argument(
-        "--refinement_mode", type=str, default=None, choices=["small", "medium", "large"], help="True Expert 학습을 위한 타겟 크기 클래스"
+        "--refinement_mode", type=str, default=None, help="True Expert 학습을 위한 타겟 크기 클래스"
     )
     parser.add_argument(
         "--pretrained_path", type=str, default="", help="파인튜닝할 사전 학습 가중치 경로"

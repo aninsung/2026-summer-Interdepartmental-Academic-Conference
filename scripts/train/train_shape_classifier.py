@@ -1,3 +1,5 @@
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 import os
 import argparse
 import torch
@@ -15,16 +17,17 @@ def main():
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한 (None이면 전체)")
     parser.add_argument("--batch_size", type=int, default=64, help="배치 크기")
     parser.add_argument("--epochs", type=int, default=15, help="에폭 수")
+    parser.add_argument("--modality", type=str, default="t1ce", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     
     # 1. 원본 데이터셋 로드
-    print(f"Loading BraTS Dataset from {args.train_root}...")
+    print(f"Loading BraTS Dataset from {args.train_root} (Modality: {args.modality})...")
     brats_dataset = BraTS2020Dataset(
         root_dir=args.train_root,
-        modality="t1ce",
+        modality=args.modality,
         target_size=128,
         max_patients=args.max_train_patients, 
         simulate_rough=False # GT 기반으로 넓이를 재므로 상관없음
@@ -43,7 +46,10 @@ def main():
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
     
     # 3. 모델 초기화
-    model = build_shape_classifier(num_classes=3).to(device)
+    sample_img, _ = shape_dataset[0]
+    in_channels = sample_img.shape[0] if sample_img.ndim == 3 else 1
+    print(f"Building Shape Classifier (Input Channels: {in_channels})...")
+    model = build_shape_classifier(in_channels=in_channels, num_classes=3).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     

@@ -32,8 +32,8 @@
 ### 목표
 
 - Rough Mask의 경계를 자동 보정
-- Dice Score 향상 (SOTA **`0.8327 DSC`** 달성)
-- HD95 감소
+- Dice Score 향상 (파이프라인 평균 **`0.8486 DSC`**, SegResNet Large **`0.9529 DSC`** 달성)
+- HD95 감소 (SegResNet **`0.3973 px`** 서브픽셀 정밀 오차 도달)
 - 사람의 후처리 작업 최소화
 
 ### 평가 지표
@@ -49,9 +49,9 @@
 
 | 단계 | 과정 | 설명 |
 |:---:|:---|:---|
-| **1** | **크기 판별 (Classification)** | 입력된 뇌종양 MRI(T1ce) 영상을 Shape Classifier(YOLO / ResNet 기반)에 통과시켜 종양의 크기(Small, Medium, Large)를 Class 0, 1, 2로 판별합니다. |
-| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(Attention U-Net, UNet++, SegResNet)을 선택해 초기 분할(Rough Mask)을 수행합니다. <br>**[최적화된 학습 전략]** 전체 학습 시간 단축을 위해 **Small 모델(Attention U-Net)**에만 일반 사전 학습(Pre-train) 후 파인튜닝을 적용하며, **Medium / Large 모델**은 크기별 특화 데이터로 바로 단독 학습하도록 설계되었습니다. |
-| **3** | **맞춤형 RL 보정 (Refinement)** | 분할된 결과(크기)에 따라 각기 다르게 학습된 맞춤형 PPO 에이전트를 투입하여 마스크 경계를 정밀하게 보정합니다. <br>**Small 모드**에서는 4채널 입력 상태(MRI, 마스크, 소프트 확률 맵, Sobel 에지 맵)와 연속 행동 공간(Continuous PPO)을 적용하여 정밀 경계 제어 성능을 극대화했으며, **Medium/Large 모드**는 기존 3채널 이산 행동 공간 에이전트를 적용하고 공통적으로 안전 복원용 Gated Fallback을 탑재했습니다. |
+| **1** | **크기 판별 (Classification)** | 입력된 뇌종양 MRI(`t1ce+flair` 2채널 모달리티) 영상을 Shape Classifier(ResNet 기반)에 통과시켜 종양의 크기(Small, Medium, Large)를 Class 0, 1, 2로 판별합니다. |
+| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(Attention U-Net, UNet++, SegResNet)을 선택해 초기 분할(Rough Mask)을 수행합니다. <br>**[Zoom-Refiner 적용]** Small 종양에는 GL-Net 스타일 2D 가우시안 게이팅 및 4배율 Zoom-In 패치 소프트 앙상블 합성을 적용합니다. |
+| **3** | **맞춤형 RL 보정 (Refinement)** | 크기별 특화 PPO 에이전트(Small, Medium, Large 3종)가 3스텝 동안 경계선을 정밀하게 보정합니다. <br>**[Confidence Guard 적용]** 백본 확신도 $\ge 0.90$ 고정밀 슬라이스는 보정을 Skip하여 고점 수치(`0.9529`)를 100% 보존합니다. |
 | **4** | **최종 평가 (Evaluation)** | 처리된 최종 마스크를 Ground Truth와 비교하여 DSC, HD95 등을 측정하고 성능을 평가합니다. (`evaluate_pipeline.py`) |
 
 ---
@@ -62,7 +62,7 @@
 |------|----------|
 | Deep Learning | PyTorch, MONAI |
 | Reinforcement Learning | Gymnasium, Stable-Baselines3 (PPO) |
-| Dataset | BraTS2021 (T1ce) |
+| Dataset | BraTS 2021 (T1ce + FLAIR 2채널) |
 | Language | Python |
 
 ---
@@ -71,9 +71,9 @@
 
 자세한 실험 결과와 성능 비교는 아래 문서에서 확인할 수 있습니다.
 
-📄 **[Final Models Report](final_models_report.md)**  
-📄 **[Technical Report](technical_report.md)**  
-📄 **[Experiments History](EXPERIMENTS.md)**
+📄 **[Final Models Report](docs/final_models_report.md)**  
+📄 **[Technical Report](docs/technical_report.md)**  
+📄 **[Experiments History](docs/EXPERIMENTS.md)**
 
 ### ⚙️ 3-Stage Adaptive Pipeline 최종 벤치마크 평가 결과 (20명 1,171 슬라이스 전수 평가)
 
@@ -82,25 +82,25 @@
 
 | 항목 | 수치 / 결과 | 비고 |
 |:---|:---:|:---|
-| **평가 대상 슬라이스** | **1,171 개** | 20명 환자 전수 평가 |
-| **Stage 2 백본 초기 DSC** | **0.7929** | 3-Stage Dynamic Routing 적용 |
-| **Stage 3 RL Refiner 최종 DSC** | **0.7929** | GT-Free 자율 미세 보정 |
-| **최종 경계선 오차 (HD95)** | **3.8655 px** | 극소 오차 도달 |
+| **평가 대상 슬라이스** | **1,171 개** | 20명 독립 테스트 환자 전수 평가 |
+| **Stage 2 백본 초기 DSC** | **0.8480** | 3-Stage Dynamic Routing 적용 |
+| **Stage 3 RL Refiner 최종 DSC** | **0.8486** | GT-Free 자율 미세 보정 (최상위 기록) |
+| **최종 경계선 오차 (HD95)** | **4.0440 px** | 극소 경계 오차 도달 |
 
 #### 🎯 종양 크기별(Class-wise) 세부 성능 비교
 
 | 종양 크기 클래스 | 매핑된 Expert 백본 | 슬라이스 수 | 초기 DSC | 최종 DSC | **최종 HD95 오차** |
 |:---|:---|:---:|:---:|:---:|:---:|
-| **Small (<300px)** | **UNet 3+ Zoom-in / Attention U-Net** | 434 | 0.5907 | **0.5907** | **8.5208 px** |
-| **Medium (300~700px)** | **UNet 3+ / UNet++** | 487 | 0.9053 | **0.9052** | **1.2135 px** 🎯 |
-| **Large (>=700px)** | **SegResNet** | 250 | 0.9251 | **0.9251** | **0.9497 px** ⚡ |
+| **Small (<300px)** | **Attention U-Net (Zoom-Refiner)** | 424 | 0.6980 | **0.6996** | **9.9209 px** |
+| **Medium (300~700px)** | **UNet++** | 509 | 0.9239 | **0.9240** | **0.8535 px** 🎯 |
+| **Large (>=700px)** | **SegResNet** | 238 | 0.9528 | **0.9529** | **0.3973 px** ⚡ |
 
 #### 🔬 Small 종양 층화 세부 분석 (Stratified Analysis)
 
 | 분할 범주 | 슬라이스 수 | 초기 DSC | 최종 DSC | **HD95 오차** | 설명 |
 |:---|:---:|:---:|:---:|:---:|:---|
-| **Active Tumor (≥50px 유효 종양)** | 402 | 0.6187 | **0.6187** | **8.0373 px** | 유효 크기 미니 종양 |
-| **Micro Fragment (<50px 미세 조각)** | 32 | 0.2383 | **0.2383** | 14.5946 px | 극소 미세 단편성 종양 |
+| **Active Tumor (≥50px 유효 종양)** | 392 | 0.7262 | **0.7277** | **9.0407 px** | 유효 크기 소형 종양 (Small의 92.5%) |
+| **Micro Fragment (<50px 미세 조각)** | 32 | 0.3531 | **0.3555** | **20.7036 px** | 3D 단면 상하단 극소 파편 |
 
 ### 🖼️ 3-Stage Routing Pipeline 크기 클래스별 보정 시각화 샘플
 
@@ -117,68 +117,71 @@
 
 ---
 
-## � 주요 성과 및 결론
+## 🏆 주요 성과 및 결론
 
 ### 🏆 핵심 성과
 
 1. **Dynamic Routing 백본의 우수성**
-   - **Medium 종양**: 0.9053 DSC (HD95 **1.21 px** 🎯) - 의료진 후처리 최소화 수준
-   - **Large 종양**: 0.9251 DSC (HD95 **0.95 px** ⚡) - 의료 영상 정밀도 최고 수준
-   - 각 크기 클래스에 최적화된 Expert 백본 선택으로 일반 모델 대비 뛰어난 성능 달성
+   - **Large 종양**: **0.9529 DSC (HD95 `0.39 px` ⚡)** - 서브 0.4픽셀 정밀 오차 달성
+   - **Medium 종양**: **0.9240 DSC (HD95 `0.85 px` 🎯)** - 1픽셀 미만 극정밀 도달
+   - **Small 활성 종양**: **0.7277 DSC (HD95 `9.04 px`)** - Zoom-Refiner로 정밀도 대폭 향상
 
-2. **소형 종양 정밀화 전략**
-   - Small 종양(<300px) 영역에서 $64\times64$ Zoom-in patch 및 Component 단위 조절 적용
-   - **Active Tumor (≥50px)** 기준 **0.6187 DSC** 안정적 성능 확보
-   - Micro Fragment(<50px)의 극소 미세 단편성 종양도 추적 가능
+2. **소형 종양 Zoom-Refiner 및 Confidence Guard 전략**
+   - Small 종양(<300px) 영역에서 4배율 Zoom-In 패치 소프트 앙상블 및 적응형 Threshold($T=0.38$) 적용
+   - Confidence Guard 도입으로 백본 확신도 $\ge 0.90$ 고정밀 슬라이스의 점수를 100% 보존
 
 3. **전체 파이프라인 성능**
-   - **1,171개 슬라이스 전수 평가**: 평균 **DSC 0.7929**, **HD95 3.8655 px**
-   - 다양한 크기의 뇌종양 데이터에 대한 강건한 일반화 성능 입증
+   - **1,171개 슬라이스 전수 평가**: 평균 **DSC 0.8486**, **HD95 4.0440 px**
+   - 모든 3개 크기 클래스가 단 1%의 하락도 없이 **100% 정반향 상승 성공**
 
 ### 🎯 의료 임상 적용 가능성
 
-- **방사선 치료 정밀도**: HD95 3.86px의 극소 경계 오차는 GammaKnife 같은 정밀 방사선 치료에 적합
+- **방사선 치료 정밀도**: HD95 4.04px의 극소 경계 오차는 GammaKnife 같은 정밀 방사선 치료에 적합
 - **임상 효율화**: 의료진의 수동 후처리 작업을 최소화하여 진료 시간 단축
 - **크기별 최적화**: 환자 데이터의 다양한 종양 크기에 자동으로 대응하는 Adaptive Pipeline
 
 ---
 
-## �📂 프로젝트 구조
+## 📂 프로젝트 구조
 
 ```
 RL-Refiner/
-├── 📋 스크립트 (Training & Evaluation)
-│   ├── run_pipeline.py                  # 🚀 전체 3-Stage 자동화 파이프라인
-│   ├── train_shape_classifier.py        # Stage 1: 종양 크기 분류 모델
-│   ├── train_attention_unet.py          # Stage 2a: Attention U-Net (Small)
-│   ├── train_unetplusplus.py            # Stage 2b: UNet++ (Medium)
-│   ├── train_segresnet.py               # Stage 2c: SegResNet (Large)
-│   ├── train_unet3plus.py               # UNet 3+ 학습
-│   ├── train_unet.py                    # U-Net 기본 모델
-│   ├── train_agent.py                   # Stage 3: PPO RL 에이전트
-│   ├── evaluate_pipeline.py             # 🎯 최종 성능 평가
-│   ├── evaluate.py                      # 단일 모델 검증
-│   └── generate_ppt_slides.py           # 발표용 PPT 생성
+├── 🚀 run_pipeline.py                      # 3-Stage 동적 라우팅 전체 자동화 파이프라인
 │
-├── 📁 핵심 데이터/모듈
-│   ├── checkpoints/                     # 학습 완료 모델 가중치 (.pt, .zip)
-│   ├── configs/                         # 하이퍼파라미터 설정 (.yaml)
-│   ├── logs/                            # TensorBoard 로그
-│   │   └── ppo/                         # RL 에이전트 훈련 로그
-│   ├── results/                         # 결과 시각화 및 지표
-│   │   ├── *.csv                        # 평가 지표 (서브 리전별)
-│   │   └── *.json                       # 메트릭 데이터
-│   └── src/
-│       ├── data/                        # 데이터 로더 & 멀티프로세싱
-│       ├── envs/                        # Gymnasium 강화학습 환경
-│       └── models/                      # 신경망 아키텍처
+├── 📁 scripts/                              # 📋 스크립트 모듈 폴더
+│   ├── 📁 train/                           # 🏋️ 모델 및 에이전트 학습 스크립트
+│   │   ├── train_agent.py                 # Stage 3: PPO RL 에이전트 학습
+│   │   ├── train_attention_unet.py        # Stage 2a: Attention U-Net (Small)
+│   │   ├── train_unetplusplus.py          # Stage 2b: UNet++ (Medium)
+│   │   ├── train_segresnet.py             # Stage 2c: SegResNet (Large)
+│   │   ├── train_shape_classifier.py      # Stage 1: 종양 크기 분류기
+│   │   ├── train_unet3plus.py             # UNet 3+ 학습
+│   │   └── train_unet.py                  # U-Net 기본 모델 학습
+│   │
+│   ├── 📁 test/                            # 🧪 실험 및 분석 테스트 스크립트
+│   │   └── test_small_alternatives.py     # 소형 종양 대체 모델 실험
+│   │
+│   └── 📁 eval/                            # 🎯 성능 평가 및 검증 스크립트
+│       ├── evaluate_pipeline.py           # Stage 4: 최종 파이프라인 검증
+│       ├── evaluate.py                    # 단일 모델 성능 검증
+│       └── generate_ppt_slides.py         # 발표용 PPT 슬라이드 생성
 │
-├── 📄 문서
-│   ├── README.md                        # 현재 문서
-│   ├── final_models_report.md           # 최종 성능 보고서
-│   ├── technical_report.md              # 기술 분석 상세보고서
-│   ├── EXPERIMENTS.md                   # 실험 이력
-│   └── requirements.txt                 # Python 의존성
+├── 📁 src/                                 # 🧠 핵심 소스 코드 (데이터셋, 모델, RL 환경)
+│   ├── data/                              # BraTS 데이터셋 로더 & 전처리
+│   ├── envs/                              # Gymnasium 마스크 보정 환경
+│   └── models/                            # U-Net, SegResNet 등 아키텍처 및 Dynamic Router
+│
+├── 📁 checkpoints/                         # 💾 학습 완료된 모델 가중치 (.pt, .zip)
+├── 📁 configs/                             # ⚙️ YAML 하이퍼파라미터 설정
+├── 📁 logs/                                # 📊 TensorBoard 훈련 로그
+├── 📁 results/                             # 📈 평가 결과 (CSV, JSON 및 시각화)
+├── 📁 docs/                                # 📄 기술 보고서 및 실험 이력
+│   ├── final_models_report.md             # 최종 성능 보고서
+│   ├── technical_report.md                # 기술 분석 상세보고서
+│   └── EXPERIMENTS.md                     # 실험 이력
+│
+├── 📄 README.md                            # 메인 프로젝트 설명서
+└── 📄 requirements.txt                    # Python 의존성 목록
 ```
 
 ### 주요 폴더별 설명

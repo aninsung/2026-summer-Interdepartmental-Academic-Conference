@@ -25,7 +25,7 @@ import yaml
 from stable_baselines3.common.callbacks import BaseCallback
 from collections import deque
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from src.envs.mask_refinement_env import MaskRefinementEnv
 
 
@@ -296,11 +296,11 @@ def load_real_data(
     model_type: str = "unet",
     refinement_mode: str = "small",
 ):
-    """실제 BraTS2020 데이터를 NumPy 배열로 반환."""
+    """실제 BraTS2021 데이터를 NumPy 배열로 반환."""
     from src.data.brats2020_dataset import BraTS2020Dataset
     import torch
     
-    log.info(f"실제 BraTS2020 데이터 로드 중: {train_root}")
+    log.info(f"실제 BraTS2021 데이터 로드 중: {train_root}")
     ds = BraTS2020Dataset(
         root_dir=train_root,
         modality=modality,
@@ -329,7 +329,8 @@ def load_real_data(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     from src.models.dynamic_router import AdaptivePipeline
     log.info(f"AdaptivePipeline 3-Stage 라우터 로드 중... (Device: {device})")
-    pipeline = AdaptivePipeline(device)
+    in_ch = imgs.shape[1] if imgs.ndim == 4 else 1
+    pipeline = AdaptivePipeline(device, in_channels=in_ch)
     
     batch_size = 64
     num_slices = len(imgs)
@@ -341,7 +342,10 @@ def load_real_data(
         for start_idx in range(0, num_slices, batch_size):
             end_idx = min(start_idx + batch_size, num_slices)
             batch_imgs = imgs[start_idx:end_idx]
-            batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device)
+            if batch_imgs.ndim == 3:
+                batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device)
+            else:
+                batch_t = torch.from_numpy(batch_imgs).to(device)
             
             rough_masks_t, class_preds = pipeline(batch_t)
             batch_preds_bin = (rough_masks_t > 0.5).float().squeeze(1).cpu().numpy()
@@ -353,6 +357,10 @@ def load_real_data(
             
     actual_roughs = np.concatenate(preds, axis=0)
     actual_probs = np.concatenate(probs, axis=0)
+    if actual_roughs.ndim == 4 and actual_roughs.shape[1] == 1:
+        actual_roughs = np.squeeze(actual_roughs, axis=1)
+    if actual_probs.ndim == 4 and actual_probs.shape[1] == 1:
+        actual_probs = np.squeeze(actual_probs, axis=1)
     class_preds_all = np.array(class_preds_all)
     log.info(f"AdaptivePipeline 초안 마스크 생성 완료 (개수: {len(actual_roughs)})")
 
@@ -663,7 +671,7 @@ def main():
     parser.add_argument("--use_real_data",  action="store_true", default=True)
     parser.add_argument("--train_root",     type=str,
                         default="src/data/archive")
-    parser.add_argument("--modality",       type=str, default="t1ce")
+    parser.add_argument("--modality",       type=str, default="t1ce+flair")
     parser.add_argument("--image_size",     type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None)
     parser.add_argument("--num_samples",    type=int, default=300)
@@ -807,9 +815,17 @@ def main():
         else:
             final_params["unet_path"] = "checkpoints/unet_best.pt"
 
-    # 2. save_path 자동 설정 (기본값인 경우 모델 타입별로 분리 저장)
-    if final_params.get("save_path") == "checkpoints/ppo_refiner":
-        final_params["save_path"] = f"checkpoints/ppo_refiner_{m_type}"
+    # 2. save_path 자동 설정 (refinement_mode 또는 m_type에 맞춰 분기)
+    ref_mode = final_params.get("refinement_mode", "small").lower()
+    if cli_args.get("save_path") is None:
+        if ref_mode == "small":
+            final_params["save_path"] = "checkpoints/ppo_refiner_attention_unet"
+        elif ref_mode == "medium":
+            final_params["save_path"] = "checkpoints/ppo_refiner_unetplusplus"
+        elif ref_mode == "large":
+            final_params["save_path"] = "checkpoints/ppo_refiner_segresnet"
+        elif final_params.get("save_path") == "checkpoints/ppo_refiner":
+            final_params["save_path"] = f"checkpoints/ppo_refiner_{m_type}"
 
     log.info("최종 파라미터:")
     for k, v in final_params.items():
