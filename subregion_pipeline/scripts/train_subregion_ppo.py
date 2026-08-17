@@ -25,6 +25,7 @@ def train_subregion_ppo(
     subregion_mode: str = "et", # "et", "tc", "wt"
     train_root: str = "src/data/archive",
     total_timesteps: int = 40000,
+    max_train_patients: int = 210,
     save_path: str = None,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ):
@@ -32,8 +33,8 @@ def train_subregion_ppo(
         save_path = f"subregion_pipeline/checkpoints/ppo_refiner_{subregion_mode}"
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-    log.info(f"Loading Dataset for Subregion PPO [{subregion_mode.upper()}] Refiner...")
-    ds = SubregionBraTSDataset(root_dir=train_root, target_size=128, max_patients=100)
+    log.info(f"Loading Dataset for Subregion PPO [{subregion_mode.upper()}] Refiner (Max Patients: {max_train_patients})...")
+    ds = SubregionBraTSDataset(root_dir=train_root, target_size=128, max_patients=max_train_patients)
 
     target_map = {"et": 0, "tc": 1, "wt": 2}
     target_idx = target_map[subregion_mode]
@@ -115,6 +116,12 @@ if __name__ == "__main__":
     parser.add_argument("--subregion", type=str, default="et", choices=["et", "tc", "wt"])
     parser.add_argument("--train_root", type=str, default="src/data/archive")
     parser.add_argument("--total_timesteps", type=int, default=40000)
+    parser.add_argument("--max_train_patients", type=int, default=210)
     args = parser.parse_args()
 
-    train_subregion_ppo(subregion_mode=args.subregion, train_root=args.train_root, total_timesteps=args.total_timesteps)
+    train_subregion_ppo(
+        subregion_mode=args.subregion,
+        train_root=args.train_root,
+        total_timesteps=args.total_timesteps,
+        max_train_patients=args.max_train_patients
+    )
