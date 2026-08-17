@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader, random_split
 # 프로젝트 루트를 경로에 추가
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.models.segresnet import build_segresnet, DiceLoss, BCEDiceLoss, compute_dice
+from src.models.segresnet import build_segresnet, DiceLoss, BCEDiceLoss, BoundaryLoss, compute_dice
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ def train_segresnet(
     lr: float = 3e-4,
     save_path: str = "checkpoints/segresnet_best.pt",
     device: str = "auto",
-    use_bce_dice: bool = True,
+    loss_type: str = "bce_dice", # "bce_dice", "dice", "boundary"
     augment: bool = True,
     refinement_mode: str = None, # Added for True Expert filtering
     pretrained_path: str = "",   # Added for Fine-tuning
@@ -201,11 +201,14 @@ def train_segresnet(
     log.info(f"SegResNet 파라미터 수: {n_params:,}  (init_filters={init_filters})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    if use_bce_dice:
-        criterion = BCEDiceLoss(bce_weight=0.5)
+    if loss_type == "boundary":
+        criterion = BoundaryLoss().to(device)
+        log.info("손실 함수: BoundaryLoss")
+    elif loss_type == "bce_dice":
+        criterion = BCEDiceLoss(bce_weight=0.5).to(device)
         log.info("손실 함수: BCEDiceLoss (BCE 0.5 + Dice 0.5)")
     else:
-        criterion = DiceLoss()
+        criterion = DiceLoss().to(device)
         log.info("손실 함수: DiceLoss")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
@@ -355,7 +358,10 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--save_path", type=str, default="checkpoints/segresnet_best.pt")
+    parser.add_argument("--save_path", type=str, default="checkpoints/segresnet_best.pt", help="최우수 모델 저장 경로")
+    parser.add_argument("--loss", type=str, default="bce_dice", choices=["bce_dice", "dice", "boundary"], help="사용할 손실 함수")
+    
+    # ── 기타 옵션 ──
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument(
         "--use_bce_dice",
@@ -383,6 +389,8 @@ if __name__ == "__main__":
     args.augment = not args.no_augment
     # argparse 전용 키 제거
     d = vars(args)
+    d["loss_type"] = d.pop("loss", "bce_dice")
     d.pop("no_bce_dice", None)
     d.pop("no_augment", None)
+    d.pop("use_bce_dice", None)
     train_segresnet(**d)

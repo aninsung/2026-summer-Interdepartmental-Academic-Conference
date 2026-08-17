@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
     parser.add_argument("--max_patients", type=int, default=20, help="평가 환자 수")
     parser.add_argument("--max_samples_per_class", type=int, default=100, help="클래스당 최대 샘플 수 (기본값: 100개, 총 300개)")
+    parser.add_argument("--confidence_threshold", type=float, default=0.85, help="RL-Refiner 진입 기준 Confidence (기본 0.85)")
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -126,11 +127,11 @@ def main():
                 ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
                 
                 if agent_k is not None:
-                    # GT-Free Confidence Guard: >0.90일 경우 RL 보정 Skip하여 Initial DSC 100% 보존
+                    # GT-Free Confidence Guard: > threshold 일 경우 RL 보정 Skip하여 Initial DSC 100% 보존
                     comp_selected_probs = rough_prob_np[comp_mask_k > 0.2]
                     comp_confidence = np.mean(comp_selected_probs) if len(comp_selected_probs) > 0 else 0.0
                     
-                    if comp_confidence > 0.90:
+                    if comp_confidence > args.confidence_threshold:
                         refined_components = np.maximum(refined_components, comp_mask_k)
                     else:
                         env_k = MaskRefinementEnv(
@@ -167,8 +168,8 @@ def main():
                 selected_probs = rough_prob_np[rough_mask_np > 0.2]
                 avg_confidence = np.mean(selected_probs) if len(selected_probs) > 0 else 0.0
                 
-                # Confidence Guard (>0.90 Skip)
-                if avg_confidence > 0.90:
+                # Confidence Guard (> threshold Skip)
+                if avg_confidence > args.confidence_threshold:
                     final_mask_np = rough_mask_np
                 else:
                     env = MaskRefinementEnv(
