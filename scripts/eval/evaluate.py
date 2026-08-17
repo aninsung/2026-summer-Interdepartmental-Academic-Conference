@@ -237,7 +237,29 @@ def evaluate(
             with torch.no_grad():
                 logits = unet(img_t)
                 probs = torch.sigmoid(logits)
-                rough = (probs > 0.5).float().squeeze().cpu().numpy()
+                if model_type == "attention_unet":
+                    # Zoom-Refiner 4x ROI Gating for Small Expert
+                    mask_50 = (probs > 0.35).squeeze()
+                    area_50 = torch.sum(mask_50).item()
+                    if 0 < area_50 < 300:
+                        import torch.nn.functional as F
+                        y_pts, x_pts = torch.where(mask_50)
+                        cy, cx = int(torch.mean(y_pts.float()).item()), int(torch.mean(x_pts.float()).item())
+                        half = 28
+                        H, W = img_t.shape[-2:]
+                        y1, y2 = max(0, cy - half), min(H, cy + half)
+                        x1, x2 = max(0, cx - half), min(W, cx + half)
+                        crop_img = img_t[:, :, y1:y2, x1:x2]
+                        crop_zoom = F.interpolate(crop_img, size=(H, W), mode='bilinear', align_corners=False)
+                        out_zoom = torch.sigmoid(unet(crop_zoom))
+                        out_crop_back = F.interpolate(out_zoom, size=(y2 - y1, x2 - x1), mode='bilinear', align_corners=False)
+                        probs_roi = torch.zeros_like(probs)
+                        probs_roi[:, :, y1:y2, x1:x2] = (probs[:, :, y1:y2, x1:x2] + out_crop_back) / 2.0
+                        probs = probs_roi
+                    thresh = 0.38
+                else:
+                    thresh = 0.5
+                rough = (probs > thresh).float().squeeze().cpu().numpy()
                 uncert = (1.0 - 2.0 * torch.abs(probs - 0.5)).squeeze().cpu().numpy()
         else:
             rough = rough_masks[i]
