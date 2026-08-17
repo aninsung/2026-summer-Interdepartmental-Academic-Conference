@@ -106,17 +106,8 @@
 
 각 크기 클래스별 맞춤형 PPO 에이전트가 뇌종양 마스크의 경계를 정교하게 수정(하늘색)한 샘플 비교 이미지입니다.
 
-#### 0. 3-Stage Dynamic Routing 통합 샘플 비교
+#### 3-Stage Dynamic Routing 통합 샘플 비교
 ![Pipeline Overview Sample](results/pipeline_sample_comparison.png)
-
-#### 1. Small 종양 보정 샘플 (Attention U-Net + PPO)
-![Small Sample](results/sample_comparison_attention_unet.png)
-
-#### 2. Medium 종양 보정 샘플 (UNet++ + PPO)
-![Medium Sample](results/sample_comparison_unetplusplus.png)
-
-#### 3. Large 종양 보정 샘플 (SegResNet + PPO)
-![Large Sample](results/sample_comparison_segresnet.png)
 
 ---
 
