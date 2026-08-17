@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 from src.data.brats2020_dataset import BraTS2020Dataset, _normalize_volume
 from src.models.unet import build_unet, compute_dice
 from src.models.segresnet import build_segresnet
-from evaluate import morphological_refine, hausdorff_95, compute_iou, compute_assd
+from scripts.eval.evaluate import morphological_refine, hausdorff_95
 
 # 결과 저장 디렉토리
 OUTPUT_DIR = os.path.join("results", "ppt_slides")
