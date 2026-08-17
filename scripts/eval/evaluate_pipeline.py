@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--train_root", type=str, default="src/data/archive", help="데이터셋 경로")
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
     parser.add_argument("--max_patients", type=int, default=20, help="평가 환자 수")
+    parser.add_argument("--max_samples_per_class", type=int, default=100, help="클래스당 최대 샘플 수 (기본값: 100개, 총 300개)")
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -79,6 +80,8 @@ def main():
             rough_mask_t, class_pred = pipeline(img_t)
             
         c = class_pred.item()
+        if args.max_samples_per_class and class_counts[c] >= args.max_samples_per_class:
+            continue
         class_counts[c] += 1
         
         rough_prob_np = rough_mask_t.squeeze().cpu().numpy()
