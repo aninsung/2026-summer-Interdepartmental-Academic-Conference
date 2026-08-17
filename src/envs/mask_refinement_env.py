@@ -217,11 +217,11 @@ class MaskRefinementEnv(gym.Env):
         self._current_gt = self.gt_masks[self._idx].copy()
         self._step_count = 0
         
-        # 초기 Rough 마스크 백업 및 허용 경계 제약용 마스크 사전 계산 (+-2 픽셀 범위)
+        # 초기 Rough 마스크 백업 및 허용 경계 제약용 마스크 사전 계산 (+-8 픽셀 범위로 대폭 완화)
         self._initial_rough_mask = self._current_mask.copy()
         struct_limit = np.ones((3, 3), dtype=bool)
-        self._min_mask_limit = binary_erosion(self._initial_rough_mask.astype(bool), structure=struct_limit, iterations=2).astype(np.float32)
-        self._max_mask_limit = binary_dilation(self._initial_rough_mask.astype(bool), structure=struct_limit, iterations=2).astype(np.float32)
+        self._min_mask_limit = binary_erosion(self._initial_rough_mask.astype(bool), structure=struct_limit, iterations=8).astype(np.float32)
+        self._max_mask_limit = binary_dilation(self._initial_rough_mask.astype(bool), structure=struct_limit, iterations=8).astype(np.float32)
 
         # Boundary-Band calculation for reward
         struct = np.ones((7, 7), dtype=bool)
@@ -230,6 +230,7 @@ class MaskRefinementEnv(gym.Env):
         self._boundary_band = dilated_gt ^ eroded_gt
         
         self._prev_dsc = _dice(self._current_mask, self._current_gt)
+        self._initial_dsc = self._prev_dsc
         self._prev_boundary_dsc = _dice(self._current_mask * self._boundary_band, self._current_gt * self._boundary_band)
         self._gt_dist_map = distance_transform_edt(~self._current_gt.astype(bool))
         self._prev_hd95 = _hd95(self._current_mask, self._current_gt, dist_b=self._gt_dist_map)
@@ -237,9 +238,13 @@ class MaskRefinementEnv(gym.Env):
         return self._obs(), {}
 
     def step(self, action):
-        # 8개 섹터 개별 변형 (모든 모델 공통 적용)
-        y_indices, x_indices = np.where(self._current_mask > 0.5)
-        if len(y_indices) > 0:
+        # 8개 섹터 개별 변형 (SDF 기반 연속 미세 변형 적용)
+        # 분리된 종양이 있을 때 질량 중심이 빈 공간에 놓이는 현상을 방지하기 위해 가장 큰 연결 요소의 중심 사용
+        lbl, num_features = label(self._current_mask > 0.5)
+        if num_features > 0:
+            component_sizes = [np.sum(lbl == k) for k in range(1, num_features + 1)]
+            largest_k = np.argmax(component_sizes) + 1
+            y_indices, x_indices = np.where(lbl == largest_k)
             cy, cx = y_indices.mean(), x_indices.mean()
         else:
             cy, cx = self.H / 2.0, self.W / 2.0
@@ -251,50 +256,50 @@ class MaskRefinementEnv(gym.Env):
         sectors = ((angles + np.pi) / (2.0 * np.pi) * 8.0).astype(int)
         sectors = np.clip(sectors, 0, 7)
 
-        struct = np.ones((3, 3), dtype=bool)
-        m = self._current_mask.astype(bool)
-        eroded_2 = binary_erosion(m, structure=struct, iterations=2)
-        eroded_1 = binary_erosion(m, structure=struct, iterations=1)
-        dilated_1 = binary_dilation(m, structure=struct, iterations=1)
-        dilated_2 = binary_dilation(m, structure=struct, iterations=2)
+        # ── SDF (Signed Distance Field) 계산 ──
+        m_bool = self._current_mask.astype(bool)
+        if np.any(m_bool) and not np.all(m_bool):
+            # sdf: 내부 양수, 외부 음수
+            sdf = distance_transform_edt(m_bool) - distance_transform_edt(~m_bool)
+        elif np.all(m_bool):
+            sdf = np.ones_like(self._current_mask) * 999.0
+        else:
+            sdf = np.ones_like(self._current_mask) * -999.0
 
-        new_mask = self._current_mask.copy()
-        action_penalty = 0.0
-        
-        # 행동 매핑: 연속 공간인 경우 [-2, 2] 실수값을 반올림 후 [0, 4] 정수로 변환
+        # 행동 매핑: 각 섹터별 연속 픽셀 shift 매핑
+        shift_map = np.zeros_like(self._current_mask)
+        num_non_keep = 0
         mapped_actions = []
-        for i in range(8):
-            if self.refinement_mode == "small":
-                act_val = action[i]
-                act = int(np.clip(np.round(act_val), -2, 2) + 2)
-            else:
-                act = int(action[i])
-            mapped_actions.append(act)
 
         for i in range(8):
-            act = mapped_actions[i]
             sector_pixels = (sectors == i)
-            
-            # Medium/Large: 보수적 조정 (큰 변형인 0, 4 선택 시 페널티 부여 및 작은 변형으로 강제)
-            if self.refinement_mode in ["medium", "large"] and act in [0, 4]:
-                action_penalty += 1.0
-                act = 1 if act == 0 else 3
-                
-            if act == 0:
-                new_mask[sector_pixels] = eroded_2[sector_pixels]
-            elif act == 1:
-                new_mask[sector_pixels] = eroded_1[sector_pixels]
-            elif act == 2:
-                pass  # 유지
-            elif act == 3:
-                new_mask[sector_pixels] = dilated_1[sector_pixels]
-            elif act == 4:
-                new_mask[sector_pixels] = dilated_2[sector_pixels]
+            if self.refinement_mode == "small":
+                # 연속 공간: action[i] 가 직접 픽셀 shift 거리로 사용됨 (예: [-2, 2] 범위)
+                shift_val = float(action[i])
+                mapped_actions.append(shift_val)
+                # Keep 여부 판정 (실수값이므로 절대값 0.1 이하는 Keep으로 간주)
+                if abs(shift_val) > 0.1:
+                    num_non_keep += 1
+            else:
+                # 이산 공간: 기존 checkpoints 호환성 유지하면서 미세 SDF shift로 변환
+                act = int(action[i])
+                mapped_actions.append(act)
+                # 0=강수축(-1.0px), 1=약수축(-0.4px), 2=유지(0.0px), 3=약팽창(0.4px), 4=강팽창(1.0px)
+                # 고정밀 보정을 위해 기존 morphology(1px/3px)보다 폭을 줄여 오버슈트 방지
+                mapping = {0: -1.0, 1: -0.4, 2: 0.0, 3: 0.4, 4: 1.0}
+                shift_val = mapping.get(act, 0.0)
+                if act != 2:
+                    num_non_keep += 1
+            shift_map[sector_pixels] = shift_val
+
+        # SDF + shift_map >= 0 이면 새로운 마스크 영역으로 결정
+        new_mask = (sdf + shift_map) >= 0.0
+        new_mask = new_mask.astype(np.float32)
 
         # ── 위상 보존 (Topological Constraints) ──
-        # 구멍 메우기 및 불연속 섬 제거를 위한 Closing 후 Opening (단, 20px 미만 미세 종양은 지워지지 않도록 보호)
         new_mask_bool = new_mask.astype(bool)
         if np.sum(new_mask_bool) > 20:
+            struct = np.ones((3, 3), dtype=bool)
             new_mask_bool = binary_dilation(new_mask_bool, structure=struct, iterations=1)
             new_mask_bool = binary_erosion(new_mask_bool, structure=struct, iterations=1) # Closing
             new_mask_bool = binary_erosion(new_mask_bool, structure=struct, iterations=1)
@@ -302,59 +307,58 @@ class MaskRefinementEnv(gym.Env):
         new_mask = new_mask_bool.astype(np.float32)
 
         # ── 수색 영역 제한 (Boundary Band Constraint) ──
-        # 초기 Rough 마스크 대비 +-2 픽셀 범위를 넘지 못하도록 클리핑
         new_mask = np.maximum(self._min_mask_limit, np.minimum(new_mask, self._max_mask_limit))
 
-        num_non_keep = sum([1 for a in mapped_actions if a != 2])
         step_cost = num_non_keep * (self.step_penalty / 8.0)
-        is_keep_and_good = (num_non_keep == 0 and self._prev_dsc >= 0.85)
-
+        
         new_dsc = _dice(new_mask, self._current_gt)
         new_boundary_dsc = _dice(new_mask * self._boundary_band, self._current_gt * self._boundary_band)
 
-        # ── 보상: 크기 비례 보상 (Size-normalized Reward) 및 Asymmetric Penalty ──
         delta_dsc = new_dsc - self._prev_dsc
         delta_boundary_dsc = new_boundary_dsc - self._prev_boundary_dsc
         
-        # HD95 델타 계산 (캐싱된 gt_dist_map 활용하여 연산 속도 2배 향상)
+        # HD95 델타 계산
         prev_hd95 = self._prev_hd95
         curr_hd95 = _hd95(new_mask, self._current_gt, dist_b=self._gt_dist_map)
         delta_hd95 = prev_hd95 - curr_hd95
         self._prev_hd95 = curr_hd95
         
-        # 종양 크기 가중치 계산 (면적이 작을수록 보상 증폭, 최대 3배)
+        # 종양 크기 가중치 계산
         tumor_area = max(1.0, float(np.sum(self._current_gt)))
         size_scale = max(0.5, min(3.0, 300.0 / tumor_area))
         
-        # 감점 페널티 비대칭 적용 (하락 시 감점 2배)
+        # 감점 페널티 비대칭 적용
         dsc_weight = delta_dsc if delta_dsc >= 0 else delta_dsc * 2.0
         boundary_weight = delta_boundary_dsc if delta_boundary_dsc >= 0 else delta_boundary_dsc * 2.0
         hd95_weight = delta_hd95 if delta_hd95 >= 0 else delta_hd95 * 2.0
 
-        if self.refinement_mode == "large":
-            # Large: HD95-Focused (보수적 조정 & 외곽 이상치 제거 집중)
-            reward = (dsc_weight * 10.0 + boundary_weight * 10.0 + hd95_weight * 0.5) * size_scale
-            reward -= curr_hd95 * 0.05
-            reward -= action_penalty * 0.5
-            
-        elif self.refinement_mode == "medium":
-            # Medium: Conservative (경계 DSC 위주 및 액션 페널티 적용)
-            reward = (dsc_weight * 0.3 + boundary_weight * 0.7 + hd95_weight * 0.1) * 30.0 * size_scale
-            if self._step_count % 5 == 0 or num_non_keep == 0:
-                reward -= curr_hd95 * 0.02
-            reward -= action_penalty * 0.5
-            
-        else:
-            # Small: Aggressive (전통적인 전역 및 경계 DSC 향상 + HD95 직접 보상)
-            reward = (dsc_weight * 0.3 + boundary_weight * 0.7 + hd95_weight * 0.2) * 30.0 * size_scale
-            if self._step_count % 5 == 0 or num_non_keep == 0:
-                reward -= curr_hd95 * 0.01
+        # ── 타겟 달성 보너스 (Target Bonus) ──
+        target_bonus = 0.0
+        if self.refinement_mode == "small" and new_dsc >= 0.85:
+            target_bonus = 50.0
+        elif self.refinement_mode in ["medium", "large"] and new_dsc >= 0.95:
+            target_bonus = 50.0
 
-        # 유지 보너스: 이미 좋은 마스크에서 유지 시 보상
+        # ── 고정밀 성능 유지 패널티 (Strict Monotonic Penalty) ──
+        # 현재 DSC가 에피소드 초기 예측 성능(self._initial_dsc)보다 하락하는 행동을 하면 -5.0의 벌점을 부과
+        if new_dsc < self._initial_dsc:
+            drop_penalty = -5.0
+        else:
+            drop_penalty = 0.0
+
+        if self.refinement_mode == "large":
+            reward = (dsc_weight * 20.0 + boundary_weight * 10.0 + hd95_weight * 0.5) * size_scale + target_bonus
+        elif self.refinement_mode == "medium":
+            reward = (dsc_weight * 20.0 + boundary_weight * 10.0 + hd95_weight * 0.1) * 30.0 * size_scale + target_bonus
+        else:
+            reward = (dsc_weight * 20.0 + boundary_weight * 10.0 + hd95_weight * 0.2) * 30.0 * size_scale + target_bonus
+
+        reward += drop_penalty - step_cost
+
+        # 유지 보너스
+        is_keep_and_good = (num_non_keep == 0 and self._prev_dsc >= 0.85)
         if is_keep_and_good:
             reward += 0.05
-        else:
-            reward -= step_cost
 
         old_prev_dsc = self._prev_dsc
         old_prev_boundary_dsc = self._prev_boundary_dsc

@@ -66,9 +66,9 @@ def main():
 
     # 2. Stage 2: Expert 백본 모델 3종 크기별 특화 단독 학습
     if not args.skip_experts:
-        # ── Small Expert (Attention U-Net) ──
-        cmd_att_ft = [python_exec, "scripts/train/train_attention_unet.py"] + extra_args + ["--refinement_mode", "small", "--save_path", "checkpoints/attention_unet_best.pt"]
-        run_command(cmd_att_ft, "Stage 2 (Small): Attention U-Net 소형 종양 특화 단독 학습")
+        # ── Small Expert (CaraNet) ──
+        cmd_caranet = [python_exec, "scripts/train/train_caranet.py"] + extra_args + ["--refinement_mode", "small", "--save_path", "checkpoints/caranet_best.pt"]
+        run_command(cmd_caranet, "Stage 2 (Small): CaraNet 소형 종양 특화 단독 학습")
         
         # ── Medium Expert (UNet++) ──
         cmd_unetpp = [python_exec, "scripts/train/train_unetplusplus.py"] + extra_args + ["--refinement_mode", "medium", "--save_path", "checkpoints/unetplusplus_best.pt"]
@@ -87,15 +87,15 @@ def main():
             agent_base_cmd += ["--modality", str(args.modality)]
         
         # Small Agent
-        run_command(agent_base_cmd + ["--model_type", "attention_unet", "--refinement_mode", "small", "--save_path", "checkpoints/ppo_refiner_attention_unet"], 
+        run_command(agent_base_cmd + ["--model_type", "caranet", "--refinement_mode", "small", "--save_path", "checkpoints/ppo_small.zip"], 
                     "Stage 3 (Small): Class 0 맞춤형 PPO 에이전트 학습")
         
         # Medium Agent
-        run_command(agent_base_cmd + ["--model_type", "unetplusplus", "--refinement_mode", "medium", "--save_path", "checkpoints/ppo_refiner_unetplusplus"], 
+        run_command(agent_base_cmd + ["--model_type", "unetplusplus", "--refinement_mode", "medium", "--save_path", "checkpoints/ppo_medium.zip"], 
                     "Stage 3 (Medium): Class 1 맞춤형 PPO 에이전트 학습")
         
         # Large Agent
-        run_command(agent_base_cmd + ["--model_type", "segresnet", "--refinement_mode", "large", "--save_path", "checkpoints/ppo_refiner_segresnet"], 
+        run_command(agent_base_cmd + ["--model_type", "segresnet", "--refinement_mode", "large", "--save_path", "checkpoints/ppo_large.zip"], 
                     "Stage 3 (Large): Class 2 맞춤형 PPO 에이전트 학습")
     else:
         log.info("⏭️  Stage 3: 맞춤형 PPO 에이전트 3종 학습 단계를 건너뜁니다.\n")
