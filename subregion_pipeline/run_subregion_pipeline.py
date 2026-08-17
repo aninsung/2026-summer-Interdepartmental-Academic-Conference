@@ -74,6 +74,7 @@ def main():
                 python_exec, "subregion_pipeline/scripts/train_subregion_ppo.py",
                 "--subregion", sub_mode,
                 "--train_root", args.train_root,
+                "--max_train_patients", str(args.max_train_patients),
                 "--total_timesteps", "40000",
             ]
             run_command_cmd(cmd_stage3, f"Stage 3 ({sub_mode.upper()}): Subregion 맞춤형 PPO 에이전트 학습")
