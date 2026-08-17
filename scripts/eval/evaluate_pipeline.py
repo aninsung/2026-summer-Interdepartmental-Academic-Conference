@@ -59,6 +59,7 @@ def main():
     class_final_hd95 = {0: [], 1: [], 2: []}
     
     class_counts = {0:0, 1:0, 2:0}
+    pipeline_samples = {}
     
     small_active_init, small_active_fin, small_active_hd = [], [], []
     small_micro_init, small_micro_fin, small_micro_hd = [], [], []
@@ -212,6 +213,19 @@ def main():
                 small_micro_fin.append(fin_dsc)
                 small_micro_hd.append(fin_hd95)
         
+        # Save representative samples per class for visualization
+        if c not in pipeline_samples:
+            pipeline_samples[c] = []
+        if len(pipeline_samples[c]) < 2:
+            pipeline_samples[c].append({
+                "img": img_np[0] if img_np.ndim == 3 else img_np,
+                "gt": gt_np,
+                "rough": rough_mask_np,
+                "final": final_mask_np,
+                "init_dsc": init_dsc,
+                "fin_dsc": fin_dsc,
+            })
+
         if (i+1) % 100 == 0:
             print(f"Processed {i+1}/{len(images)} slices...")
             
@@ -237,5 +251,92 @@ def main():
     if len(small_micro_init) > 0:
         print(f"[Small - Micro Boundary Fragment (<50px)] count: {len(small_micro_init)} | Initial DSC: {np.mean(small_micro_init):.4f} -> Final DSC: {np.mean(small_micro_fin):.4f} | HD95 (px): {np.mean(small_micro_hd):.4f}")
     
+    # 🖼️ 3-Stage Dynamic Routing 파이프라인 샘플 시각화 저장
+    _plot_pipeline_results(pipeline_samples, output_dir="results")
+
+
+def _plot_pipeline_results(pipeline_samples: dict, output_dir: str = "results"):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    os.makedirs(output_dir, exist_ok=True)
+    sample_list = []
+    class_labels = []
+    for c in [0, 1, 2]:
+        if c in pipeline_samples:
+            for idx, s in enumerate(pipeline_samples[c]):
+                sample_list.append(s)
+                c_name = "Small (Attention U-Net)" if c == 0 else ("Medium (UNet++)" if c == 1 else "Large (SegResNet)")
+                class_labels.append(f"{c_name}\nSample {idx+1}")
+
+    if not sample_list:
+        return
+
+    n_cols = len(sample_list)
+    fig, axes = plt.subplots(3, n_cols, figsize=(3.2 * n_cols, 9.5))
+    if n_cols == 1:
+        axes = axes[:, np.newaxis]
+
+    for col, s in enumerate(sample_list):
+        img = s["img"]
+        gt = s["gt"]
+        rough = s["rough"]
+        final = s["final"]
+        init_dsc = s["init_dsc"]
+        fin_dsc = s["fin_dsc"]
+
+        y_indices, x_indices = np.where(gt > 0.5)
+        if len(y_indices) > 0:
+            ymin, ymax = y_indices.min(), y_indices.max()
+            xmin, xmax = x_indices.min(), x_indices.max()
+            margin = 15
+            ymin = max(0, ymin - margin)
+            ymax = min(gt.shape[0] - 1, ymax + margin)
+            xmin = max(0, xmin - margin)
+            xmax = min(gt.shape[1] - 1, xmax + margin)
+        else:
+            ymin, ymax = 0, gt.shape[0] - 1
+            xmin, xmax = 0, gt.shape[1] - 1
+
+        # Row 0: Original MRI + Ground Truth
+        axes[0, col].imshow(img, cmap="gray", vmin=0, vmax=1)
+        axes[0, col].contour(gt, levels=[0.5], colors="lime", linewidths=2.0)
+        axes[0, col].set_title(class_labels[col], fontsize=13, fontweight="bold", pad=8)
+        axes[0, col].set_xticks([])
+        axes[0, col].set_yticks([])
+
+        # Row 1: Stage 2 Rough Mask
+        axes[1, col].imshow(img, cmap="gray", vmin=0, vmax=1)
+        axes[1, col].contour(rough, levels=[0.5], colors="red", linewidths=2.0)
+        axes[1, col].contour(gt, levels=[0.5], colors="lime", linewidths=1.2, linestyles="--")
+        axes[1, col].set_xlabel(f"Initial DSC={init_dsc:.3f}", fontsize=12, fontweight="bold")
+        axes[1, col].set_xticks([])
+        axes[1, col].set_yticks([])
+
+        # Row 2: Stage 3 Pure RL Final Mask
+        axes[2, col].imshow(img, cmap="gray", vmin=0, vmax=1)
+        axes[2, col].contour(final, levels=[0.5], colors="cyan", linewidths=2.0)
+        axes[2, col].contour(gt, levels=[0.5], colors="lime", linewidths=1.2, linestyles="--")
+        axes[2, col].set_xlabel(f"Final DSC={fin_dsc:.3f}", fontsize=12, fontweight="bold")
+        axes[2, col].set_xticks([])
+        axes[2, col].set_yticks([])
+
+        for row_idx in range(3):
+            axes[row_idx, col].set_xlim(xmin, xmax)
+            axes[row_idx, col].set_ylim(ymax, ymin)
+
+    # Row headers
+    fig.text(0.01, 0.78, "MRI + GT", va="center", rotation="vertical", fontsize=14, fontweight="bold", color="lime")
+    fig.text(0.01, 0.50, "Stage 2 Rough", va="center", rotation="vertical", fontsize=14, fontweight="bold", color="red")
+    fig.text(0.01, 0.22, "Stage 3 RL Refined", va="center", rotation="vertical", fontsize=14, fontweight="bold", color="cyan")
+
+    plt.tight_layout(rect=[0.03, 0, 1, 1])
+    save_path = os.path.join(output_dir, "pipeline_sample_comparison.png")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"2026-08-17 09:57:24 [INFO] 🖼️ 3-Stage Dynamic Routing 파이프라인 시각화 저장 완료: {save_path}")
+
+
 if __name__ == "__main__":
     main()
