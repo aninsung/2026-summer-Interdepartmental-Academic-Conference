@@ -164,29 +164,32 @@ def main():
                 selected_probs = rough_prob_np[rough_mask_np > 0.2]
                 avg_confidence = np.mean(selected_probs) if len(selected_probs) > 0 else 0.0
                 
-                # Active RL Refinement with 3% Tolerance Fallback Gate
-                env = MaskRefinementEnv(
-                    images[i:i+1], 
-                    gt_masks[i:i+1], 
-                    np.expand_dims(rough_mask_np, 0), 
-                    uncertainty_maps=np.expand_dims(rough_prob_np, 0),
-                    max_steps=5, 
-                    refinement_mode=refinement_mode
-                )
-                obs, _ = env.reset(seed=0)
-                for _ in range(5):
-                    action, _ = agent.predict(obs, deterministic=True)
-                    obs, _, _, _, _ = env.step(action)
-                
-                # Probability Fallback Gate: 보정 후 신뢰도가 3%p 이상 급락한 경우에만 안전 복원
-                refined_mask_np = env._current_mask
-                refined_selected_probs = rough_prob_np[refined_mask_np > 0.2]
-                refined_confidence = np.mean(refined_selected_probs) if len(refined_selected_probs) > 0 else 0.0
-                
-                if refined_confidence < (avg_confidence - 0.03):
+                # Confidence Guard (>0.90 Skip)
+                if avg_confidence > 0.90:
                     final_mask_np = rough_mask_np
                 else:
-                    final_mask_np = refined_mask_np
+                    env = MaskRefinementEnv(
+                        images[i:i+1], 
+                        gt_masks[i:i+1], 
+                        np.expand_dims(rough_mask_np, 0), 
+                        uncertainty_maps=np.expand_dims(rough_prob_np, 0),
+                        max_steps=5, 
+                        refinement_mode=refinement_mode
+                    )
+                    obs, _ = env.reset(seed=0)
+                    for _ in range(5):
+                        action, _ = agent.predict(obs, deterministic=True)
+                        obs, _, _, _, _ = env.step(action)
+                    
+                    # Probability Fallback Gate: 보정 후 확률 신뢰도가 하락한 경우 Initial Mask로 안전 복원
+                    refined_mask_np = env._current_mask
+                    refined_selected_probs = rough_prob_np[refined_mask_np > 0.2]
+                    refined_confidence = np.mean(refined_selected_probs) if len(refined_selected_probs) > 0 else 0.0
+                    
+                    if refined_confidence < avg_confidence:
+                        final_mask_np = rough_mask_np
+                    else:
+                        final_mask_np = refined_mask_np
 
         fin_dsc = _dice(final_mask_np, gt_np)
         fin_hd95 = _hd95(final_mask_np, gt_np)
