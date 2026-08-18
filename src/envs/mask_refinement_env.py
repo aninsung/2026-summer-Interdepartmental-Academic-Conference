@@ -197,8 +197,8 @@ class MaskRefinementEnv(gym.Env):
             cropped[:, pad_y1:pad_y2, pad_x1:pad_x2] = obs[:, y1:y2, x1:x2]
             return cropped
         else:
-            # 기존 3채널 체크포인트 가중치와 호환되는 3개 채널 반환 (MRI, 마스크, 0-Uncertainty)
-            obs = np.stack([self._current_image, self._current_mask, np.zeros_like(self._current_image)], axis=0).astype(np.float32)
+            # 실제 Uncertainty(Probability) Map을 3번째 채널로 전달 (버그 수정: 기존 zeros → 실제 prob map)
+            obs = np.stack([self._current_image, self._current_mask, self._current_prob], axis=0).astype(np.float32)
             return obs
 
     # ── Gymnasium API ──────────────────────────────────────

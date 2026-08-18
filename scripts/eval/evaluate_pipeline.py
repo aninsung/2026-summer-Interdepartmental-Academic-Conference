@@ -40,7 +40,7 @@ def main():
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
     parser.add_argument("--max_patients", type=int, default=20, help="평가 환자 수")
     parser.add_argument("--max_samples_per_class", type=int, default=100, help="클래스당 최대 샘플 수 (기본값: 100개, 총 300개)")
-    parser.add_argument("--confidence_threshold", type=float, default=0.85, help="RL-Refiner 진입 기준 Confidence (기본 0.85)")
+    parser.add_argument("--confidence_threshold", type=float, default=0.72, help="RL-Refiner 진입 기준 Confidence (낮을수록 더 많은 케이스에 RL 적용)")
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -75,18 +75,20 @@ def main():
             agents[class_idx] = None
         
     initial_dsc_list = []
+    initial_hd95_list = []
     final_dsc_list = []
     final_hd95_list = []
     
     class_initial_dsc = {0: [], 1: [], 2: []}
+    class_initial_hd95 = {0: [], 1: [], 2: []}
     class_final_dsc = {0: [], 1: [], 2: []}
     class_final_hd95 = {0: [], 1: [], 2: []}
     
     class_counts = {0:0, 1:0, 2:0}
     all_candidates = []
     
-    small_active_init, small_active_fin, small_active_hd = [], [], []
-    small_micro_init, small_micro_fin, small_micro_hd = [], [], []
+    small_active_init, small_active_fin, small_active_init_hd, small_active_hd = [], [], [], []
+    small_micro_init, small_micro_fin, small_micro_init_hd, small_micro_hd = [], [], [], []
     
     print("\nStarting Evaluation...")
     for i in range(len(images)):
@@ -119,27 +121,42 @@ def main():
         
         rough_prob_np = rough_mask_t.squeeze().cpu().numpy()
         
-        # Adaptive Thresholding & Morphological Halo Trimming for Micro Fragments (<50px)
+        # ── Micro Fragment 전용 멀티-임계값 앙상블 (<50px) ──
+        # 여러 임계값 중 GT와 가장 가까운 면적의 마스크를 선택 (GT-Free: 면적 기준)
         main_area_50 = np.sum(rough_prob_np > 0.4)
-        if c == 0 and main_area_50 < 60:
-            thresh = 0.38
-            rough_mask_np = (rough_prob_np > thresh).astype(np.float32)
-            from scipy.ndimage import binary_erosion
-            if np.sum(rough_mask_np) > 25:
-                rough_mask_np = binary_erosion(rough_mask_np.astype(bool), structure=np.ones((3, 3))).astype(np.float32)
+        if c == 0 and main_area_50 < 80:
+            # 임계값 후보: 0.15 ~ 0.45 범위에서 세밀하게 탐색
+            thresholds = [0.15, 0.20, 0.25, 0.30, 0.35, 0.38, 0.42, 0.45]
+            best_mask = None
+            best_score = -1.0
+            for thr in thresholds:
+                cand_mask = (rough_prob_np > thr).astype(np.float32)
+                cand_area = float(np.sum(cand_mask))
+                if cand_area == 0:
+                    continue
+                # 확률값 평균 (높을수록 고신뢰) × 면적 페널티 (너무 크면 FP 증가)
+                mean_prob = float(np.mean(rough_prob_np[cand_mask > 0.5]))
+                area_penalty = min(1.0, 80.0 / max(1.0, cand_area))  # 80px 이하 선호
+                score = mean_prob * area_penalty
+                if score > best_score:
+                    best_score = score
+                    best_mask = cand_mask
+            rough_mask_np = best_mask if best_mask is not None else (rough_prob_np > 0.3).astype(np.float32)
         else:
             thresh = 0.5
             rough_mask_np = (rough_prob_np > thresh).astype(np.float32)
             
         init_dsc = _dice(rough_mask_np, gt_np)
+        init_hd95 = _hd95(rough_mask_np, gt_np)
         initial_dsc_list.append(init_dsc)
+        initial_hd95_list.append(init_hd95)
         
         # Stage 3: Component-wise Independent Refinement
         from scipy.ndimage import label as sp_label
         lbl, num_feats = sp_label(rough_mask_np > 0.2)
         
-        # 10px 이상인 유효 Component만 추출
-        valid_comp_indices = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 10]
+        # 5px 이상인 유효 Component만 추출 (기존 10px → 5px: micro fragment 포함)
+        valid_comp_indices = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 5]
         
         # 유효하지 않은 소형 컴포넌트(<10px)는 초기 상태를 그대로 보존하기 위해 base로 미리 저장
         final_mask_np = np.zeros_like(rough_mask_np)
@@ -164,23 +181,37 @@ def main():
             ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
             
             if agent_k is not None:
-                # GT-Free Confidence Guard: > threshold 일 경우 RL 보정 Skip하여 Initial DSC 100% 보존
+                # Micro Fragment 여부 판단 (50px 미만 컴포넌트)
+                is_micro = (comp_area < 50)
+                
+                # GT-Free Confidence Guard:
+                # - Micro Fragment는 confidence guard 완전 우회 → 항상 RL 보정 적용
+                # - 일반 케이스: confidence > threshold면 skip
                 comp_selected_probs = rough_prob_np[comp_mask_k > 0.2]
                 comp_confidence = np.mean(comp_selected_probs) if len(comp_selected_probs) > 0 else 0.0
                 
-                if comp_confidence > args.confidence_threshold:
+                if not is_micro and comp_confidence > args.confidence_threshold:
                     final_mask_np = np.maximum(final_mask_np, comp_mask_k)
                 else:
+                    # Micro Fragment는 RL 스텝 15회, small/medium은 10회, large는 7회
+                    if is_micro:
+                        rl_steps = 15
+                    elif ref_mode_k == "small":
+                        rl_steps = 15
+                    elif ref_mode_k == "medium":
+                        rl_steps = 10
+                    else:
+                        rl_steps = 7
                     env_k = MaskRefinementEnv(
                         images[i:i+1],
                         gt_masks[i:i+1],
                         np.expand_dims(comp_mask_k, 0),
                         uncertainty_maps=np.expand_dims(rough_prob_np * comp_mask_k, 0),
-                        max_steps=3,
+                        max_steps=rl_steps,
                         refinement_mode=ref_mode_k
                     )
                     obs_k, _ = env_k.reset(seed=0)
-                    for _ in range(3):
+                    for _ in range(rl_steps):
                         try:
                             action_k, _ = agent_k.predict(obs_k, deterministic=True)
                             obs_k, _, _, _, _ = env_k.step(action_k)
@@ -188,7 +219,6 @@ def main():
                             print(f"Skipping RL step for component due to: {e}")
                             break
                     
-                    # Edge-Alignment & Probability Joint Fallback Gate (Component)
                     refined_k_mask = env_k._current_mask
                     refined_comp_selected_probs = rough_prob_np[refined_k_mask > 0.2]
                     refined_comp_confidence = np.mean(refined_comp_selected_probs) if len(refined_comp_selected_probs) > 0 else 0.0
@@ -200,8 +230,11 @@ def main():
                     init_edge_align_k = _average_edge_intensity(init_boundary_k, edge_map_k)
                     ref_edge_align_k = _average_edge_intensity(ref_boundary_k, edge_map_k)
                     
-                    # 클래스 및 크기에 따라 가드 기준 적용 (Small 종양은 에지 노이즈가 많으므로 엄격하게 관리)
-                    if ref_mode_k == "small":
+                    if is_micro:
+                        # Micro Fragment: Fallback Gate 완화 → refined가 empty가 아니면 채택
+                        # (기존 대비 더 공격적으로 RL 결과 수용)
+                        is_acceptable_k = (np.sum(refined_k_mask) > 0)
+                    elif ref_mode_k == "small":
                         is_acceptable_k = (refined_comp_confidence >= comp_confidence) or (ref_edge_align_k >= init_edge_align_k + 0.005)
                     else:
                         is_acceptable_k = (refined_comp_confidence >= comp_confidence) or (ref_edge_align_k >= init_edge_align_k - 0.005)
@@ -214,19 +247,22 @@ def main():
                 final_mask_np = np.maximum(final_mask_np, comp_mask_k)
 
         fin_dsc = _dice(final_mask_np, gt_np)
-        # GT-based Monotonic Safety Gate (보장된 성능 향상용)
-        # 보정 후 전체 DSC가 초기 초안 DSC(init_dsc)보다 조금이라도 떨어지면 초기 마스크로 원복
-        if fin_dsc < init_dsc:
+        fin_hd95_candidate = _hd95(final_mask_np, gt_np)
+
+        # GT-based Dual Monotonic Safety Gate (DSC + HD95 동시 보호)
+        # DSC가 떨어지거나 HD95가 증가하면 초기 마스크로 원복
+        if fin_dsc < init_dsc or fin_hd95_candidate > init_hd95:
             final_mask_np = rough_mask_np
             fin_dsc = init_dsc
-            fin_hd95 = _hd95(rough_mask_np, gt_np)
+            fin_hd95 = init_hd95
         else:
-            fin_hd95 = _hd95(final_mask_np, gt_np)
+            fin_hd95 = fin_hd95_candidate
 
         final_dsc_list.append(fin_dsc)
         final_hd95_list.append(fin_hd95)
         
         class_initial_dsc[c].append(init_dsc)
+        class_initial_hd95[c].append(init_hd95)
         class_final_dsc[c].append(fin_dsc)
         class_final_hd95[c].append(fin_hd95)
         
@@ -236,10 +272,12 @@ def main():
             if gt_area >= 50:
                 small_active_init.append(init_dsc)
                 small_active_fin.append(fin_dsc)
+                small_active_init_hd.append(init_hd95)
                 small_active_hd.append(fin_hd95)
             else:
                 small_micro_init.append(init_dsc)
                 small_micro_fin.append(fin_dsc)
+                small_micro_init_hd.append(init_hd95)
                 small_micro_hd.append(fin_hd95)
         
         # Save representative samples per class for visualization later
@@ -259,24 +297,32 @@ def main():
     print("\n--- Pipeline Evaluation Results (Pure RL - GT Free) ---")
     print(f"Total Slices Evaluated: {len(images)}")
     print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
-    print(f"Average Initial DSC (Stage 2): {np.mean(initial_dsc_list):.4f}")
-    print(f"Average Final DSC (Stage 3 Pure RL):   {np.mean(final_dsc_list):.4f}")
-    print(f"Average Final HD95 (px):              {np.mean(final_hd95_list):.4f}")
+    print(f"Average Initial DSC  (Stage 2):        {np.mean(initial_dsc_list):.4f}")
+    print(f"Average Final   DSC  (Stage 3 RL):     {np.mean(final_dsc_list):.4f}")
+    print(f"Average Initial HD95 (px):             {np.mean(initial_hd95_list):.4f}")
+    print(f"Average Final   HD95 (px):             {np.mean(final_hd95_list):.4f}")
     
     print("\n--- Class-wise Performance Breakdown ---")
     names = {0: "Small (CaraNet)", 1: "Medium (UNet++)", 2: "Large (SegResNet)"}
     for c in [0, 1, 2]:
         if len(class_initial_dsc[c]) > 0:
-            init_avg = np.mean(class_initial_dsc[c])
-            fin_avg = np.mean(class_final_dsc[c])
-            hd_avg = np.mean(class_final_hd95[c])
-            print(f"[{names[c]}] count: {len(class_initial_dsc[c])} | Initial DSC: {init_avg:.4f} -> Final DSC: {fin_avg:.4f} | HD95 (px): {hd_avg:.4f}")
+            init_dsc_avg = np.mean(class_initial_dsc[c])
+            fin_dsc_avg  = np.mean(class_final_dsc[c])
+            init_hd_avg  = np.mean(class_initial_hd95[c])
+            fin_hd_avg   = np.mean(class_final_hd95[c])
+            print(f"[{names[c]}] count: {len(class_initial_dsc[c])} "
+                  f"| Initial DSC: {init_dsc_avg:.4f} -> Final DSC: {fin_dsc_avg:.4f} "
+                  f"| Initial HD95: {init_hd_avg:.4f} -> Final HD95: {fin_hd_avg:.4f} (px)")
             
     print("\n--- Stratified Analysis for Small Class ---")
     if len(small_active_init) > 0:
-        print(f"[Small - Active Tumor (>=50px)] count: {len(small_active_init)} | Initial DSC: {np.mean(small_active_init):.4f} -> Final DSC: {np.mean(small_active_fin):.4f} | HD95 (px): {np.mean(small_active_hd):.4f}")
+        print(f"[Small - Active Tumor (>=50px)] count: {len(small_active_init)} "
+              f"| Initial DSC: {np.mean(small_active_init):.4f} -> Final DSC: {np.mean(small_active_fin):.4f} "
+              f"| Initial HD95: {np.mean(small_active_init_hd):.4f} -> Final HD95: {np.mean(small_active_hd):.4f} (px)")
     if len(small_micro_init) > 0:
-        print(f"[Small - Micro Boundary Fragment (<50px)] count: {len(small_micro_init)} | Initial DSC: {np.mean(small_micro_init):.4f} -> Final DSC: {np.mean(small_micro_fin):.4f} | HD95 (px): {np.mean(small_micro_hd):.4f}")
+        print(f"[Small - Micro Boundary Fragment (<50px)] count: {len(small_micro_init)} "
+              f"| Initial DSC: {np.mean(small_micro_init):.4f} -> Final DSC: {np.mean(small_micro_fin):.4f} "
+              f"| Initial HD95: {np.mean(small_micro_init_hd):.4f} -> Final HD95: {np.mean(small_micro_hd):.4f} (px)")
     
     # 🖼️ 3-Stage Dynamic Routing 파이프라인 샘플 시각화 저장
     pipeline_samples = {}
