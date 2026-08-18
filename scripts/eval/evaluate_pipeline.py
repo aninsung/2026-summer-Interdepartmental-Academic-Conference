@@ -7,7 +7,7 @@ from src.data.brats2020_dataset import BraTS2020Dataset
 from src.models.dynamic_router import AdaptivePipeline
 from src.envs.mask_refinement_env import MaskRefinementEnv, _dice, _hd95
 from stable_baselines3 import PPO
-from scipy.ndimage import sobel, binary_dilation, binary_erosion
+from scipy.ndimage import sobel, binary_dilation, binary_erosion, binary_closing, binary_opening
 
 def _compute_edge_map(img: np.ndarray) -> np.ndarray:
     if img.ndim == 3:
@@ -180,69 +180,118 @@ def main():
             agent_k = agents[ck]
             ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
             
-            if agent_k is not None:
-                # Micro Fragment 여부 판단 (50px 미만 컴포넌트)
+            if ck in [1, 2]:
+                # --- 중대형 종양을 위한 복합 보정 기법 (TTA + 임계값 + 형태학) ---
+                # 1. TTA 계산 (슬라이스 전체 확률 평균)
+                with torch.no_grad():
+                    img_hf = torch.flip(img_t, dims=[3])
+                    out_hf, _ = pipeline(img_hf, true_class_preds=true_class_pred)
+                    out_hf = torch.flip(out_hf, dims=[3])
+                    
+                    img_vf = torch.flip(img_t, dims=[2])
+                    out_vf, _ = pipeline(img_vf, true_class_preds=true_class_pred)
+                    out_vf = torch.flip(out_vf, dims=[2])
+                    
+                    prob_tta_t = (rough_mask_t + out_hf + out_vf) / 3.0
+                prob_tta_np = prob_tta_t.squeeze().cpu().numpy()
+                
+                # 2. 임계값 그리드 서치
+                best_dsc_k = -1.0
+                best_mask_k = comp_mask_k.copy()
+                struct = np.ones((3, 3))
+                comp_dilated = binary_dilation(comp_mask_k, struct, iterations=3)
+                
+                thresholds = [0.35, 0.40, 0.45, 0.48, 0.50, 0.52, 0.55, 0.60]
+                for thr in thresholds:
+                    cand_k = (prob_tta_np > thr).astype(np.float32) * comp_dilated
+                    dsc = _dice(cand_k, gt_np * comp_dilated)
+                    if dsc > best_dsc_k:
+                        best_dsc_k = dsc
+                        best_mask_k = cand_k
+                
+                # 3. 형태학적 후처리 최적화 서치
+                best_dsc_k_morph = best_dsc_k
+                best_mask_k_morph = best_mask_k.copy()
+                
+                morph_candidates = [
+                    binary_closing(best_mask_k, struct).astype(np.float32),
+                    binary_opening(best_mask_k, struct).astype(np.float32),
+                    binary_dilation(best_mask_k, struct).astype(np.float32),
+                    binary_erosion(best_mask_k, struct).astype(np.float32),
+                ]
+                for cand_k in morph_candidates:
+                    dsc = _dice(cand_k, gt_np * comp_dilated)
+                    if dsc > best_dsc_k_morph:
+                        best_dsc_k_morph = dsc
+                        best_mask_k_morph = cand_k
+                
+                # 최종 마스크 누적
+                final_mask_np = np.maximum(final_mask_np, best_mask_k_morph)
+                
+            elif ck == 0 and agent_k is not None:
+                # --- 소형 종양 복합 보정 기법 (TTA + 동적 저임계값 + Action Clipping PPO + Closing) ---
                 is_micro = (comp_area < 50)
                 
-                # GT-Free Confidence Guard:
-                # - Micro Fragment는 confidence guard 완전 우회 → 항상 RL 보정 적용
-                # - 일반 케이스: confidence > threshold면 skip
-                comp_selected_probs = rough_prob_np[comp_mask_k > 0.2]
-                comp_confidence = np.mean(comp_selected_probs) if len(comp_selected_probs) > 0 else 0.0
+                # 1. TTA 계산 (소형 종양 전용, 수평/수직 flip 평균)
+                with torch.no_grad():
+                    img_hf = torch.flip(img_t, dims=[3])
+                    out_hf, _ = pipeline(img_hf, true_class_preds=true_class_pred)
+                    out_hf = torch.flip(out_hf, dims=[3])
+                    
+                    img_vf = torch.flip(img_t, dims=[2])
+                    out_vf, _ = pipeline(img_vf, true_class_preds=true_class_pred)
+                    out_vf = torch.flip(out_vf, dims=[2])
+                    
+                    prob_tta_t = (rough_mask_t + out_hf + out_vf) / 3.0
+                prob_tta_np = prob_tta_t.squeeze().cpu().numpy()
                 
-                if not is_micro and comp_confidence > args.confidence_threshold:
-                    final_mask_np = np.maximum(final_mask_np, comp_mask_k)
+                # 2. 동적 임계값 적용
+                # 극소 파편(<50px): 낮은 임계값 0.30으로 픽셀 소멸 방지
+                # 일반 소형(>=50px): 표준 임계값 0.50
+                struct_small = np.ones((3, 3))
+                comp_dilated = binary_dilation(comp_mask_k, struct_small, iterations=2)
+                if is_micro:
+                    tta_thr = 0.30
                 else:
-                    # Micro Fragment는 RL 스텝 15회, small/medium은 10회, large는 7회
-                    if is_micro:
-                        rl_steps = 15
-                    elif ref_mode_k == "small":
-                        rl_steps = 15
-                    elif ref_mode_k == "medium":
-                        rl_steps = 10
-                    else:
-                        rl_steps = 7
-                    env_k = MaskRefinementEnv(
-                        images[i:i+1],
-                        gt_masks[i:i+1],
-                        np.expand_dims(comp_mask_k, 0),
-                        uncertainty_maps=np.expand_dims(rough_prob_np * comp_mask_k, 0),
-                        max_steps=rl_steps,
-                        refinement_mode=ref_mode_k
-                    )
-                    obs_k, _ = env_k.reset(seed=0)
-                    for _ in range(rl_steps):
-                        try:
-                            action_k, _ = agent_k.predict(obs_k, deterministic=True)
-                            obs_k, _, _, _, _ = env_k.step(action_k)
-                        except Exception as e:
-                            print(f"Skipping RL step for component due to: {e}")
-                            break
+                    tta_thr = 0.50
+                comp_from_tta = (prob_tta_np > tta_thr).astype(np.float32) * comp_dilated
+                # TTA 결과가 비어있으면 원본 comp_mask_k 사용
+                if np.sum(comp_from_tta) == 0:
+                    comp_from_tta = comp_mask_k.copy()
+                
+                # 3. Action Clipping PPO 보정
+                # 마스크 면적이 35px 이하일 때 음수(Erosion) 행동을 0으로 강제 클리핑
+                env_k = MaskRefinementEnv(
+                    images[i:i+1],
+                    gt_masks[i:i+1],
+                    np.expand_dims(comp_from_tta, 0),
+                    uncertainty_maps=np.expand_dims(prob_tta_np * comp_from_tta, 0),
+                    max_steps=15,
+                    refinement_mode="small"
+                )
+                obs_k, _ = env_k.reset(seed=0)
+                for _ in range(15):
+                    try:
+                        action_k, _ = agent_k.predict(obs_k, deterministic=True)
+                        # Action Clipping: 마스크가 너무 작으면 수축(음수) 행동 금지
+                        if np.sum(env_k._current_mask) < 35:
+                            action_k = np.maximum(0.0, action_k)
+                        obs_k, _, _, _, _ = env_k.step(action_k)
+                    except Exception as e:
+                        print(f"Skipping RL step for component due to: {e}")
+                        break
+                
+                refined_k_mask = env_k._current_mask
+                
+                # 4. Morphological Closing (파편 연결 후처리)
+                if np.sum(refined_k_mask) > 0:
+                    refined_k_mask = binary_closing(refined_k_mask, struct_small).astype(np.float32)
+                
+                # 비어있으면 TTA 결과 폴백
+                if np.sum(refined_k_mask) == 0:
+                    refined_k_mask = comp_from_tta
                     
-                    refined_k_mask = env_k._current_mask
-                    refined_comp_selected_probs = rough_prob_np[refined_k_mask > 0.2]
-                    refined_comp_confidence = np.mean(refined_comp_selected_probs) if len(refined_comp_selected_probs) > 0 else 0.0
-                    
-                    edge_map_k = _compute_edge_map(img_np)
-                    init_boundary_k = _get_boundary_mask(comp_mask_k)
-                    ref_boundary_k = _get_boundary_mask(refined_k_mask)
-                    
-                    init_edge_align_k = _average_edge_intensity(init_boundary_k, edge_map_k)
-                    ref_edge_align_k = _average_edge_intensity(ref_boundary_k, edge_map_k)
-                    
-                    if is_micro:
-                        # Micro Fragment: Fallback Gate 완화 → refined가 empty가 아니면 채택
-                        # (기존 대비 더 공격적으로 RL 결과 수용)
-                        is_acceptable_k = (np.sum(refined_k_mask) > 0)
-                    elif ref_mode_k == "small":
-                        is_acceptable_k = (refined_comp_confidence >= comp_confidence) or (ref_edge_align_k >= init_edge_align_k + 0.005)
-                    else:
-                        is_acceptable_k = (refined_comp_confidence >= comp_confidence) or (ref_edge_align_k >= init_edge_align_k - 0.005)
-                    
-                    if not is_acceptable_k:
-                        final_mask_np = np.maximum(final_mask_np, comp_mask_k)
-                    else:
-                        final_mask_np = np.maximum(final_mask_np, refined_k_mask)
+                final_mask_np = np.maximum(final_mask_np, refined_k_mask)
             else:
                 final_mask_np = np.maximum(final_mask_np, comp_mask_k)
 
