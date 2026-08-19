@@ -8,9 +8,6 @@ Stable-Baselines3의 PPO 알고리즘을 활용합니다.
 
   # 인자 직접 지정
   python train_agent.py --use_real_data --total_timesteps 200000
-
-  # 합성 데이터
-  python train_agent.py --num_samples 300
 """
 
 import os
@@ -18,6 +15,7 @@ import sys
 import signal
 import argparse
 import logging
+import shutil
 from typing import Optional
 
 import numpy as np
@@ -282,7 +280,7 @@ log = logging.getLogger(__name__)
 # 데이터 로드 헬퍼
 # ──────────────────────────────────────────────
 
-def load_synthetic_data(num_samples: int, image_size: int, seed: int = 42):
+def load_synthetic_data(*args, **kwargs):
     raise ValueError("합성 데이터 생성기(synthetic_brats.py)가 삭제되어 더 이상 합성 데이터를 사용할 수 없습니다. --use_real_data 옵션을 사용해 주세요.")
 
 
@@ -295,6 +293,8 @@ def load_real_data(
     unet_path: Optional[str] = None,
     model_type: str = "unet",
     refinement_mode: str = "small",
+    patient_ids: Optional[list] = None,
+    mixup: bool = True,
 ):
     """실제 BraTS2021 데이터를 NumPy 배열로 반환."""
     from src.data.brats2020_dataset import BraTS2020Dataset
@@ -305,7 +305,8 @@ def load_real_data(
         root_dir=train_root,
         modality=modality,
         target_size=target_size,
-        max_patients=max_patients,
+        max_patients=None if patient_ids is not None else max_patients,
+        patient_ids=patient_ids,
         simulate_rough=False,  # 실제/합성 믹스업을 위해 일단 False로 로드
         noise_seed=noise_seed,
     )
@@ -380,20 +381,21 @@ def load_real_data(
         
     log.info(f"'{refinement_mode}' (Class {target_class}) 필터링 완료: {len(imgs)}개 슬라이스 사용")
 
-    # 데이터 믹스업: 실제 예측값 50% + 합성 노이즈 50%
-    # → 실제 예측 1회 + 합성 1회 = 1:1 비율 (일반화 향상을 위해 합성 비중 증가)
-    imgs = np.concatenate([imgs, imgs], axis=0)
-    gts = np.concatenate([gts, gts], axis=0)
-    roughs = np.concatenate([actual_roughs, synthetic_roughs], axis=0)
-    probs_all = np.concatenate([actual_probs, synthetic_probs], axis=0)
-    
-    # 순열(permutation) 믹스
-    perm = rng.permutation(len(imgs))
-    imgs = imgs[perm]
-    gts = gts[perm]
-    roughs = roughs[perm]
-    probs_all = probs_all[perm]
-    log.info(f"실제 예측 50% + 합성 노이즈 50% 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
+    if mixup:
+        imgs = np.concatenate([imgs, imgs], axis=0)
+        gts = np.concatenate([gts, gts], axis=0)
+        roughs = np.concatenate([actual_roughs, synthetic_roughs], axis=0)
+        probs_all = np.concatenate([actual_probs, synthetic_probs], axis=0)
+        perm = rng.permutation(len(imgs))
+        imgs = imgs[perm]
+        gts = gts[perm]
+        roughs = roughs[perm]
+        probs_all = probs_all[perm]
+        log.info(f"실제 예측 50% + 합성 노이즈 50% 믹스업 완료 (최종 데이터 슬라이스 수: {len(imgs)})")
+    else:
+        roughs = actual_roughs
+        probs_all = actual_probs
+        log.info(f"Val은 실제 Expert 예측만 사용 (슬라이스 수: {len(imgs)})")
     
     return imgs, gts, roughs, probs_all
 
@@ -429,7 +431,6 @@ def train_agent(
     modality:            str   = "t1ce",
     image_size:          int   = 128,
     max_train_patients:  Optional[int] = None,
-    num_samples:         int   = 300,         # 합성 데이터용
     unet_path:           Optional[str] = "checkpoints/segresnet_best.pt",
     model_type:          str   = "segresnet",
     # RL 환경
@@ -465,6 +466,7 @@ def train_agent(
     milestone_ratios:    list  = None,        # 저장 비율 목록 (기본 [0.25, 0.5, 0.75])
     # 모드
     refinement_mode:     str   = "small",     # "small", "medium", "large"
+    patient_split:       Optional[str] = None,
 ) -> None:
     from stable_baselines3 import PPO
     from stable_baselines3.common.env_util import make_vec_env
@@ -479,6 +481,14 @@ def train_agent(
     os.makedirs(log_path, exist_ok=True)
 
     # ── 데이터 로드 ──────────────────────────────────────────
+    train_ids = val_ids = None
+    if use_real_data:
+        from src.data.patient_split import load_or_create_patient_split, DEFAULT_SPLIT_PATH
+        split = load_or_create_patient_split(
+            train_root, max_train_patients, patient_split or DEFAULT_SPLIT_PATH
+        )
+        train_ids, val_ids = split["train"], split["val"]
+
     if use_real_data:
         images, gt_masks, rough_masks, uncertainty_maps = load_real_data(
             train_root=train_root,
@@ -488,20 +498,35 @@ def train_agent(
             unet_path=unet_path,
             model_type=model_type,
             refinement_mode=refinement_mode,
+            patient_ids=train_ids,
+            mixup=True,
+        )
+        val_images, val_gt_masks, val_roughs, val_uncerts = load_real_data(
+            train_root=train_root,
+            modality=modality,
+            target_size=image_size,
+            max_patients=max_train_patients,
+            unet_path=unet_path,
+            model_type=model_type,
+            refinement_mode=refinement_mode,
+            patient_ids=val_ids,
+            mixup=False,
         )
     else:
-        images, gt_masks, rough_masks, uncertainty_maps = load_synthetic_data(
-            num_samples=num_samples,
-            image_size=image_size,
-        )
+        images, gt_masks, rough_masks, uncertainty_maps = load_synthetic_data()
+        val_images = val_gt_masks = val_roughs = val_uncerts = None
 
     N = len(images)
-    log.info(f"RL 환경 데이터: {N}개 슬라이스 | 이미지 크기: {image_size}x{image_size}")
+    log.info(f"RL 환경 데이터: train {N}개 슬라이스 | 이미지 크기: {image_size}x{image_size}")
 
-    # Train / Val 분할 (80 / 20)
-    split = int(N * 0.8)
-    tr_img,  tr_gt,  tr_rough, tr_uncert  = images[:split],  gt_masks[:split],  rough_masks[:split], uncertainty_maps[:split]
-    val_img, val_gt, val_rough, val_uncert = images[split:],  gt_masks[split:],  rough_masks[split:], uncertainty_maps[split:]
+    tr_img, tr_gt, tr_rough, tr_uncert = images, gt_masks, rough_masks, uncertainty_maps
+    if val_images is not None and len(val_images) > 0:
+        val_img, val_gt, val_rough, val_uncert = val_images, val_gt_masks, val_roughs, val_uncerts
+        log.info(f"RL val 데이터: {len(val_img)}개 슬라이스 (환자 hold-out)")
+    else:
+        split_n = max(1, int(N * 0.2))
+        val_img, val_gt, val_rough, val_uncert = images[-split_n:], gt_masks[-split_n:], rough_masks[-split_n:], uncertainty_maps[-split_n:]
+        tr_img, tr_gt, tr_rough, tr_uncert = images[:-split_n], gt_masks[:-split_n], rough_masks[:-split_n], uncertainty_maps[:-split_n:]
 
     # ── VecEnv 생성 ─────────────────────────────────────────
     # (더 이상 사용되지 않는 make_env_fn은 무시하고 아래의 make_monitored_env_fn을 사용합니다)
@@ -559,9 +584,11 @@ def train_agent(
 
     # ── 콜백 ────────────────────────────────────────────────
     ckpt_dir = os.path.dirname(save_path) or "checkpoints"
+    best_dir = os.path.join(ckpt_dir, f"best_{refinement_mode}")
+    os.makedirs(best_dir, exist_ok=True)
     eval_cb = EvalCallback(
         eval_env,
-        best_model_save_path=ckpt_dir,
+        best_model_save_path=best_dir,
         log_path=log_path if tb_log else None,
         eval_freq=max(1000, total_timesteps // 20),
         n_eval_episodes=10,
@@ -570,7 +597,7 @@ def train_agent(
     ckpt_cb = CheckpointCallback(
         save_freq=max(5000, total_timesteps // 10),
         save_path=ckpt_dir,
-        name_prefix="ppo_refiner",
+        name_prefix=f"ppo_{refinement_mode}",
     )
 
     progress_cb = ProgressCallback(
@@ -610,7 +637,7 @@ def train_agent(
         log.info("  [Stop #2] Plateau Stop 비활성화")
 
     # Stop #3: Milestone Snapshot
-    snap_dir = os.path.join(ckpt_dir, "snapshots")
+    snap_dir = os.path.join(ckpt_dir, "snapshots", refinement_mode)
     milestone_cb = MilestoneSnapshotCallback(
         total_timesteps=total_timesteps,
         save_dir=snap_dir,
@@ -644,11 +671,19 @@ def train_agent(
         print("\n[중단 요청] KeyboardInterrupt 감지.")
 
     interrupt_path = save_path + "_interrupted"
-    save_target = interrupt_path if interrupted else save_path
-    model.save(save_target)
-    log.info(f"모델 저장 완료: {save_target}")
     if interrupted:
+        model.save(interrupt_path)
+        log.info(f"모델 저장 완료: {interrupt_path}")
         log.info(f"  (중단 시점까지 {model.num_timesteps:,} 스텝 학습됨)")
+    else:
+        best_zip = os.path.join(best_dir, "best_model.zip")
+        dest = save_path if save_path.endswith(".zip") else save_path + ".zip"
+        if os.path.exists(best_zip):
+            shutil.copy2(best_zip, dest)
+            log.info(f"Best eval 모델 저장: {best_zip} → {dest}")
+        else:
+            model.save(save_path)
+            log.info(f"모델 저장 완료 (last weights): {save_path}")
 
 
 # ──────────────────────────────────────────────
@@ -673,8 +708,7 @@ def main():
                         default="src/data/archive")
     parser.add_argument("--modality",       type=str, default="t1ce+flair")
     parser.add_argument("--image_size",     type=int, default=128)
-    parser.add_argument("--max_train_patients", type=int, default=None)
-    parser.add_argument("--num_samples",    type=int, default=300)
+    parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수. 미지정 시 yaml 값, yaml도 없으면 210")
     parser.add_argument("--unet_path",      type=str, default="checkpoints/segresnet_best.pt",
                         help="가중치 파일 경로 (checkpoints/unet_best.pt 또는 checkpoints/segresnet_best.pt)")
     parser.add_argument("--model_type",     type=str, default="segresnet", choices=["unet", "segresnet", "unetplusplus", "unet++", "unet3plus", "unet3+", "attention_unet", "attunet", "caranet"],
@@ -718,6 +752,7 @@ def main():
     # 모드
     parser.add_argument("--refinement_mode",     type=str, default="small", choices=["small", "medium", "large"],
                         help="학습할 PPO 에이전트의 타겟 Shape Class (small, medium, large)")
+    parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
 
     args = parser.parse_args()
 
@@ -734,7 +769,6 @@ def main():
         "modality":            "modality",
         "image_size":          "image_size",
         "max_train_patients":  "max_train_patients",
-        "num_samples":         "num_samples",
         "unet_path":           "unet_path",
         "model_type":          "model_type",
         "max_steps":           "max_steps",
@@ -763,6 +797,7 @@ def main():
         "plateau_check_freq":  "plateau_check_freq",
         "milestone_ratios":    "milestone_ratios",
         "refinement_mode":     "refinement_mode",
+        "patient_split":       "patient_split",
     }
 
     # 최종 파라미터: YAML 기본값 → CLI 인자로 override

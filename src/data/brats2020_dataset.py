@@ -208,15 +208,18 @@ class BraTS2020Dataset(Dataset):
         min_tumor_ratio: float = 0.002,
         noise_seed: int = 42,
         simulate_rough: bool = True,
+        patient_ids: Optional[List[str]] = None,
     ):
         self.root_dir        = root_dir
         self.modality        = modality
         self.target_size     = target_size
         self.min_tumor_ratio = min_tumor_ratio
         self.simulate_rough  = simulate_rough
+        self.patient_ids     = set(patient_ids) if patient_ids is not None else None
         self.rng = np.random.default_rng(noise_seed)
 
         self._samples: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        self._sample_pids: List[str] = []
         self._build(max_patients)
 
     # ── 내부 빌더 ──────────────────────────────────────────
@@ -226,7 +229,9 @@ class BraTS2020Dataset(Dataset):
             print(f"[BraTS2020Dataset] 경고: '{self.root_dir}' 에서 환자 폴더를 찾을 수 없습니다.")
             return
 
-        if max_patients is not None:
+        if self.patient_ids is not None:
+            patient_dirs = [p for p in patient_dirs if p.name in self.patient_ids]
+        elif max_patients is not None:
             patient_dirs = patient_dirs[:max_patients]
 
         try:
@@ -296,6 +301,7 @@ class BraTS2020Dataset(Dataset):
                         rough_sl = gt_sl.copy()
 
                     self._samples.append((img_sl, gt_sl, rough_sl, has_et))
+                    self._sample_pids.append(pid)
 
                 total_slices += len(valid_zs)
                 if hasattr(_iter, 'set_postfix'):
