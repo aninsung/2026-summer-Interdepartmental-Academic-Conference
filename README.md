@@ -50,7 +50,7 @@
 | 단계 | 과정 | 설명 |
 |:---:|:---|:---|
 | **1** | **크기 판별 (Classification)** | 입력된 뇌종양 MRI(`t1ce+flair` 2채널 모달리티) 영상을 Shape Classifier(ResNet 기반)에 통과시켜 종양의 크기(Small, Medium, Large)를 Class 0, 1, 2로 판별합니다. |
-| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(Attention U-Net, UNet++, SegResNet)을 선택해 대략적인 영역을 표시하는 초기 분할(Rough Mask)을 수행합니다. |
+| **2** | **동적 분할 (Dynamic Routing)** | 판별된 크기 클래스에 맞춰 알맞은 Expert 백본 모델(Caranet, UNet++, SegResNet)을 선택해 대략적인 영역을 표시하는 초기 분할(Rough Mask)을 수행합니다. |
 | **3** | **맞춤형 RL 보정 (Refinement)** | 크기별 특화 PPO 에이전트(Small, Medium, Large 3종) 및 Target-Forcer 로직이 작동하여 경계선을 정밀하게 보정하고 목표 성능 수치(Small >= 0.85, Medium/Large >= 0.95)를 보장합니다. |
 | **4** | **최종 평가 (Evaluation)** | 처리된 최종 마스크를 Ground Truth와 비교하여 DSC, HD95 등을 측정하고 성능을 평가합니다. (`evaluate_pipeline.py`) |
 
@@ -236,7 +236,7 @@ python run_pipeline.py --batch_size 64
 python train_shape_classifier.py --epochs 100
 
 # Stage 2: 분할 모델 학습 (크기별 세부 모델)
-python train_attention_unet.py --mode finetune      # Small 크기 특화
+python train_caranet.py --mode finetune      # Small 크기 특화
 python train_unetplusplus.py --mode finetune        # Medium 크기 특화
 python train_segresnet.py --mode finetune           # Large 크기 특화
 
