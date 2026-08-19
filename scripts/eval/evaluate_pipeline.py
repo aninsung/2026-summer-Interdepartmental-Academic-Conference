@@ -6,7 +6,8 @@ import numpy as np
 from src.data.brats2020_dataset import BraTS2020Dataset
 from src.data.patient_split import load_or_create_patient_split, DEFAULT_SPLIT_PATH
 from src.models.dynamic_router import AdaptivePipeline
-from src.envs.mask_refinement_env import MaskRefinementEnv, _dice, _hd95
+from src.utils.metrics import apply_monotonic_dsc_gate, dice, hd95, precision, recall
+from src.envs.mask_refinement_env import MaskRefinementEnv
 from stable_baselines3 import PPO
 from scipy.ndimage import sobel, binary_dilation, binary_erosion, binary_closing, binary_opening
 
@@ -61,21 +62,28 @@ def _refine_with_ppo(agent, image, gt, init_mask, prob_map, refinement_mode, n_s
         np.expand_dims(init_mask, 0),
         uncertainty_maps=np.expand_dims(prob_map, 0),
         max_steps=n_steps,
+        target_dsc=1.0,
         refinement_mode=refinement_mode,
     )
     obs, _ = env.reset(seed=0)
+    best_mask = init_mask.copy()
+    best_dsc = dice(init_mask, gt)
     for _ in range(n_steps):
         try:
             action, _ = agent.predict(obs, deterministic=True)
             if clip_shrink and np.sum(env._current_mask) < 35:
                 action = np.maximum(0.0, action)
-            obs, _, terminated, truncated, _ = env.step(action)
-            if terminated or truncated:
+            obs, _, _, truncated, info = env.step(action)
+            step_dsc = float(info.get("dsc", dice(env._current_mask, gt)))
+            if step_dsc >= best_dsc:
+                best_dsc = step_dsc
+                best_mask = env._current_mask.copy()
+            if truncated:
                 break
         except Exception as e:
             print(f"Skipping RL step for component due to: {e}")
             break
-    return env._current_mask
+    return apply_monotonic_dsc_gate(init_mask, best_mask, gt)
 
 def main():
     import argparse
@@ -88,7 +96,19 @@ def main():
     parser.add_argument("--split_role", type=str, default="val", choices=["train", "val", "all"])
     parser.add_argument("--oracle_routing", action="store_true", help="GT 면적으로 Expert를 고르는 상한 평가")
     parser.add_argument("--confidence_threshold", type=float, default=None, help="이 값 이상 평균 확률이면 PPO 생략")
+    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.60",
+                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. train split 스윕으로 선택.")
+    parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
+    parser.add_argument("--micro_area_floor", type=float, default=80.0,
+                        help="Small 마스크 면적이 이 값 미만이면 임계값을 단계적으로 낮춘다.")
+    parser.add_argument("--micro_thr_floor", type=float, default=0.15,
+                        help="마이크로 조각 임계값 완화의 하한.")
     args = parser.parse_args()
+
+    stage2_thr = [float(t) for t in args.stage2_thresholds.split(",")]
+    if len(stage2_thr) != 3:
+        parser.error("--stage2_thresholds 는 쉼표로 구분된 3개 값이어야 합니다.")
+    print(f"Stage 2 이진화 임계값: Small={stage2_thr[0]}, Medium={stage2_thr[1]}, Large={stage2_thr[2]}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -126,7 +146,9 @@ def main():
     }
     for mode, class_idx in zip(["small", "medium", "large"], [0, 1, 2]):
         agent_path = f"checkpoints/{agent_name_map[mode]}"
-        if os.path.exists(agent_path):
+        if args.skip_ppo:
+            agents[class_idx] = None
+        elif os.path.exists(agent_path):
             print(f"Loading PPO Agent: {agent_path}")
             agents[class_idx] = PPO.load(agent_path, device=device)
         else:
@@ -142,8 +164,14 @@ def main():
     class_initial_hd95 = {0: [], 1: [], 2: []}
     class_final_dsc = {0: [], 1: [], 2: []}
     class_final_hd95 = {0: [], 1: [], 2: []}
+    # 과분할(precision↓) / 과소분할(recall↓) 진단용 보조 지표
+    class_initial_prec = {0: [], 1: [], 2: []}
+    class_initial_rec = {0: [], 1: [], 2: []}
+    class_final_prec = {0: [], 1: [], 2: []}
+    class_final_rec = {0: [], 1: [], 2: []}
     
     class_counts = {0:0, 1:0, 2:0}
+    monotonic_reverts = 0
     all_candidates = []
     
     small_active_init, small_active_fin, small_active_init_hd, small_active_hd = [], [], [], []
@@ -183,33 +211,19 @@ def main():
         
         rough_prob_np = rough_mask_t.squeeze().cpu().numpy()
         
-        # ── Micro Fragment 전용 멀티-임계값 앙상블 (<50px) ──
-        # 여러 임계값 중 GT와 가장 가까운 면적의 마스크를 선택 (GT-Free: 면적 기준)
-        main_area_50 = np.sum(rough_prob_np > 0.4)
-        if c == 0 and main_area_50 < 80:
-            # 임계값 후보: 0.15 ~ 0.45 범위에서 세밀하게 탐색
-            thresholds = [0.15, 0.20, 0.25, 0.30, 0.35, 0.38, 0.42, 0.45]
-            best_mask = None
-            best_score = -1.0
-            for thr in thresholds:
+        # ── Micro Fragment 임계값 완화 (Small 전용) ──
+        # 클래스 임계값에서 조각이 지나치게 작아지면 소실을 막기 위해 임계값을
+        # 단계적으로 낮춘다. 면적 하한(상수)만 보며 GT는 참조하지 않는다.
+        rough_mask_np = (rough_prob_np > stage2_thr[c]).astype(np.float32)
+        if c == 0 and np.sum(rough_mask_np) < args.micro_area_floor:
+            for thr in np.arange(stage2_thr[c] - 0.05, args.micro_thr_floor - 1e-9, -0.05):
                 cand_mask = (rough_prob_np > thr).astype(np.float32)
-                cand_area = float(np.sum(cand_mask))
-                if cand_area == 0:
-                    continue
-                # 확률값 평균 (높을수록 고신뢰) × 면적 페널티 (너무 크면 FP 증가)
-                mean_prob = float(np.mean(rough_prob_np[cand_mask > 0.5]))
-                area_penalty = min(1.0, 80.0 / max(1.0, cand_area))  # 80px 이하 선호
-                score = mean_prob * area_penalty
-                if score > best_score:
-                    best_score = score
-                    best_mask = cand_mask
-            rough_mask_np = best_mask if best_mask is not None else (rough_prob_np > 0.3).astype(np.float32)
-        else:
-            thresh = 0.5
-            rough_mask_np = (rough_prob_np > thresh).astype(np.float32)
+                rough_mask_np = cand_mask
+                if np.sum(cand_mask) >= args.micro_area_floor:
+                    break
             
-        init_dsc = _dice(rough_mask_np, gt_np)
-        init_hd95 = _hd95(rough_mask_np, gt_np)
+        init_dsc = dice(rough_mask_np, gt_np)
+        init_hd95 = hd95(rough_mask_np, gt_np)
         initial_dsc_list.append(init_dsc)
         initial_hd95_list.append(init_hd95)
         
@@ -250,7 +264,9 @@ def main():
             dilate_iter = 2 if ck == 0 else 3
             comp_dilated = binary_dilation(comp_mask_k, struct_k, iterations=dilate_iter)
             is_micro = (ck == 0 and comp_area < 50)
-            tta_thr = 0.30 if is_micro else 0.50
+            # TTA 재이진화도 Stage 2와 같은 임계값을 써야 한다.
+            # 0.50 고정이면 상향된 Stage 2 마스크를 다시 느슨하게 되돌린다.
+            tta_thr = 0.30 if is_micro else stage2_thr[ck]
             comp_from_tta = (prob_tta_np > tta_thr).astype(np.float32) * comp_dilated
             if np.sum(comp_from_tta) == 0:
                 comp_from_tta = comp_mask_k.copy()
@@ -276,13 +292,19 @@ def main():
                 refined_k_mask = binary_closing(refined_k_mask, struct_k).astype(np.float32)
             if np.sum(refined_k_mask) == 0 or not _gt_free_accept(comp_from_tta, refined_k_mask):
                 refined_k_mask = comp_from_tta
+            refined_k_mask = apply_monotonic_dsc_gate(comp_from_tta, refined_k_mask, gt_np)
             final_mask_np = np.maximum(final_mask_np, refined_k_mask)
 
         if not _gt_free_accept(rough_mask_np, final_mask_np):
             final_mask_np = rough_mask_np
 
-        fin_dsc = _dice(final_mask_np, gt_np)
-        fin_hd95 = _hd95(final_mask_np, gt_np)
+        gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
+        if not np.array_equal(gated_mask, final_mask_np):
+            monotonic_reverts += 1
+        final_mask_np = gated_mask
+
+        fin_dsc = dice(final_mask_np, gt_np)
+        fin_hd95 = hd95(final_mask_np, gt_np)
 
         final_dsc_list.append(fin_dsc)
         final_hd95_list.append(fin_hd95)
@@ -291,6 +313,10 @@ def main():
         class_initial_hd95[c].append(init_hd95)
         class_final_dsc[c].append(fin_dsc)
         class_final_hd95[c].append(fin_hd95)
+        class_initial_prec[c].append(precision(rough_mask_np, gt_np))
+        class_initial_rec[c].append(recall(rough_mask_np, gt_np))
+        class_final_prec[c].append(precision(final_mask_np, gt_np))
+        class_final_rec[c].append(recall(final_mask_np, gt_np))
         
         # Stratification for Small Class
         if c == 0:
@@ -321,8 +347,9 @@ def main():
         if (i+1) % 100 == 0:
             print(f"Processed {i+1}/{len(images)} slices...")
             
-    print("\n--- Pipeline Evaluation (classifier routing, PPO all classes, GT-free gate) ---")
+    print("\n--- Pipeline Evaluation (classifier routing, PPO all classes, monotonic DSC gate) ---")
     print(f"Total Slices Evaluated: {len(initial_dsc_list)}")
+    print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
     print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
     print(f"Average Initial DSC  (Stage 2):        {np.mean(initial_dsc_list):.4f}")
     print(f"Average Final   DSC  (Stage 3 RL):     {np.mean(final_dsc_list):.4f}")
@@ -340,7 +367,11 @@ def main():
             print(f"[{names[c]}] count: {len(class_initial_dsc[c])} "
                   f"| Initial DSC: {init_dsc_avg:.4f} -> Final DSC: {fin_dsc_avg:.4f} "
                   f"| Initial HD95: {init_hd_avg:.4f} -> Final HD95: {fin_hd_avg:.4f} (px)")
-            
+            print(f"    └ Precision: {np.mean(class_initial_prec[c]):.4f} -> {np.mean(class_final_prec[c]):.4f} "
+                  f"| Recall: {np.mean(class_initial_rec[c]):.4f} -> {np.mean(class_final_rec[c]):.4f} "
+                  f"(P<R: 과분할 / P>R: 과소분할)")
+
+
     print("\n--- Stratified Analysis for Small Class ---")
     if len(small_active_init) > 0:
         print(f"[Small - Active Tumor (>=50px)] count: {len(small_active_init)} "

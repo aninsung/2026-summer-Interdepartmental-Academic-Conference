@@ -4,6 +4,8 @@ import argparse
 import subprocess
 import logging
 
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
@@ -40,13 +42,21 @@ def main():
     parser.add_argument("--max_train_patients", type=int, default=210, help="Stage 1–4 공통 환자 수")
     parser.add_argument("--epochs", type=int, default=None, help="학습 에폭 수")
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair', 't1ce+t2' 등)")
+    parser.add_argument("--seed", type=int, default=42, help="전역 시드 (Stage 1–4 공통)")
+    parser.add_argument("--deterministic", action="store_true",
+                        help="cuDNN 결정적 모드 (기본 활성화, 이 플래그는 하위 호환용)")
+    parser.add_argument("--no_deterministic", action="store_true",
+                        help="결정적 모드 해제 (재현성을 포기하고 속도를 높임)")
 
     args = parser.parse_args()
+
+    # 재현성을 기본값으로 둔다. 해제는 --no_deterministic 으로만 가능하다.
+    deterministic = not args.no_deterministic
 
     python_exec = sys.executable
 
     n_patients = args.max_train_patients if args.max_train_patients is not None else 210
-    log.info("🚀 RL-Refiner 3-Stage Dynamic Routing 파이프라인 전체 실행을 시작합니다.")
+    log.info("🚀 RL-Refiner 4-Stage Dynamic Routing 파이프라인 전체 실행을 시작합니다.")
 
     from src.data.patient_split import load_or_create_patient_split
     split_path = "checkpoints/patient_split.json"
@@ -56,11 +66,16 @@ def main():
         f"(seed={split.get('seed')}, 파일={split_path})"
     )
 
+    seed_args = ["--seed", str(args.seed)]
+    if deterministic:
+        seed_args.append("--deterministic")
+    log.info(f"시드 {args.seed} / 결정적 모드 {'ON' if deterministic else 'OFF'}")
+
     extra_args = [
         "--train_root", "src/data/archive",
         "--max_train_patients", str(n_patients),
         "--patient_split", split_path,
-    ]
+    ] + seed_args
     if args.batch_size is not None:
         extra_args += ["--batch_size", str(args.batch_size)]
     if args.epochs is not None:
@@ -99,7 +114,7 @@ def main():
             "--train_root", "src/data/archive",
             "--max_train_patients", str(n_patients),
             "--patient_split", split_path,
-        ]
+        ] + seed_args
         if args.modality is not None:
             agent_base_cmd += ["--modality", str(args.modality)]
         

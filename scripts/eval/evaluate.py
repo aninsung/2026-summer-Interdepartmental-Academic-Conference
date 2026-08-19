@@ -26,7 +26,8 @@ from src.models.segresnet import build_segresnet
 from src.models.unetplusplus import build_unetplusplus
 from src.models.unet3plus import build_unet3plus
 from src.models.attention_unet import build_attention_unet
-from src.envs.mask_refinement_env import MaskRefinementEnv, _dice
+from src.envs.mask_refinement_env import MaskRefinementEnv
+from src.utils.metrics import dice as _dice, hd95
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -35,22 +36,7 @@ log = logging.getLogger(__name__)
 # ── 지표 함수 ──────────────────────────────────────────────────────────────────
 
 def hausdorff_95(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
-    """HD95 계산 (두 경계 집합 간 95번째 백분위 거리)."""
-    from scipy.ndimage import distance_transform_edt
-
-    a = mask_a.astype(bool)
-    b = mask_b.astype(bool)
-
-    if not a.any() or not b.any():
-        return float("inf")
-
-    dist_a = distance_transform_edt(~a)
-    dist_b = distance_transform_edt(~b)
-
-    d_ab = dist_b[a]
-    d_ba = dist_a[b]
-
-    return float(np.percentile(np.concatenate([d_ab, d_ba]), 95))
+    return hd95(mask_a, mask_b)
 
 
 # ── 전통 방법 벤치마크 ─────────────────────────────────────────────────────────
@@ -274,11 +260,8 @@ def evaluate(
             morpho_dsc = _dice(morpho, gt)
             rl_mask = rl_refine(agent, img, rough, gt, uncert, max_steps=max_steps, model_type=model_type)
             rl_dsc  = _dice(rl_mask, gt)
-            # rough 와 morpho 중 더 나은 것을 baseline으로 fallback
-            best_baseline_dsc  = max(rough_dsc, morpho_dsc)
-            best_baseline_mask = morpho if morpho_dsc >= rough_dsc else rough
-            if rl_dsc < best_baseline_dsc:
-                rl_mask = best_baseline_mask.copy()
+            if rl_dsc < rough_dsc:
+                rl_mask = rough.copy()
         else:
             rl_mask = rough  # 에이전트 없으면 rough 그대로
 

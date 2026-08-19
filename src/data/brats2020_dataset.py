@@ -353,7 +353,7 @@ class BraTS2020Dataset(Dataset):
     def get_numpy_arrays(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         RL 환경 초기화용 NumPy 배열 반환.
-        Returns: images (N,H,W), gt_masks (N,H,W), rough_masks (N,H,W)
+        Returns: images (N,C,H,W) or (N,H,W), gt_masks (N,H,W), rough_masks (N,H,W)
         """
         imgs   = np.stack([s[0] for s in self._samples], axis=0)
         gts    = np.stack([s[1] for s in self._samples], axis=0)

@@ -132,19 +132,13 @@ class AdaptivePipeline(nn.Module):
         B, C, H, W = x.shape
         rough_masks = torch.zeros((B, 1, H, W), device=x.device, dtype=x.dtype)
         
-        # 3. 클래스별로 라우팅 (배치 내 개별 처리)
-        for i in range(B):
-            c = class_preds[i].item()
-            img_slice = x[i:i+1] # (1, C, H, W)
-            
-            if c == 0:
-                out = torch.sigmoid(self._forward_expert(self.expert_small, img_slice))
-                rough_masks[i:i+1] = out
-            elif c == 1:
-                out = torch.sigmoid(self._forward_expert(self.expert_medium, img_slice))
-                rough_masks[i:i+1] = out
-            else:
-                out = torch.sigmoid(self._forward_expert(self.expert_large, img_slice))
-                rough_masks[i:i+1] = out
+        # 3. 클래스별 배치 라우팅
+        experts = [self.expert_small, self.expert_medium, self.expert_large]
+        for c, expert in enumerate(experts):
+            idx = (class_preds == c).nonzero(as_tuple=True)[0]
+            if idx.numel() == 0:
+                continue
+            out = torch.sigmoid(self._forward_expert(expert, x[idx]))
+            rough_masks[idx] = out
                 
         return rough_masks, class_preds
