@@ -57,6 +57,7 @@ def train_segresnet(
     augment: bool = True,
     refinement_mode: str = None, # Added for True Expert filtering
     pretrained_path: str = "",   # Added for Fine-tuning
+    patient_split: str = None,
 ) -> None:
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -73,59 +74,17 @@ def train_segresnet(
 
     # ── 데이터 ──────────────────────────────────────────────
     if use_real_data:
-        log.info("실제 BraTS2021 데이터 사용")
-        from src.data.brats2020_dataset import BraTS2020Dataset
-        import numpy as np
-
-        full_ds = BraTS2020Dataset(
-            root_dir=train_root,
+        log.info("실제 BraTS2021 데이터 사용 (환자 단위 train/val 분할)")
+        from src.data.patient_split import load_split_brats_datasets
+        train_ds, val_ds = load_split_brats_datasets(
+            train_root=train_root,
             modality=modality,
             target_size=target_size,
             max_patients=max_train_patients,
+            patient_split=patient_split,
+            refinement_mode=refinement_mode,
             simulate_rough=True,
         )
-        
-        # 크기별 맞춤형 전문가 학습을 위한 데이터셋 필터링 (True Expert 적용)
-        if refinement_mode:
-            ref_m = refinement_mode.lower()
-            filtered = []
-            for sample in full_ds._samples:
-                # sample = (img_sl, gt_sl, rough_sl, has_et)
-                gt = sample[1]
-                area = np.sum(gt)
-                if ref_m == "small" and area < 300:
-                    filtered.append(sample)
-                elif ref_m == "medium" and 300 <= area < 700:
-                    filtered.append(sample)
-                elif ref_m == "large" and area >= 700:
-                    filtered.append(sample)
-            
-            old_len = len(full_ds._samples)
-            full_ds._samples = filtered
-            log.info(f"[{refinement_mode.upper()} Expert] 필터링 완료: {len(full_ds._samples)}개 슬라이스 사용 (기존 {old_len} 중)")
-        # BraTS2021은 별도 val 폴더가 없음 → train 데이터 80/20 분할
-        if val_root and val_root != train_root and val_root != "":
-            try:
-                val_ds = BraTS2020Dataset(
-                    root_dir=val_root,
-                    modality=modality,
-                    target_size=target_size,
-                    max_patients=max_val_patients,
-                    simulate_rough=True,
-                )
-                if len(val_ds) == 0:
-                    raise ValueError("Validation 데이터가 비어 있습니다.")
-                train_ds = full_ds
-            except Exception as e:
-                log.warning(f"Validation 데이터 로드 실패 ({e}). Train 20%를 Val로 분할합니다.")
-                n_val = max(1, int(len(full_ds) * 0.2))
-                n_train = len(full_ds) - n_val
-                train_ds, val_ds = random_split(full_ds, [n_train, n_val])
-        else:
-            log.info("BraTS2021: 별도 val 폴더 없음 → Train 80% / Val 20% 자동 분할")
-            n_val = max(1, int(len(full_ds) * 0.2))
-            n_train = len(full_ds) - n_val
-            train_ds, val_ds = random_split(full_ds, [n_train, n_val])
     else:
         raise ValueError(
             "합성 데이터 생성기가 삭제되어 더 이상 합성 데이터를 사용할 수 없습니다. "
@@ -338,6 +297,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--refinement_mode", type=str, default=None, help="True Expert 학습을 위한 타겟 크기 클래스"
     )
+    parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
     parser.add_argument(
         "--pretrained_path", type=str, default="", help="파인튜닝할 사전 학습 가중치 경로"
     )

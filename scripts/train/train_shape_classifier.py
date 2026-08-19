@@ -18,35 +18,34 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64, help="배치 크기")
     parser.add_argument("--epochs", type=int, default=15, help="에폭 수")
     parser.add_argument("--modality", type=str, default="t1ce", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
+    parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     
-    # 1. 원본 데이터셋 로드
     print(f"Loading BraTS Dataset from {args.train_root} (Modality: {args.modality})...")
-    brats_dataset = BraTS2020Dataset(
-        root_dir=args.train_root,
+    from src.data.patient_split import load_split_brats_datasets
+    train_brats, val_brats = load_split_brats_datasets(
+        train_root=args.train_root,
         modality=args.modality,
         target_size=128,
-        max_patients=args.max_train_patients, 
-        simulate_rough=False # GT 기반으로 넓이를 재므로 상관없음
+        max_patients=args.max_train_patients,
+        patient_split=args.patient_split,
+        refinement_mode=None,
+        simulate_rough=False,
     )
-    
-    # 2. ShapeDataset 래핑
-    shape_dataset = ShapeDataset(brats_dataset)
-    total_size = len(shape_dataset)
-    print(f"Total valid slices: {total_size}")
-    
-    train_size = int(0.8 * total_size)
-    val_size = total_size - train_size
-    train_set, val_set = random_split(shape_dataset, [train_size, val_size])
+    train_set = ShapeDataset(train_brats)
+    val_set = ShapeDataset(val_brats)
+    train_size = len(train_set)
+    val_size = len(val_set)
+    print(f"Total valid slices: {train_size + val_size} (train={train_size}, val={val_size})")
     
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
     
     # 3. 모델 초기화
-    sample_img, _ = shape_dataset[0]
+    sample_img, _ = train_set[0]
     in_channels = sample_img.shape[0] if sample_img.ndim == 3 else 1
     print(f"Building Shape Classifier (Input Channels: {in_channels})...")
     model = build_shape_classifier(in_channels=in_channels, num_classes=3).to(device)

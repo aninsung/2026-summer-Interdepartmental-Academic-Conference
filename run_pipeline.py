@@ -37,7 +37,7 @@ def main():
     # 공통 설정
     parser.add_argument("--config", type=str, default="configs/ppo_brats.yaml", help="Agent 학습용 YAML 설정 파일 경로")
     parser.add_argument("--batch_size", type=int, default=None, help="배치 크기 (기본값: 각 스크립트 기본값 사용)")
-    parser.add_argument("--max_train_patients", type=int, default=210, help="학습 환자 수 제한")
+    parser.add_argument("--max_train_patients", type=int, default=210, help="Stage 1–4 공통 환자 수")
     parser.add_argument("--epochs", type=int, default=None, help="학습 에폭 수")
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair', 't1ce+t2' 등)")
 
@@ -45,13 +45,24 @@ def main():
 
     python_exec = sys.executable
 
+    n_patients = args.max_train_patients if args.max_train_patients is not None else 210
     log.info("🚀 RL-Refiner 3-Stage Dynamic Routing 파이프라인 전체 실행을 시작합니다.")
 
-    extra_args = ["--train_root", "src/data/archive"]
+    from src.data.patient_split import load_or_create_patient_split
+    split_path = "checkpoints/patient_split.json"
+    split = load_or_create_patient_split("src/data/archive", n_patients, split_path)
+    log.info(
+        f"환자 풀 {n_patients}명 → train {len(split['train'])} / val {len(split['val'])} "
+        f"(seed={split.get('seed')}, 파일={split_path})"
+    )
+
+    extra_args = [
+        "--train_root", "src/data/archive",
+        "--max_train_patients", str(n_patients),
+        "--patient_split", split_path,
+    ]
     if args.batch_size is not None:
         extra_args += ["--batch_size", str(args.batch_size)]
-    if args.max_train_patients is not None:
-        extra_args += ["--max_train_patients", str(args.max_train_patients)]
     if args.epochs is not None:
         extra_args += ["--epochs", str(args.epochs)]
     if args.modality is not None:
@@ -82,7 +93,13 @@ def main():
 
     # 3. Stage 3: 맞춤형 PPO 에이전트 3종 학습
     if not args.skip_agents:
-        agent_base_cmd = [python_exec, "scripts/train/train_agent.py", "--config", args.config, "--train_root", "src/data/archive"]
+        agent_base_cmd = [
+            python_exec, "scripts/train/train_agent.py",
+            "--config", args.config,
+            "--train_root", "src/data/archive",
+            "--max_train_patients", str(n_patients),
+            "--patient_split", split_path,
+        ]
         if args.modality is not None:
             agent_base_cmd += ["--modality", str(args.modality)]
         
@@ -102,7 +119,12 @@ def main():
 
     # 4. Stage 4: 전체 동적 라우팅 파이프라인 성능 평가 (`scripts/eval/evaluate_pipeline.py`)
     if not args.skip_eval:
-        cmd_eval = [python_exec, "scripts/eval/evaluate_pipeline.py"]
+        cmd_eval = [
+            python_exec, "scripts/eval/evaluate_pipeline.py",
+            "--max_patients", str(n_patients),
+            "--patient_split", split_path,
+            "--split_role", "val",
+        ]
         if args.modality is not None:
             cmd_eval += ["--modality", str(args.modality)]
         run_command(cmd_eval, "Stage 4: 3-Stage Adaptive Pipeline 최종 성능 검증")

@@ -18,13 +18,8 @@ modality: "t1ce+flair"
 # 2D 슬라이스 해상도
 image_size: 128
 
-# 환자 수 제한 (null이면 전체 사용, 빠른 테스트 시 숫자로 제한)
-# BraTS2021 전체: 약 1251명 → null 이면 전체 사용
-# 테스트 시: 20~50 으로 설정
-max_train_patients: 300   # 100 → 300: 더 많은 환자 데이터로 다양한 종양 패턴 학습
-
-# 합성 데이터 설정 (use_real_data: false 시 사용, 현재 미사용)
-num_samples: 300
+# 환자 수 제한 (Stage 1–4 공통, run_pipeline.py 기본값과 동일)
+max_train_patients: 210
 
 # ──────────────────────────────────────────────
 # RL 환경 설정

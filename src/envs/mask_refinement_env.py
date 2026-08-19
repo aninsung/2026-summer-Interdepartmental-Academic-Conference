@@ -5,8 +5,9 @@ State  : [image, current_mask, soft_probability, (optional edge)]
          - Medium/Large: (3, H, W) [Image, Current Mask, Soft Prob Map]
          - Small (Zoom-in): (4, 64, 64) [Zoomed Image, Mask, Prob, Edge Map]
 Action : 8방위 섹터별 마스크 수축/팽창 조절
-         - Medium/Large: MultiDiscrete([5]*8) (0=강수축 2px, 1=약수축 1px, 2=유지, 3=약팽창 1px, 4=강팽창 2px)
-         - Small: Box(-2.0, 2.0, shape=(8,)) 연속적 픽셀 조절
+         - Medium/Large: MultiDiscrete([5]*8)
+           0=강수축(-1.0px), 1=약수축(-0.4px), 2=유지, 3=약팽창(+0.4px), 4=강팽창(+1.0px)
+         - Small: Box(-2.0, 2.0, shape=(8,)) 연속 픽셀 조절
 Reward : Boundary-DSC 기반 보상 강화 + HD95(px 단위) 패널티 + 위상 최적화
 Episode: 최대 max_steps 스텝, DSC >= target_dsc 이면 조기 종료
 """
@@ -347,7 +348,7 @@ class MaskRefinementEnv(gym.Env):
             drop_penalty = 0.0
 
         if self.refinement_mode == "large":
-            reward = (dsc_weight * 20.0 + boundary_weight * 10.0 + hd95_weight * 0.5) * size_scale + target_bonus
+            reward = (dsc_weight * 20.0 + boundary_weight * 10.0 + hd95_weight * 0.5) * 30.0 * size_scale + target_bonus
         elif self.refinement_mode == "medium":
             reward = (dsc_weight * 20.0 + boundary_weight * 10.0 + hd95_weight * 0.1) * 30.0 * size_scale + target_bonus
         else:
