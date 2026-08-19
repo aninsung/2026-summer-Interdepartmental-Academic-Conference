@@ -18,25 +18,26 @@ import gymnasium as gym
 from gymnasium import spaces
 from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_edt, gaussian_filter, sobel, label
 
+from src.utils.metrics import dice as _dice, hd95 as _hd95, apply_monotonic_dsc_gate
 
-def _dice(a: np.ndarray, b: np.ndarray, smooth: float = 1e-5) -> float:
-    a, b = a.ravel().astype(float), b.ravel().astype(float)
-    return float((2.0 * (a * b).sum() + smooth) / (a.sum() + b.sum() + smooth))
+__all__ = ["MaskRefinementEnv", "_dice", "_hd95", "apply_monotonic_dsc_gate"]
 
 
-def _hd95(mask_a: np.ndarray, mask_b: np.ndarray, dist_b: Optional[np.ndarray] = None) -> float:
-    """HD95 계산 (두 경계 집합 간 95번째 백분위 거리). 빠른 근사 버전."""
-    a = mask_a.astype(bool)
-    b = mask_b.astype(bool)
-    if not np.any(a) or not np.any(b):
-        return min(30.0, float(mask_a.shape[0]))
+def _obs_image_slice(img: np.ndarray) -> np.ndarray:
+    """다채널 MRI는 t1ce(첫 채널)만 관측에 사용."""
+    if img.ndim == 3:
+        return img[0].astype(np.float32)
+    return img.astype(np.float32)
 
-    dist_a = distance_transform_edt(~a)
-    if dist_b is None:
-        dist_b = distance_transform_edt(~b)
-    d_ab = dist_b[a]
-    d_ba = dist_a[b]
-    return float(np.percentile(np.concatenate([d_ab, d_ba]), 95))
+
+def _edge_map_from_image(img_2d: np.ndarray) -> np.ndarray:
+    edge_x = sobel(img_2d, axis=0)
+    edge_y = sobel(img_2d, axis=1)
+    edge = np.sqrt(edge_x**2 + edge_y**2)
+    e_min, e_max = edge.min(), edge.max()
+    if e_max > e_min:
+        edge = (edge - e_min) / (e_max - e_min)
+    return edge.astype(np.float32)
 
 
 def _boundary_pixels(mask: np.ndarray) -> np.ndarray:
@@ -45,30 +46,6 @@ def _boundary_pixels(mask: np.ndarray) -> np.ndarray:
     eroded = binary_erosion(mask, np.ones((3, 3)))
     boundary = dilated.astype(bool) ^ eroded.astype(bool)
     return np.stack(np.where(boundary), axis=0)  # (2, N)
-
-
-def _apply_action(mask: np.ndarray, action: int) -> np.ndarray:
-    """
-    5-class 액션 적용.
-      0 = 강하게 수축 (erode 2px)
-      1 = 약하게 수축 (erode 1px)
-      2 = 유지
-      3 = 약하게 팽창 (dilate 1px)
-      4 = 강하게 팽창 (dilate 2px)
-    """
-    struct = np.ones((3, 3), dtype=bool)
-    m = mask.astype(bool)
-    if action == 0:
-        m = binary_erosion(m, structure=struct, iterations=2)
-    elif action == 1:
-        m = binary_erosion(m, structure=struct, iterations=1)
-    elif action == 2:
-        pass  # 유지
-    elif action == 3:
-        m = binary_dilation(m, structure=struct, iterations=1)
-    elif action == 4:
-        m = binary_dilation(m, structure=struct, iterations=2)
-    return m.astype(np.float32)
 
 
 class MaskRefinementEnv(gym.Env):
@@ -129,16 +106,7 @@ class MaskRefinementEnv(gym.Env):
         # 이미지 그래디언트 맵 (Sobel Edge Map) 미리 계산
         self.edge_maps = np.zeros((N, H, W), dtype=np.float32)
         for i in range(N):
-            img = images[i]
-            if img.ndim == 3:
-                img = np.mean(img, axis=0)
-            edge_x = sobel(img, axis=0)
-            edge_y = sobel(img, axis=1)
-            edge = np.sqrt(edge_x**2 + edge_y**2)
-            e_min, e_max = edge.min(), edge.max()
-            if e_max > e_min:
-                edge = (edge - e_min) / (e_max - e_min)
-            self.edge_maps[i] = edge
+            self.edge_maps[i] = _edge_map_from_image(_obs_image_slice(images[i]))
 
         # 관측 공간 정의 (small은 4채널 64x64 Zoom-in, 그 외는 기존 체크포인트와 호환되는 3채널 128x128)
         if self.refinement_mode == "small":
@@ -211,7 +179,7 @@ class MaskRefinementEnv(gym.Env):
             self._idx = self.np_random.integers(0, len(self.images))
 
         img = self.images[self._idx]
-        self._current_image = np.mean(img, axis=0).astype(np.float32) if img.ndim == 3 else img.copy()
+        self._current_image = _obs_image_slice(img)
         self._current_mask = self.rough_masks[self._idx].copy()
         self._current_prob = self.probability_maps[self._idx].copy()
         self._current_edge = self.edge_maps[self._idx].copy()

@@ -17,7 +17,7 @@ import logging
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 # 프로젝트 루트를 경로에 추가
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -53,7 +53,7 @@ def train_attention_unet(
     use_real_data: bool = True,
     train_root: str = "src/data/archive",
     val_root: str = "",  # BraTS2021은 별도 val 폴더 없음 → train 80/20 분할
-    modality: str = "t1ce",
+    modality: str = "t1ce+flair",
     target_size: int = 128,
     max_train_patients: int = None,
     max_val_patients: int = None,
@@ -71,8 +71,10 @@ def train_attention_unet(
     tversky_beta: float = 0.7,
 ) -> None:
     if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+        from src.utils.device import get_torch_device
+        device = get_torch_device()
+    else:
+        device = torch.device(device)
     log.info(f"Device: {device}")
 
     # Fine-tuning 설정 조율
@@ -85,57 +87,16 @@ def train_attention_unet(
 
     # ── 데이터 ──────────────────────────────────────────────
     if use_real_data:
-        log.info("실제 BraTS2021 데이터 사용")
-        from src.data.brats2020_dataset import BraTS2020Dataset
-        import numpy as np
-        full_ds = BraTS2020Dataset(
-            root_dir=train_root,
+        log.info("실제 BraTS2021 데이터 사용 (환자 단위 train/val 분할)")
+        from src.data.patient_split import load_split_brats_datasets
+        train_ds, val_ds = load_split_brats_datasets(
+            train_root=train_root,
             modality=modality,
             target_size=target_size,
             max_patients=max_train_patients,
-            simulate_rough=True,
+            refinement_mode=refinement_mode,
+            simulate_rough=False,
         )
-        
-        # 크기별 맞춤형 전문가 학습을 위한 데이터셋 필터링 (True Expert 적용)
-        if refinement_mode:
-            ref_m = refinement_mode.lower()
-            filtered = []
-            for sample in full_ds._samples:
-                # sample = (img_sl, gt_sl, rough_sl, has_et)
-                gt = sample[1]
-                area = np.sum(gt)
-                if ref_m == "small" and 0 < area < 300:
-                    filtered.append(sample)
-                elif ref_m == "medium" and 300 <= area < 700:
-                    filtered.append(sample)
-                elif ref_m == "large" and area >= 700:
-                    filtered.append(sample)
-            
-            old_len = len(full_ds._samples)
-            full_ds._samples = filtered
-            log.info(f"[{refinement_mode.upper()} Expert] 필터링 완료: {len(full_ds._samples)}개 슬라이스 사용 (기존 {old_len} 중)")
-        if val_root and val_root != train_root and val_root != "":
-            try:
-                val_ds = BraTS2020Dataset(
-                    root_dir=val_root,
-                    modality=modality,
-                    target_size=target_size,
-                    max_patients=max_val_patients,
-                    simulate_rough=True,
-                )
-                if len(val_ds) == 0:
-                    raise ValueError("Validation 데이터가 비어 있습니다.")
-                train_ds = full_ds
-            except Exception as e:
-                log.warning(f"Validation 데이터 로드 실패 ({e}). Train 20%를 Val로 분할합니다.")
-                n_val = max(1, int(len(full_ds) * 0.2))
-                n_train = len(full_ds) - n_val
-                train_ds, val_ds = random_split(full_ds, [n_train, n_val])
-        else:
-            log.info("BraTS2021: 별도 val 폴더 없음 → Train 80% / Val 20% 자동 분할")
-            n_val = max(1, int(len(full_ds) * 0.2))
-            n_train = len(full_ds) - n_val
-            train_ds, val_ds = random_split(full_ds, [n_train, n_val])
     else:
         raise ValueError(
             "합성 데이터 생성기가 삭제되어 더 이상 합성 데이터를 사용할 수 없습니다. "
@@ -306,7 +267,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_real_data", action="store_true", default=True, help="실제 데이터 사용")
     parser.add_argument("--train_root", type=str, default="src/data/archive")
     parser.add_argument("--val_root", type=str, default="", help="비워두면 train 80/20 분할")
-    parser.add_argument("--modality", type=str, default="t1ce", )
+    parser.add_argument("--modality", type=str, default="t1ce+flair", )
     parser.add_argument("--target_size", type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한")
     parser.add_argument("--max_val_patients", type=int, default=None, help="검증 환자 수 제한")

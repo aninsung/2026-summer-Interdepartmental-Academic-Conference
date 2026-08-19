@@ -21,6 +21,35 @@ def list_patient_ids(root_dir: str) -> List[str]:
     return [p.name for p in _find_patient_dirs(root_dir)]
 
 
+def _select_patient_pool(
+    root_dir: str,
+    max_patients: Optional[int],
+    seed: int,
+) -> List[str]:
+    """전체 환자 ID 중 seed 기반 무작위 샘플(max_patients명)을 선택."""
+    ids = list_patient_ids(root_dir)
+    if max_patients is not None and len(ids) > int(max_patients):
+        rng = np.random.default_rng(seed)
+        pick = rng.choice(len(ids), size=int(max_patients), replace=False)
+        ids = sorted(ids[i] for i in pick)
+    return ids
+
+
+def _split_cache_valid(
+    split: Dict,
+    root_dir: str,
+    max_patients: Optional[int],
+    val_ratio: float,
+    seed: int,
+) -> bool:
+    return (
+        split.get("root_dir") == root_dir
+        and split.get("max_patients") == max_patients
+        and split.get("val_ratio") == val_ratio
+        and split.get("seed") == seed
+    )
+
+
 def load_or_create_patient_split(
     root_dir: str,
     max_patients: Optional[int] = 210,
@@ -32,17 +61,20 @@ def load_or_create_patient_split(
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
             split = json.load(f)
-        log.info(
-            "환자 분할 로드: %s (train=%d, val=%d)",
+        if _split_cache_valid(split, root_dir, max_patients, val_ratio, seed):
+            log.info(
+                "환자 분할 로드: %s (train=%d, val=%d)",
+                path,
+                len(split.get("train", [])),
+                len(split.get("val", [])),
+            )
+            return split
+        log.warning(
+            "환자 분할 설정 변경 감지 (max_patients/root/seed/val_ratio) → %s 재생성",
             path,
-            len(split.get("train", [])),
-            len(split.get("val", [])),
         )
-        return split
 
-    ids = list_patient_ids(root_dir)
-    if max_patients is not None:
-        ids = ids[: int(max_patients)]
+    ids = _select_patient_pool(root_dir, max_patients, seed)
     if not ids:
         raise ValueError(f"환자 폴더를 찾을 수 없습니다: {root_dir}")
 
@@ -131,6 +163,12 @@ def prepare_train_val_datasets(
     split_path = patient_split or DEFAULT_SPLIT_PATH
     split = load_or_create_patient_split(train_root, max_patients, split_path)
     train_ds, val_ds = split_dataset_by_patients(full_ds, split["train"], split["val"])
+    if len(train_ds) == 0 or len(val_ds) == 0:
+        raise ValueError(
+            f"분할 결과가 비었습니다 (train={len(train_ds)}, val={len(val_ds)}). "
+            f"데이터셋에 실린 환자와 {split_path} 의 환자 목록이 어긋났을 가능성이 큽니다. "
+            "BraTS2020Dataset 을 patient_ids= 로 로드하거나 split 파일을 삭제해 재생성하세요."
+        )
     if refinement_mode:
         filter_dataset_by_size(train_ds, refinement_mode)
         filter_dataset_by_size(val_ds, refinement_mode)
@@ -153,13 +191,21 @@ def load_split_brats_datasets(
     refinement_mode: Optional[str] = None,
     simulate_rough: bool = True,
 ) -> Tuple[BraTS2020Dataset, BraTS2020Dataset]:
+    # 분할을 먼저 확정하고 그 환자만 로드한다.
+    # max_patients 를 데이터셋에 그대로 넘기면 "정렬 순 앞 N명"이 실리는데,
+    # 분할은 전체에서 무작위 N명을 뽑으므로 둘이 어긋나 슬라이스가 0이 된다.
+    split_path = patient_split or DEFAULT_SPLIT_PATH
+    split = load_or_create_patient_split(train_root, max_patients, split_path)
+    pool = list(split["train"]) + list(split["val"])
+
     full_ds = BraTS2020Dataset(
         root_dir=train_root,
         modality=modality,
         target_size=target_size,
-        max_patients=max_patients,
+        max_patients=None,
+        patient_ids=pool,
         simulate_rough=simulate_rough,
     )
     return prepare_train_val_datasets(
-        full_ds, train_root, max_patients, patient_split, refinement_mode
+        full_ds, train_root, max_patients, split_path, refinement_mode
     )

@@ -19,6 +19,7 @@ import shutil
 from typing import Optional
 
 import numpy as np
+import torch
 import yaml
 from stable_baselines3.common.callbacks import BaseCallback
 from collections import deque
@@ -327,6 +328,21 @@ def load_real_data(
         synthetic_probs[i] = gaussian_filter(synthetic_roughs[i].astype(float), sigma=2.0)
 
     # 2. 실제 모델 예측 마스크 및 Sigmoid 확률 맵 생성 (AdaptivePipeline 사용)
+    from src.utils.metrics import gt_size_class
+
+    _REQUIRED_CKPTS = [
+        "checkpoints/shape_classifier_best.pt",
+        "checkpoints/caranet_best.pt",
+        "checkpoints/unetplusplus_best.pt",
+        "checkpoints/segresnet_best.pt",
+    ]
+    missing = [p for p in _REQUIRED_CKPTS if not os.path.exists(p)]
+    if missing:
+        log.warning(
+            "Stage 2/1 체크포인트 없음 (%s). AdaptivePipeline rough mask 품질이 낮을 수 있습니다.",
+            ", ".join(missing),
+        )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     from src.models.dynamic_router import AdaptivePipeline
     log.info(f"AdaptivePipeline 3-Stage 라우터 로드 중... (Device: {device})")
@@ -365,9 +381,10 @@ def load_real_data(
     class_preds_all = np.array(class_preds_all)
     log.info(f"AdaptivePipeline 초안 마스크 생성 완료 (개수: {len(actual_roughs)})")
 
-    # 3. Shape Class (refinement_mode) 에 따른 필터링
+    # 3. GT 면적 기준 크기 클래스 필터 (Expert 학습과 동일)
     target_class = {"small": 0, "medium": 1, "large": 2}[refinement_mode.lower()]
-    mask_indices = (class_preds_all == target_class)
+    gt_classes = np.array([gt_size_class(gt) for gt in gts])
+    mask_indices = gt_classes == target_class
     
     imgs = imgs[mask_indices]
     gts = gts[mask_indices]
@@ -379,7 +396,7 @@ def load_real_data(
     if len(imgs) == 0:
         raise ValueError(f"해당 클래스({refinement_mode})로 분류된 데이터가 하나도 없습니다!")
         
-    log.info(f"'{refinement_mode}' (Class {target_class}) 필터링 완료: {len(imgs)}개 슬라이스 사용")
+    log.info(f"'{refinement_mode}' (GT Class {target_class}) 필터링 완료: {len(imgs)}개 슬라이스 사용")
 
     if mixup:
         imgs = np.concatenate([imgs, imgs], axis=0)
@@ -401,26 +418,6 @@ def load_real_data(
 
 
 # ──────────────────────────────────────────────
-# VecEnv 빌더
-# ──────────────────────────────────────────────
-
-def make_env_fn(images, gt_masks, rough_masks, uncertainty_maps, max_steps, target_dsc, step_penalty=0.01, model_type="unet"):
-    """MaskRefinementEnv 팩토리 함수 반환."""
-    def _init():
-        return MaskRefinementEnv(
-            images=images,
-            gt_masks=gt_masks,
-            rough_masks=rough_masks,
-            uncertainty_maps=uncertainty_maps,
-            max_steps=max_steps,
-            target_dsc=target_dsc,
-            step_penalty=0.01,
-            model_type="adaptive_pipeline",
-        )
-    return _init
-
-
-# ──────────────────────────────────────────────
 # 메인 학습 함수
 # ──────────────────────────────────────────────
 
@@ -428,7 +425,7 @@ def train_agent(
     # 데이터
     use_real_data:       bool  = True,
     train_root:          str   = "src/data/archive",
-    modality:            str   = "t1ce",
+    modality:            str   = "t1ce+flair",
     image_size:          int   = 128,
     max_train_patients:  Optional[int] = None,
     unet_path:           Optional[str] = "checkpoints/segresnet_best.pt",
@@ -467,12 +464,18 @@ def train_agent(
     # 모드
     refinement_mode:     str   = "small",     # "small", "medium", "large"
     patient_split:       Optional[str] = None,
+    # 재현성
+    seed:                int   = 42,
+    deterministic:       bool  = False,
 ) -> None:
     from stable_baselines3 import PPO
     from stable_baselines3.common.env_util import make_vec_env
     from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
     from stable_baselines3.common.vec_env import DummyVecEnv
     from stable_baselines3.common.monitor import Monitor
+
+    from src.utils.seed import set_seed
+    set_seed(seed, deterministic)
 
     if net_arch is None:
         net_arch = [256, 256]
@@ -500,6 +503,7 @@ def train_agent(
             refinement_mode=refinement_mode,
             patient_ids=train_ids,
             mixup=True,
+            noise_seed=seed,
         )
         val_images, val_gt_masks, val_roughs, val_uncerts = load_real_data(
             train_root=train_root,
@@ -511,6 +515,7 @@ def train_agent(
             refinement_mode=refinement_mode,
             patient_ids=val_ids,
             mixup=False,
+            noise_seed=seed,
         )
     else:
         images, gt_masks, rough_masks, uncertainty_maps = load_synthetic_data()
@@ -529,8 +534,6 @@ def train_agent(
         tr_img, tr_gt, tr_rough, tr_uncert = images[:-split_n], gt_masks[:-split_n], rough_masks[:-split_n], uncertainty_maps[:-split_n:]
 
     # ── VecEnv 생성 ─────────────────────────────────────────
-    # (더 이상 사용되지 않는 make_env_fn은 무시하고 아래의 make_monitored_env_fn을 사용합니다)
-
     # Monitor wrapper 적용 팩토리
     def make_monitored_env_fn(images, gt_masks, rough_masks, uncertainty_maps, max_steps, target_dsc, step_penalty, model_type, refinement_mode):
         def _init():
@@ -561,6 +564,7 @@ def train_agent(
         tb_log = None
         log.warning("TensorBoard 미설치 — 로그 비활성화 (pip install tensorboard 로 활성화 가능)")
 
+    ppo_device = "cuda" if torch.cuda.is_available() else "cpu"
     model = PPO(
         policy="CnnPolicy",      # GPU CNN으로 이미지 (2,H,W) 처리
         env=train_env,
@@ -573,7 +577,8 @@ def train_agent(
         ent_coef=ent_coef,
         learning_rate=learning_rate,
         verbose=0,
-        device="cuda",           # GPU 명시
+        device=ppo_device,
+        seed=seed,
         tensorboard_log=tb_log,
         policy_kwargs=dict(
             net_arch=net_arch,
@@ -703,7 +708,7 @@ def main():
                         help="YAML 설정 파일 경로 (configs/ppo_brats.yaml)")
 
     # 데이터
-    parser.add_argument("--use_real_data",  action="store_true", default=True)
+    parser.add_argument("--use_real_data", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--train_root",     type=str,
                         default="src/data/archive")
     parser.add_argument("--modality",       type=str, default="t1ce+flair")
@@ -753,6 +758,8 @@ def main():
     parser.add_argument("--refinement_mode",     type=str, default="small", choices=["small", "medium", "large"],
                         help="학습할 PPO 에이전트의 타겟 Shape Class (small, medium, large)")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
+    parser.add_argument("--seed", type=int, default=42, help="전역 시드 (PPO 포함)")
+    parser.add_argument("--deterministic", action="store_true", help="cuDNN 결정적 모드 (느려짐)")
 
     args = parser.parse_args()
 
@@ -798,6 +805,8 @@ def main():
         "milestone_ratios":    "milestone_ratios",
         "refinement_mode":     "refinement_mode",
         "patient_split":       "patient_split",
+        "seed":                "seed",
+        "deterministic":       "deterministic",
     }
 
     # 최종 파라미터: YAML 기본값 → CLI 인자로 override
@@ -807,10 +816,9 @@ def main():
 
     for fn_key, yaml_key in yaml_key_map.items():
         if fn_key == "use_real_data":
-            # bool 플래그: YAML이 true이거나 CLI에서 --use_real_data 사용 시
-            yaml_val = cfg.get(yaml_key, False)
-            cli_val  = cli_args.get("use_real_data", False)
-            final_params[fn_key] = yaml_val or cli_val
+            yaml_val = cfg.get(yaml_key, True)
+            cli_val = cli_args.get("use_real_data", True)
+            final_params[fn_key] = cli_val if cli_args.get("use_real_data") is not None else yaml_val
         else:
             if fn_key == "unet_path":
                 yaml_val = cfg.get("unet_path", cfg.get("unet_checkpoint", None))
@@ -863,6 +871,11 @@ def main():
             final_params["save_path"] = "checkpoints/ppo_refiner_segresnet"
         elif final_params.get("save_path") == "checkpoints/ppo_refiner":
             final_params["save_path"] = f"checkpoints/ppo_refiner_{m_type}"
+
+    # --no_plateau_stop 은 파싱만 되고 stop_plateau 로 반영되지 않아 무동작이었다.
+    if cli_args.get("no_plateau_stop"):
+        final_params["stop_plateau"] = False
+    final_params["stop_plateau"] = bool(final_params.get("stop_plateau"))
 
     log.info("최종 파라미터:")
     for k, v in final_params.items():

@@ -17,7 +17,7 @@ import logging
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 # 프로젝트 루트를 경로에 추가
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -53,7 +53,7 @@ def train_caranet(
     use_real_data: bool = True,
     train_root: str = "src/data/archive",
     val_root: str = "",  # BraTS2021은 별도 val 폴더 없음 → train 80/20 분할
-    modality: str = "t1ce",
+    modality: str = "t1ce+flair",
     target_size: int = 128,
     max_train_patients: int = None,
     max_val_patients: int = None,
@@ -70,10 +70,17 @@ def train_caranet(
     tversky_alpha: float = 0.3,
     tversky_beta: float = 0.7,
     patient_split: str = None,
+    seed: int = 42,
+    deterministic: bool = False,
 ) -> None:
+    from src.utils.seed import set_seed
+    set_seed(seed, deterministic)
+
     if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+        from src.utils.device import get_torch_device
+        device = get_torch_device()
+    else:
+        device = torch.device(device)
     log.info(f"Device: {device}")
 
     # Fine-tuning 설정 조율
@@ -95,7 +102,7 @@ def train_caranet(
             max_patients=max_train_patients,
             patient_split=patient_split,
             refinement_mode=refinement_mode,
-            simulate_rough=True,
+            simulate_rough=False,
         )
     else:
         raise ValueError(
@@ -267,12 +274,14 @@ if __name__ == "__main__":
     parser.add_argument("--use_real_data", action="store_true", default=True, help="실제 데이터 사용")
     parser.add_argument("--train_root", type=str, default="src/data/archive")
     parser.add_argument("--val_root", type=str, default="", help="비워두면 train 80/20 분할")
-    parser.add_argument("--modality", type=str, default="t1ce", )
+    parser.add_argument("--modality", type=str, default="t1ce+flair", )
     parser.add_argument("--target_size", type=int, default=128)
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한")
     parser.add_argument("--max_val_patients", type=int, default=None, help="검증 환자 수 제한")
     parser.add_argument("--refinement_mode", type=str, default=None, help="True Expert 학습을 위한 타겟 크기 클래스")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
+    parser.add_argument("--seed", type=int, default=42, help="전역 시드")
+    parser.add_argument("--deterministic", action="store_true", help="cuDNN 결정적 모드 (느려짐)")
     parser.add_argument("--pretrained_path", type=str, default="", help="파인튜닝할 사전 학습 가중치 경로")
     parser.add_argument("--tversky_alpha", type=float, default=0.3, help="FocalTverskyLoss alpha")
     parser.add_argument("--tversky_beta", type=float, default=0.7, help="FocalTverskyLoss beta")
