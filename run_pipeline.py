@@ -101,8 +101,8 @@ def main():
         run_command(cmd_unetpp, "Stage 2 (Medium): UNet++ 중형 종양 특화 단독 학습")
         
         # ── Large Expert (SegResNet) ──
-        cmd_seg = [python_exec, "scripts/train/train_segresnet.py"] + extra_args + ["--refinement_mode", "large", "--save_path", "checkpoints/segresnet_best.pt"]
-        run_command(cmd_seg, "Stage 2 (Large): SegResNet 대형 종양 특화 단독 학습")
+        cmd_seg = [python_exec, "scripts/train/train_segresnet.py"] + extra_args + ["--save_path", "checkpoints/segresnet_best.pt"]
+        run_command(cmd_seg, "Stage 2 (Large): SegResNet 전 구간 + ED/TC 분리 학습")
     else:
         log.info("⏭️  Stage 2: Expert 백본 모델 3종 학습 단계를 건너뜁니다.\n")
 
@@ -142,7 +142,7 @@ def main():
         ]
         if args.modality is not None:
             cmd_eval += ["--modality", str(args.modality)]
-        run_command(cmd_eval, "Stage 4: 3-Stage Adaptive Pipeline 최종 성능 검증")
+        run_command(cmd_eval, "Stage 4: 4-Stage Dynamic Routing Pipeline 최종 성능 검증")
     else:
         log.info("⏭️  Stage 4: 성능 검증 단계를 건너뜁니다.\n")
 

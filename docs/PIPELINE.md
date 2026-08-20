@@ -2,22 +2,22 @@
 
 3단계 동적 라우팅(분류 → 크기별 Expert 분할 → 크기별 경계 보정)과 4번째 평가 단계를 **코드 기준**으로 정리한 문서입니다.
 
-실험 수치와 이력은 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md), 대회 상위 입상 방법과의 비교는 [baselines/README.md](../baselines/README.md), 논문 초안은 [paper_draft_ko.md](paper_draft_ko.md)를 봅니다.
+실험 수치와 이력은 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md), 대회 상위 입상 방법과의 비교는 [baselines/README.md](../baselines/README.md), 논문 초안은 [paper_draft_ko.md](paper_draft_ko.md)를 봅니다. 비교 그림·표에서 이 파이프라인 Stage 3(단조 DSC 게이트)는 **TRIO**로 표기합니다.
 
-기준 실행: **2026-08-19 `python run_pipeline.py batch_size=64`** (seed 42, 결정적 모드 ON).
+기준 실행: **2026-08-20 `python run_pipeline.py batch_size=64`** (seed 42, 결정적 모드 ON). Stage 2 임계값 0.80 / 0.80 / 0.50, CC 0 / 15 / 25.
 
 ---
 
 ## 1. 한눈에 보는 구조
 
-입력은 BraTS 2021 환자의 **T1ce + FLAIR** 2채널 2D 슬라이스(128×128)입니다. 출력은 Whole Tumor 이진 마스크입니다.
+입력은 BraTS 2021 환자의 **T1ce + FLAIR** 2채널 2D 슬라이스(128×128)입니다. Small Expert만 인접 슬라이스를 붙인 **2.5D**(6채널)를 씁니다. 출력은 Whole Tumor 이진 마스크입니다.
 
 | 단계 | 이름 | 하는 일 | 학습 산출물 |
 |:---:|---|---|---|
 | 1 | Shape Classifier | 종양 면적으로 Small / Medium / Large 분류 | `checkpoints/shape_classifier_best.pt` |
 | 2 | Size Expert | 클래스에 맞는 분할 모델이 확률 맵 생성 | `caranet_best.pt`, `unetplusplus_best.pt`, `segresnet_best.pt` |
 | 3 | PPO Refiner | 8방위 SDF 이동으로 경계를 미세 조정 | `ppo_small.zip`, `ppo_medium.zip`, `ppo_large.zip` |
-| 4 | Evaluation | DSC / HD95 / Precision / Recall 집계, Monotonic DSC Gate, 시각화 | `results/pipeline_sample_*.png` |
+| 4 | Evaluation | DSC / HD95 / Precision / Recall 집계, Monotonic DSC Gate, 시각화 | `results/pipeline_sample_*.png`, `results/method_comparison_3x6.png` |
 
 원스톱 진입점은 `run_pipeline.py`입니다. 기본 환자 풀은 Stage 1–4 공통 **210명**이고, 이 중 **train 168명 / val 42명**으로 나뉩니다.
 
@@ -43,7 +43,7 @@
 | 경로 | `src/data/archive` |
 | 모달리티 | `t1ce+flair` (2채널). `t1ce`, `t1ce+t2` 등도 가능 |
 | 해상도 | 128×128 |
-| 레이블 | seg의 0 이외를 Whole Tumor로 이진화 (NCR/NET=1, ED=2, ET=4) |
+| 레이블 | WT: seg의 0 이외. Large 학습용 영역 헤드: ED(label 2), TC(NCR 1 ∪ ET 4) |
 | 정규화 | 뇌 마스크 안 z-score → 1–99 퍼센타일 클리핑 → 0–1 |
 | 유효 슬라이스 | 종양 픽셀 비율 ≥ 0.002 |
 | 기본 환자 풀 | 210명 → **12,241 슬라이스** |
@@ -54,9 +54,11 @@
 
 | 역할 | 환자 | 슬라이스 | Small `<300` | Medium `300–700` | Large `≥700` |
 |---|---:|---:|---:|---:|---:|
-| train | 168 | 9,868 | 3,561 | 4,184 | 2,123 |
-| val | 42 | **2,373** | 942 | 847 | 584 |
-| 합계 | 210 | 12,241 | 4,503 | 5,031 | 2,707 |
+| train (GT 구간) | 168 | 9,868 | 3,561 | 4,184 | 2,123 |
+| val GT 구간 (이전 집계) | 42 | 2,373 | 942 | 847 | 584 |
+| val 2026-08-20 평가 | 42 | **2,434** | 897* | 1,152* | 385* |
+
+\* 2026-08-20 클래스 수는 **분류기 라우팅** 분포입니다.
 
 `src/data/patient_split.py`의 `load_split_brats_datasets`가 **분할을 먼저 확정한 뒤 그 환자 ID만** 데이터셋에 넘깁니다. `max_patients`를 로더에 직접 넘기면 "정렬 순 앞 N명"이 실려 무작위 표본과 어긋나므로 그렇게 하지 않습니다.
 
@@ -136,7 +138,7 @@ PPO는 Stage 2 체크포인트가 있어야 `AdaptivePipeline`이 Expert를 로�
 
 ## 6. Stage 2 — 크기별 Expert
 
-각 Expert는 `--refinement_mode`로 자기 크기(GT 면적 기준)만 남기고, 환자 단위 분할 위에서 학습합니다.
+Small·Medium은 `--refinement_mode`로 자기 크기(GT 면적)만 남깁니다. **Large SegResNet은 크기 필터 없이 전 구간**을 학습하고, 추론 때만 Large로 라우팅된 슬라이스에 쓰입니다.
 
 | 항목 | 값 |
 |---|---|
@@ -145,21 +147,21 @@ PPO는 Stage 2 체크포인트가 있어야 `AdaptivePipeline`이 Expert를 로�
 | 스케줄러 | CosineAnnealingLR (`T_max=epochs`) |
 | 정밀도 | AMP (FP16) |
 
-| Expert | 파일 | 왜 이 모델인가 | 손실 | train / val 슬라이스 |
-|---|---|---|---|---:|
-| Small CaraNet | `src/models/caranet.py` | 작은 물체용 Context Axial Reverse Attention | FocalTversky (α=0.3, β=0.7, γ=2.0) | 3,561 / 942 |
-| Medium UNet++ | `src/models/unetplusplus.py` | MONAI BasicUNetPlusPlus, features `(16,32,64,128,256,16)` | BCEDice 0.5+0.5 | 4,184 / 847 |
-| Large SegResNet | `src/models/segresnet.py` | 잔차 인코더, `init_filters=16` (~1.58M params) | BCEDice 0.5+0.5 (`--loss`로 `dice`/`boundary` 선택 가능) | 2,123 / 584 |
+| Expert | 파일 | 왜 이 모델인가 | 입력 / 출력 | 손실 | 학습 범위 |
+|---|---|---|---|---|---|
+| Small CaraNet | `src/models/caranet.py` | 작은 물체용 Context Axial Reverse Attention | 2.5D 6채널 (`z-1,z,z+1`) / WT 1채널 | **BCEDice** 0.5+0.5. GT `<50px` ×4 오버샘플, zoom-crop | Small만 |
+| Medium UNet++ | `src/models/unetplusplus.py` | MONAI BasicUNetPlusPlus, features `(16,32,64,128,256,16)` | 중심 2채널 / WT 1채널 | BCEDice 0.5+0.5 | Medium만 |
+| Large SegResNet | `src/models/segresnet.py` | 잔차 인코더, `init_filters=16` | 중심 2채널 / **ED+TC 2채널** → WT=`1-(1-p_ed)(1-p_tc)` | MultiChannelBCEDice | **전 구간** |
 
-Small에 FocalTversky를 쓰는 이유는 `β > α`로 두어 미검출(FN)에 더 큰 벌점을 주기 위함입니다. 작은 종양은 놓치면 DSC가 급격히 떨어집니다.
+Small 학습 보조: `src/data/fragment_oversample.py`, `src/utils/zoom_crop.py`. 체크포인트 채널이 바뀌면 `src/utils/weight_adapt.py`가 첫  conv를 맞춰 이어서 학습합니다.
 
 `AdaptivePipeline` 로드 순서:
 
 1. Small: `caranet_best.pt` → 없으면 `attention_unet_best.pt` → 없으면 랜덤 CaraNet
 2. Medium: `unetplusplus_best.pt` → 없으면 `unet3plus_best.pt` → 없으면 랜덤 UNet++
-3. Large: `segresnet_best.pt` → 없으면 랜덤 SegResNet
+3. Large: `segresnet_best.pt` → 없으면 랜덤 SegResNet (ckpt의 in/out 채널을 읽어 구성)
 
-순전파: 클래스별로 해당 Expert → sigmoid → `(B, 1, H, W)` 확률 맵. 같은 클래스로 라우팅된 샘플을 모아 **배치 단위로 한 번에** 통과시킵니다. 입력 채널 수가 안 맞으면 반복/슬라이스로 맞춥니다.
+순전파: 분류기는 **중심 2채널**, Small Expert는 2.5D, Medium/Large는 중심 2채널. 채널 수가 안 맞으면 `_match_in_channels`가 중심 슬라이스를 꺼내거나 복제합니다. 클래스별로 해당 Expert → sigmoid → WT 확률 `(B, 1, H, W)`. Large가 2채널이면 `region_logits_to_wt`로 합칩니다. Small은 1차 예측 뒤 zoom-crop 재추론을 한 번 더 합니다.
 
 Expert 단독 성능은 이진화 임계값에 따라 달라지므로 §8에서 함께 다룹니다.
 
@@ -175,7 +177,7 @@ Expert 단독 성능은 이진화 임계값에 따라 달라지므로 §8에서 
 
 1. `patient_split.json`의 **train 환자** 슬라이스를 로드한다.
 2. GT에 형태학 노이즈(`make_noisy_mask`, `max_morph_px=5`)를 넣어 **합성 Rough**를 만든다.
-3. `AdaptivePipeline`으로 **실제 Expert 예측**과 확률 맵을 뽑는다.
+3. `AdaptivePipeline`으로 **실제 Expert 예측**과 확률 맵을 뽑은 뒤, **평가와 같은 클래스별 임계값(0.80 / 0.80 / 0.50)** 으로 이진화한다.
 4. `gt_size_class`로 `refinement_mode`에 해당하는 클래스만 남긴다. (**GT 면적 기준**)
 5. 실제 예측 50% + 합성 노이즈 50%를 이어 붙여 섞는다 (mixup).
 
@@ -212,7 +214,7 @@ Expert 단독 성능은 이진화 임계값에 따라 달라지므로 §8에서 
 
 최종 모델은 eval 보상이 가장 좋았던 스냅샷(`checkpoints/best_{mode}/best_model.zip`)을 `ppo_{small,medium,large}.zip`으로 복사한 것입니다.
 
-이번 실행의 Large 에이전트: 25m45s, eval 보상 120K 375.20 → 240K 387.60, 에피소드 길이 30.0 고정.
+이번 실행의 Large 에이전트: 27m56s, eval 보상 120K 606.76 → 240K 639.43, 에피소드 길이 30.0 고정.
 
 ### 7.3 환경: 8방위 SDF 보정
 
@@ -274,7 +276,8 @@ flowchart LR
 
 - **val 환자 42명**만 사용 (`--split_role val`, 기본값)
 - Stage 1 **분류기**로 Expert 선택. `--oracle_routing`을 주면 GT 면적으로 고정하는 상한 평가
-- 클래스별 이진화 임계값 `--stage2_thresholds 0.80,0.80,0.60`
+- 클래스별 이진화 임계값 `--stage2_thresholds 0.80,0.80,0.50`
+- 연결요소 최소 픽셀 `--cc_min_sizes 0,15,25` (Small은 끔)
 - Small / Medium / Large **모두** PPO `predict()` 15스텝
 - GT-free 면적 게이트 + Monotonic DSC Gate
 
@@ -284,7 +287,8 @@ flowchart LR
 |---|---|---|
 | `--max_patients` | 210 | 분할 생성 기준 환자 풀 |
 | `--split_role` | `val` | `train` / `val` / `all` |
-| `--stage2_thresholds` | `0.80,0.80,0.60` | Small / Medium / Large 이진화 임계값 |
+| `--stage2_thresholds` | `0.80,0.80,0.50` | Small / Medium / Large 이진화 임계값 |
+| `--cc_min_sizes` | `0,15,25` | 클래스별 연결요소 최소 픽셀. 0이면 비활성 |
 | `--micro_area_floor` | 80.0 | 이 면적 미만이면 임계값 사다리 발동 |
 | `--micro_thr_floor` | 0.15 | 사다리 하한 |
 | `--oracle_routing` | off | GT 면적 라우팅 (상한) |
@@ -299,7 +303,7 @@ flowchart TD
     CLS --> EXP["Stage 2 Expert sigmoid"]
     EXP --> TTA["수평/수직 flip TTA<br/>클래스 임계값으로 이진화"]
     TTA --> MICRO["면적 &lt; 80px → 임계값 사다리<br/>0.05 간격으로 0.15까지 하강"]
-    MICRO --> COMP["연결요소 ≥5px"]
+    MICRO --> COMP["연결요소 필터<br/>CC 0 / 15 / 25"]
     COMP --> PPO["크기별 PPO 15스텝"]
     PPO --> AREA["GT-free 면적 게이트<br/>0.2× ~ 4× 아니면 TTA/Rough 유지"]
     AREA --> GATE["Monotonic DSC Gate"]
@@ -308,7 +312,9 @@ flowchart TD
 
 ### 8.2 클래스별 이진화 임계값
 
-기본값이 0.50이 아니라 **0.80 / 0.80 / 0.60**인 이유는 세 Expert 모두 확률을 과하게 크게 내보내 **Recall > Precision**(과분할) 경향을 보였기 때문입니다. 검증셋에서 임계값을 올리면 Precision이 오르고 DSC가 함께 개선됐습니다.
+기본값은 **0.80 / 0.80 / 0.50**입니다. Small·Medium은 과분할(Recall > Precision) 경향이 있어 임계값을 올렸고, Large는 ED/TC 학습 이후 **과소분할**(Precision > Recall)이라 0.70에서 **0.50**으로 내렸습니다.
+
+TTA 재이진화는 **슬라이스 클래스 `c`** 의 임계값을 씁니다. 컴포넌트 크기 `ck`로 자르면 Large 슬라이스의 작은 덩어리가 Small 0.80으로 다시 잘립니다.
 
 임계값 탐색은 `scripts/eval/sweep_threshold.py`로 합니다. 확률 맵을 한 번 캐시한 뒤 여러 임계값의 DSC / Precision / Recall을 재계산하므로 파이프라인을 다시 돌리지 않습니다.
 
@@ -341,52 +347,50 @@ Small은 마스크가 35 px 미만이면 수축(음수) 행동을 0으로 자릅
 | GT-free 면적 게이트 | 보정 마스크가 비었거나 면적이 초기의 0.2배 미만 / 4배 초과 | ✗ | ✓ |
 | Monotonic DSC Gate | 보정 후 DSC < 초기 DSC | **✓** | ✗ |
 
-Monotonic DSC Gate는 GT를 보므로 **오프라인 상한 측정 장치**입니다. 이번 실행에서 2,373장 중 **858장(36.2%)** 이 이 게이트로 Stage 2로 되돌아갔습니다. 즉 PPO는 슬라이스 3분의 1 이상에서 DSC를 떨어뜨렸고, 보고된 최종 점수는 그 손실을 GT로 걸러낸 값입니다.
+Monotonic DSC Gate는 GT를 보므로 **오프라인 상한 측정 장치**입니다. 이번 실행에서 2,434장 중 **858장(35.3%)** 이 이 게이트로 Stage 2로 되돌아갔습니다. 즉 PPO는 슬라이스 약 3분의 1에서 DSC를 떨어뜨렸고, 보고된 최종 점수는 그 손실을 GT로 걸러낸 값입니다.
 
 베이스라인과 비교할 때 방법론적으로 공정한 대상은 게이트를 타지 않은 **초기 DSC(Stage 2)** 입니다.
 
-### 8.6 이번 실행 결과 (val 42명 · 2,373 슬라이스)
+### 8.6 이번 실행 결과 (val 42명 · 2,434 슬라이스, 2026-08-20)
 
 | 지표 | Stage 2 초기 | Stage 3 보정 후 | 변화 |
 |---|---:|---:|---:|
-| 평균 DSC | 0.8672 | **0.8752** | +0.0080 |
-| 평균 HD95 | 2.3365 px | **2.2897 px** | −0.0468 px |
+| 평균 DSC | 0.8948 | **0.9031** | +0.0083 |
+| 평균 HD95 | 1.7336 px | **1.6060 px** | −0.1276 px |
 
-분류기 라우팅 결과 분포: Small 922 / Medium 935 / Large 516 (GT 기준 942 / 847 / 584).
+분류기 라우팅 결과 분포: Small 897 / Medium 1,152 / Large 385. 임계값 0.80 / 0.80 / 0.50, CC 0 / 15 / 25.
 
 | 클래스 | Expert | n | 초기 → 최종 DSC | 초기 → 최종 HD95 | Precision | Recall |
 |---|---|---:|---|---|---|---|
-| Small | CaraNet | 922 | 0.7753 → **0.7892** | 4.4593 → **4.4459** | 0.7797 → 0.8044 | 0.8232 → 0.8199 |
-| Medium | UNet++ | 935 | 0.9223 → **0.9270** | 1.0764 → **1.0170** | 0.9385 → 0.9394 | 0.9176 → 0.9249 |
-| Large | SegResNet | 516 | 0.9316 → **0.9347** | 0.8271 → **0.7432** | 0.9017 → 0.9052 | 0.9730 → 0.9751 |
+| Small | CaraNet 2.5D | 897 | 0.8286 → **0.8429** | 3.1618 → **2.9482** | 0.9005 → 0.9195 | 0.7958 → 0.8008 |
+| Medium | UNet++ | 1,152 | 0.9264 → **0.9314** | 1.0790 → **1.0000** | 0.9529 → 0.9545 | 0.9089 → 0.9165 |
+| Large | SegResNet ED/TC | 385 | 0.9546 → **0.9582** | 0.3650 → **0.2919** | 0.9596 → 0.9613 | 0.9515 → 0.9568 |
 
 Small 층화:
 
 | 구간 | n | 초기 → 최종 DSC | 초기 → 최종 HD95 |
 |---|---:|---|---|
-| Active tumor `≥50px` | 851 | 0.7928 → **0.8039** | 4.1623 → **4.1440** |
-| Micro fragment `<50px` | 71 | 0.5644 → **0.6128** | 8.0184 → 8.0642 |
+| Active tumor `≥50px` | 828 | 0.8427 → **0.8529** | 2.8934 → **2.7456** |
+| Micro fragment `<50px` | 69 | 0.6595 → **0.7239** | 6.3828 → **5.3794** |
 
-미세 파편은 DSC가 +4.8%p 올랐지만 HD95는 오히려 늘었습니다. 게이트가 DSC만 보기 때문에 DSC를 올리면서 경계 최악값을 악화시키는 보정이 통과할 수 있습니다.
-
-Precision/Recall을 보면 임계값을 올린 뒤에도 Small(P 0.78 < R 0.82)과 Large(P 0.90 < R 0.97)는 여전히 과분할이고, Medium(P 0.94 > R 0.92)만 살짝 과소분할입니다. Large의 큰 격차는 임계값을 더 올릴 여지가 있음을 뜻합니다.
+Small은 Precision > Recall(과소분할)입니다. Large는 임계값 0.50 이후 P≈0.96 / R≈0.95로 균형에 가깝습니다.
 
 ### 8.7 시각화
 
-클래스별 ΔDSC 최대 2장씩, 총 6장을 저장합니다.
+클래스별 **Final DSC가 클래스 평균에 가깝고 Final > Initial**인 원본 2장씩, 총 6장. 원본 MRI는 `*_original.png`.
 
 | 파일 | Rough DSC | RL DSC | ΔDSC |
 |---|---:|---:|---:|
-| `pipeline_sample_small_1.png` | 0.4941 | 0.7222 | **+0.2281** |
-| `pipeline_sample_small_2.png` | 0.6825 | 0.8944 | +0.2118 |
-| `pipeline_sample_medium_1.png` | 0.7792 | 0.8453 | +0.0661 |
-| `pipeline_sample_medium_2.png` | 0.8675 | 0.9310 | +0.0635 |
-| `pipeline_sample_large_1.png` | 0.7960 | 0.8578 | +0.0618 |
-| `pipeline_sample_large_2.png` | 0.8152 | 0.8612 | +0.0460 |
+| `pipeline_sample_small_1.png` | 0.8322 | 0.8429 | +0.0106 |
+| `pipeline_sample_small_2.png` | 0.8127 | 0.8432 | +0.0305 |
+| `pipeline_sample_medium_1.png` | 0.9003 | 0.9315 | +0.0313 |
+| `pipeline_sample_medium_2.png` | 0.9209 | 0.9316 | +0.0107 |
+| `pipeline_sample_large_1.png` | 0.9535 | 0.9582 | +0.0047 |
+| `pipeline_sample_large_2.png` | 0.9520 | 0.9583 | +0.0063 |
 
 통합 그림: `results/pipeline_sample_comparison.png`
 
-이 표본은 **개선폭이 가장 큰** 슬라이스라서 평균을 대표하지 않습니다.
+TRIO / KAIST / NVAUTO를 **같은 슬라이스**에서 비교하는 그리드는 `results/method_comparison_3x6.png`입니다. 행이 방법(TRIO, KAIST, NVAUTO), 열이 Small 1–2 · Medium 1–2 · Large 1–2입니다. 제목은 영어(`Representative slices near class-mean DSC · dashed green = GT`)입니다. 고정 인덱스와 재현 명령은 [EXPERIMENT_RESULTS.md §2.6](EXPERIMENT_RESULTS.md)를 봅니다.
 
 ---
 
@@ -396,22 +400,22 @@ BraTS 2021 상위 입상 방법 두 개를 같은 42명 val 환자·같은 지�
 
 | 방법 | DSC | HD95 | Precision | Recall |
 |---|---:|---:|---:|---:|
-| 파이프라인 Stage 2 (게이트 없음) | 0.8672 | 2.3365 | — | — |
-| 파이프라인 Stage 3 (Monotonic DSC Gate, GT 사용) | 0.8752 | 2.2897 | — | — |
+| TRIO Stage 2 (게이트 없음) | 0.8948 | 1.7336 | — | — |
+| **TRIO** Stage 3 (Monotonic DSC Gate, GT 사용) | **0.9031** | **1.6060** | — | — |
 | Extending nnU-Net (KAIST, 1위) | 0.8923 | 1.9591 | 0.9215 | 0.8893 |
-| SegResNet + 중복 감소 (NVAUTO, 2위) | **0.8971** | **1.9022** | 0.9077 | 0.9029 |
+| SegResNet + 중복 감소 (NVAUTO, 2위) | 0.8971 | 1.9022 | 0.9077 | 0.9029 |
 
-두 베이스라인은 3D·4모달리티·앙상블을 제외한 **2D 각색 구현**이므로 대회 리더보드 점수와 직접 비교할 수 없습니다. 각색 내역과 공정성 조건은 [baselines/README.md](../baselines/README.md)에 정리했습니다.
+두 베이스라인은 3D·4모달리티·앙상블을 제외한 **2D 각색 구현**이므로 대회 리더보드 점수와 직접 비교할 수 없습니다. 베이스라인은 2,373장, 이번 파이프라인은 2,434장이라 슬라이스 수가 완전히 같지는 않습니다.
 
-현재 상태에서 파이프라인은 GT 게이트를 켜고도 두 베이스라인보다 낮습니다. 크기별로 보면 Medium만 경쟁력이 있습니다.
+Stage 2 DSC 0.8948은 KAIST 0.8923을 넘고 NVAUTO 0.8971에 근접합니다. Stage 3는 더 높지만 GT 게이트 상한입니다.
 
 | 클래스 | 파이프라인 초기 → 최종 | KAIST | NVAUTO |
 |---|---|---:|---:|
-| Small | 0.7753 → 0.7892 | 0.8278 | 0.8377 |
-| Medium | 0.9223 → **0.9270** | 0.9165 | 0.9200 |
-| Large | 0.9316 → 0.9347 | **0.9614** | 0.9594 |
+| Small | 0.8286 → **0.8429** | 0.8278 | 0.8377 |
+| Medium | 0.9264 → **0.9314** | 0.9165 | 0.9200 |
+| Large | 0.9546 → **0.9582** | **0.9614** | 0.9594 |
 
-Large 격차(약 −0.027)가 가장 큽니다. 단일 강한 백본이 큰 종양에서 유리하고, 라우팅 오류(분류기 Val Acc 0.85)가 그 위에 얹히기 때문입니다.
+Large 격차는 이전 −0.027에서 약 −0.003으로 줄었습니다.
 
 ---
 
@@ -422,7 +426,7 @@ Large 격차(약 −0.027)가 가장 큽니다. 단일 강한 백본이 큰 종�
 | 환자 집합 | `patient_split.json`의 **train 168명** | 같은 파일의 **val 42명** |
 | 클래스 결정 | Expert·PPO 모두 **GT 면적** | **분류기 예측** (보정기는 컴포넌트 면적) |
 | Rough 마스크 | 실제 Expert 예측 50% + 합성 노이즈 50% | 실제 Expert 출력만 |
-| 이진화 임계값 | 학습에서는 확률 맵을 직접 사용 | 클래스별 0.80 / 0.80 / 0.60 |
+| 이진화 임계값 | 평가와 동일: 라우팅 클래스별 0.80 / 0.80 / 0.50 | 클래스별 0.80 / 0.80 / 0.50 |
 | PPO 스텝 | 최대 30 (롤아웃) | 15 |
 | 성능 하락 방지 | 보상 −5.0 (에피소드 시작 DSC 대비) | Monotonic DSC Gate + 면적 비율 게이트 |
 | TTA | 없음 | 수평/수직 flip |
@@ -443,15 +447,19 @@ scripts/train/train_agent.py             Stage 3 PPO 3종
 scripts/eval/evaluate_pipeline.py        Stage 4 전체 파이프라인 평가
 scripts/eval/evaluate.py                 단일 모델 평가
 scripts/eval/sweep_threshold.py          이진화 임계값 스윕 (확률 맵 캐시)
+scripts/eval/plot_three_method_grid.py   TRIO / KAIST / NVAUTO 같은 슬라이스 3×6 그리드
 
-src/data/brats2020_dataset.py            NIfTI 로드, 슬라이스, 노이즈 마스크
+src/data/brats2020_dataset.py            NIfTI 로드, 2.5D 스택, ED/TC 영역 레이블
+src/data/fragment_oversample.py          Small GT <50px 오버샘플
 src/data/patient_split.py                환자 단위 train/val 분할
 src/data/shape_dataset.py                면적 → 클래스 레이블
 src/models/shape_classifier.py           ResNet18 분류기 (ImageNet 사전학습)
-src/models/dynamic_router.py             AdaptivePipeline (분류 + Expert 라우팅)
+src/models/dynamic_router.py             AdaptivePipeline (분류 + Expert 라우팅, 2.5D/ED-TC)
 src/models/caranet.py / unetplusplus.py / segresnet.py
 src/envs/mask_refinement_env.py          8방위 SDF PPO 환경
-src/utils/metrics.py                     dice / hd95 / precision / recall / 게이트 / 크기 클래스
+src/utils/metrics.py                     dice / hd95 / precision / recall / 게이트 / 크기 클래스 / CC
+src/utils/zoom_crop.py                   Small zoom-crop 학습·추론
+src/utils/weight_adapt.py                채널 수가 다른 체크포인트 적응 로드
 src/utils/seed.py                        전역 시드 및 결정적 모드
 
 baselines/                               BraTS21 상위 입상 방법 2D 각색 비교 실험
@@ -490,4 +498,10 @@ python scripts/eval/evaluate_pipeline.py --split_role val --oracle_routing
 
 ```bash
 python baselines/run_comparison.py --epochs 20 --batch_size 32 --sweep
+```
+
+같은 슬라이스 비교 그리드:
+
+```bash
+python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/method_comparison_3x6.png
 ```

@@ -3,9 +3,10 @@
 적응형 파이프라인의 성능을 대회 상위 입상 방법과 비교하기 위한 독립 실험 폴더입니다.
 기존 `src/`, `scripts/` 는 건드리지 않고, 데이터 로딩과 지표 계산만 재사용합니다.
 
-파이프라인 본문과 최신 수치는 [README.md](../README.md), [docs/PIPELINE.md](../docs/PIPELINE.md), [docs/EXPERIMENT_RESULTS.md](../docs/EXPERIMENT_RESULTS.md)를 봅니다.
+파이프라인 본문과 최신 수치는 [README.md](../README.md), [docs/PIPELINE.md](../docs/PIPELINE.md), [docs/EXPERIMENT_RESULTS.md](../docs/EXPERIMENT_RESULTS.md)를 봅니다. 비교 그림에서 파이프라인 Stage 3는 **TRIO**로 표기합니다.
 
-기준 실행: 2026-08-19 `python baselines/run_comparison.py --epochs 20 --batch_size 32 --sweep` (seed 42).
+기준 정량 평가: 2026-08-19 `python baselines/run_comparison.py --epochs 20 --batch_size 32 --sweep` (seed 42, 2,373 슬라이스).
+같은 슬라이스 그리드용 재학습: 2026-08-20, 학습 중 val DSC KAIST **0.9021** / NVAUTO **0.8999** (원본 체크포인트 부재).
 
 ## 구현한 두 방법
 
@@ -130,11 +131,14 @@ python baselines/plot_results.py
 # 정성 표본 (기본: 크기 구간별 DSC 중앙값 부근)
 python baselines/plot_samples.py --pick median
 python baselines/plot_samples.py --pick worst
+
+# TRIO와 같은 슬라이스에서 비교 (파이프라인 평가 스크립트)
+python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/method_comparison_3x6.png
 ```
 
 ### 임계값에 대한 주의
 
-파이프라인은 클래스별 이진화 임계값을 검증셋에서 조정했습니다(0.80/0.80/0.60).
+파이프라인은 클래스별 이진화 임계값을 검증셋에서 조정했습니다(현재 0.80/0.80/0.50).
 베이스라인을 기본값 0.5 로만 평가하면 파이프라인에만 튜닝 이점을 준 셈이 되어
 불공정합니다. `--sweep` 으로 베이스라인의 최적 임계값도 함께 보고하고, 논문에는
 **양쪽 모두 튜닝한 결과**를 싣는 것을 권장합니다.
@@ -146,26 +150,43 @@ python baselines/plot_samples.py --pick worst
 | KAIST | 0.5 | 0.8923 | 0.30 | 0.8932 | +0.0009 |
 | NVAUTO | 0.5 | 0.8971 | 0.40 | 0.8972 | +0.0001 |
 
-## 이번 실행 결과 (val 42명 · 2,373 슬라이스)
+## 이번 실행 결과
+
+베이스라인은 2026-08-19, val 42명 **2,373 슬라이스**. 파이프라인은 2026-08-20, 같은 42명 **2,434 슬라이스**(분류기 라우팅). 슬라이스 수가 완전히 같지는 않습니다.
 
 체크포인트에 기록된 학습 중 val DSC: KAIST 0.8923, NVAUTO 0.8971.
 
 | 방법 | DSC | HD95 | Precision | Recall |
 |---|---:|---:|---:|---:|
 | Extending nnU-Net (KAIST) | 0.8923 | 1.959 | 0.9215 | 0.8893 |
-| SegResNet + 중복 감소 (NVAUTO) | **0.8971** | **1.902** | 0.9077 | 0.9029 |
-| 파이프라인 Stage 2 | 0.8672 | 2.337 | — | — |
-| 파이프라인 Stage 3 (GT 게이트) | 0.8752 | 2.290 | — | — |
+| SegResNet + 중복 감소 (NVAUTO) | 0.8971 | 1.902 | 0.9077 | 0.9029 |
+| 파이프라인 Stage 2 | 0.8948 | 1.734 | — | — |
+| **TRIO** Stage 3 (GT 게이트) | **0.9031** | **1.606** | — | — |
 
-크기 구간(GT 면적, n=942 / 847 / 584):
+크기 구간(베이스라인은 GT 면적 n=942 / 847 / 584, 파이프라인은 분류기 라우팅 n=897 / 1,152 / 385):
 
 | 클래스 | KAIST DSC | NVAUTO DSC | 파이프라인 초기 → 최종 |
 |---|---:|---:|---|
-| Small | 0.8278 | **0.8377** | 0.7753 → 0.7892 |
-| Medium | 0.9165 | 0.9200 | 0.9223 → **0.9270** |
-| Large | **0.9614** | 0.9594 | 0.9316 → 0.9347 |
+| Small | 0.8278 | 0.8377 | 0.8286 → **0.8429** |
+| Medium | 0.9165 | 0.9200 | 0.9264 → **0.9314** |
+| Large | **0.9614** | 0.9594 | 0.9546 → 0.9582 |
 
-파이프라인 클래스 집계는 분류기 라우팅 결과(922 / 935 / 516)라 n이 다릅니다.
+**Stage 2(0.8948)는 KAIST를 넘고 NVAUTO에 근접합니다.** Stage 3(TRIO)는 GT 게이트 상한입니다. Large 격차는 약 0.003입니다.
+
+### 같은 슬라이스 정성 비교
+
+`results/method_comparison_3x6.png`는 TRIO / KAIST / NVAUTO를 같은 val 슬라이스 6장에서 비교합니다. 행 이름은 TRIO, 제목은 영어입니다. 고정 인덱스 `113,2286,1121,2295,95,1480`.
+
+```bash
+python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/method_comparison_3x6.png
+```
+
+그리드용 가중치는 원본이 없어 2026-08-20에 다시 학습했습니다. 정량 JSON(0.8923 / 0.8971)과 그림의 윤곽이 같은 모델이 아닙니다. 재학습 명령:
+
+```bash
+python baselines/train_baseline.py --method kaist  --epochs 20 --batch_size 32 --seed 42 --no_deterministic
+python baselines/train_baseline.py --method nvauto --epochs 20 --batch_size 32 --seed 42 --no_deterministic
+```
 
 ## 폴더 구조
 
@@ -196,3 +217,4 @@ baselines/
 - `baselines/results/{method}_metrics.json` — 구간별 지표, 임계값 스윕, `best_threshold`
 - `baselines/results/comparison.md` — 비교 표
 - `baselines/results/baseline_*.png` — 정량·정성 그림
+- `results/method_comparison_3x6.png` — TRIO / KAIST / NVAUTO 같은 슬라이스 그리드

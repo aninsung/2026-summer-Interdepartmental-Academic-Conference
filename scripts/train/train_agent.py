@@ -296,6 +296,7 @@ def load_real_data(
     refinement_mode: str = "small",
     patient_ids: Optional[list] = None,
     mixup: bool = True,
+    stage2_thresholds: str = "0.80,0.80,0.50",
 ):
     """실제 BraTS2021 데이터를 NumPy 배열로 반환."""
     from src.data.brats2020_dataset import BraTS2020Dataset
@@ -312,6 +313,14 @@ def load_real_data(
         noise_seed=noise_seed,
     )
     imgs, gts, _ = ds.get_numpy_arrays()
+    imgs_25d = ds.get_numpy_25d_arrays()
+    stage2_thr = [float(t) for t in str(stage2_thresholds).split(",")]
+    if len(stage2_thr) != 3:
+        raise ValueError("--stage2_thresholds 는 Small,Medium,Large 3개 값이어야 합니다.")
+    log.info(
+        "PPO 초안 마스크 이진화 임계값: Small=%.2f, Medium=%.2f, Large=%.2f (평가와 동일)",
+        stage2_thr[0], stage2_thr[1], stage2_thr[2],
+    )
 
     rng = np.random.default_rng(noise_seed)
 
@@ -358,15 +367,19 @@ def load_real_data(
     with torch.no_grad():
         for start_idx in range(0, num_slices, batch_size):
             end_idx = min(start_idx + batch_size, num_slices)
-            batch_imgs = imgs[start_idx:end_idx]
+            batch_imgs = imgs_25d[start_idx:end_idx]
             if batch_imgs.ndim == 3:
                 batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device)
             else:
                 batch_t = torch.from_numpy(batch_imgs).to(device)
             
             rough_masks_t, class_preds = pipeline(batch_t)
-            batch_preds_bin = (rough_masks_t > 0.5).float().squeeze(1).cpu().numpy()
             batch_preds_prob = rough_masks_t.squeeze(1).cpu().numpy()
+            cls_np = class_preds.cpu().numpy()
+            thr = np.array(
+                [stage2_thr[int(c)] for c in cls_np], dtype=np.float32
+            ).reshape(-1, *([1] * (batch_preds_prob.ndim - 1)))
+            batch_preds_bin = (batch_preds_prob > thr).astype(np.float32)
             
             preds.append(batch_preds_bin)
             probs.append(batch_preds_prob)
@@ -464,6 +477,7 @@ def train_agent(
     # 모드
     refinement_mode:     str   = "small",     # "small", "medium", "large"
     patient_split:       Optional[str] = None,
+    stage2_thresholds:   str   = "0.80,0.80,0.50",
     # 재현성
     seed:                int   = 42,
     deterministic:       bool  = False,
@@ -504,6 +518,7 @@ def train_agent(
             patient_ids=train_ids,
             mixup=True,
             noise_seed=seed,
+            stage2_thresholds=stage2_thresholds,
         )
         val_images, val_gt_masks, val_roughs, val_uncerts = load_real_data(
             train_root=train_root,
@@ -516,6 +531,7 @@ def train_agent(
             patient_ids=val_ids,
             mixup=False,
             noise_seed=seed,
+            stage2_thresholds=stage2_thresholds,
         )
     else:
         images, gt_masks, rough_masks, uncertainty_maps = load_synthetic_data()
@@ -758,6 +774,8 @@ def main():
     parser.add_argument("--refinement_mode",     type=str, default="small", choices=["small", "medium", "large"],
                         help="학습할 PPO 에이전트의 타겟 Shape Class (small, medium, large)")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
+    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
+                        help="평가와 동일한 클래스별(Small,Medium,Large) Stage 2 이진화 임계값")
     parser.add_argument("--seed", type=int, default=42, help="전역 시드 (PPO 포함)")
     parser.add_argument("--deterministic", action="store_true", help="cuDNN 결정적 모드 (느려짐)")
 
@@ -805,6 +823,7 @@ def main():
         "milestone_ratios":    "milestone_ratios",
         "refinement_mode":     "refinement_mode",
         "patient_split":       "patient_split",
+        "stage2_thresholds":   "stage2_thresholds",
         "seed":                "seed",
         "deterministic":       "deterministic",
     }
