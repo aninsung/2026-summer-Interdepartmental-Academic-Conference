@@ -17,7 +17,7 @@ from scipy.ndimage import distance_transform_edt
 from src.data.brats2020_dataset import BraTS2020Dataset
 from src.data.patient_split import load_or_create_patient_split, DEFAULT_SPLIT_PATH
 from src.models.dynamic_router import AdaptivePipeline
-from src.utils.metrics import dice, hd95, precision, recall
+from src.utils.metrics import dice, filter_small_components, hd95, precision, recall
 
 CLASS_NAMES = {0: "Small", 1: "Medium", 2: "Large"}
 
@@ -66,9 +66,34 @@ def main():
     )
     parser.add_argument("--skip_hd95", action="store_true", help="HD95 생략 (더 빠름)")
     parser.add_argument("--plot", type=str, default=None, help="DSC/Precision/Recall 곡선 PNG 저장 경로")
+    parser.add_argument(
+        "--cc_min_sizes",
+        type=str,
+        default="0,15,25",
+        help="클래스별 연결요소 최소 픽셀 (Small,Medium,Large). 0이면 비활성.",
+    )
+    parser.add_argument(
+        "--fixed_thresholds",
+        type=str,
+        default="0.80,0.80,0.50",
+        help="Large-only 스윕에서 Small/Medium에 고정할 임계값.",
+    )
+    parser.add_argument(
+        "--large_thresholds",
+        type=str,
+        default="0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90",
+        help="Large만 바꿀 때 쓸 임계값 목록.",
+    )
     args = parser.parse_args()
 
     thresholds = [float(t) for t in args.thresholds.split(",")]
+    cc_min = [int(t) for t in args.cc_min_sizes.split(",")]
+    if len(cc_min) != 3:
+        parser.error("--cc_min_sizes 는 쉼표로 구분된 3개 정수여야 합니다.")
+    fixed_thr = [float(t) for t in args.fixed_thresholds.split(",")]
+    if len(fixed_thr) != 3:
+        parser.error("--fixed_thresholds 는 쉼표로 구분된 3개 값이어야 합니다.")
+    large_thresholds = [float(t) for t in args.large_thresholds.split(",")]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -88,6 +113,7 @@ def main():
         simulate_rough=False,
     )
     images, gt_masks, _ = dataset.get_numpy_arrays()
+    images_25d = dataset.get_numpy_25d_arrays()
     print(f"Slices: {len(images)}")
 
     in_ch = images.shape[1] if images.ndim == 4 else 1
@@ -95,7 +121,7 @@ def main():
 
     print("Stage 2 확률맵 계산 중...")
     probs, routed = _compute_prob_maps(
-        pipeline, images, device, args.batch_size, args.oracle_routing, gt_masks
+        pipeline, images_25d, device, args.batch_size, args.oracle_routing, gt_masks
     )
 
     # GT 거리맵은 임계값과 무관하므로 한 번만 계산해 재사용
@@ -112,6 +138,7 @@ def main():
             pred = (probs[i] > thr).astype(np.float32)
             gt = gt_masks[i]
             c = int(routed[i])
+            pred = filter_small_components(pred, cc_min[c])
             per_class[c]["dsc"].append(dice(pred, gt))
             per_class[c]["prec"].append(precision(pred, gt))
             per_class[c]["rec"].append(recall(pred, gt))
@@ -181,6 +208,50 @@ def main():
         f"(thr={base:.2f} 전역 대비 {mixed - overall(base, 'dsc'):+.4f})"
     )
     print(f"  조합 = {{{', '.join(f'{CLASS_NAMES[c]}:{t:.2f}' for c, t in per_class_best.items())}}}")
+
+    print("\n" + "=" * 78)
+    print(
+        f"Large-only 스윕 (Small={fixed_thr[0]:.2f}, Medium={fixed_thr[1]:.2f}, "
+        f"CC={cc_min}, {'oracle' if args.oracle_routing else 'classifier'} routing)"
+    )
+    print("=" * 78)
+    print(f"{'L-thr':>6}  {'Large DSC':>10}  {'Large P':>8}  {'Large R':>8}  {'Large HD95':>11}  {'overall DSC':>12}")
+    large_rows = []
+    for lthr in large_thresholds:
+        dsc_all, dsc_l, prec_l, rec_l, hd_l = [], [], [], [], []
+        for i in range(len(images)):
+            c = int(routed[i])
+            thr_i = lthr if c == 2 else fixed_thr[c]
+            pred = filter_small_components((probs[i] > thr_i).astype(np.float32), cc_min[c])
+            gt = gt_masks[i]
+            d = dice(pred, gt)
+            dsc_all.append(d)
+            if c == 2:
+                dsc_l.append(d)
+                prec_l.append(precision(pred, gt))
+                rec_l.append(recall(pred, gt))
+                if gt_dists is not None:
+                    hd_l.append(hd95(pred, gt, dist_b=gt_dists[i]))
+        row = {
+            "thr": lthr,
+            "dsc": float(np.mean(dsc_l)) if dsc_l else float("nan"),
+            "prec": float(np.mean(prec_l)) if prec_l else float("nan"),
+            "rec": float(np.mean(rec_l)) if rec_l else float("nan"),
+            "hd": float(np.mean(hd_l)) if hd_l else float("nan"),
+            "overall": float(np.mean(dsc_all)) if dsc_all else float("nan"),
+        }
+        large_rows.append(row)
+        hd_txt = f"{row['hd']:11.4f}" if gt_dists is not None else f"{'n/a':>11}"
+        print(
+            f"{lthr:6.2f}  {row['dsc']:10.4f}  {row['prec']:8.4f}  {row['rec']:8.4f}  "
+            f"{hd_txt}  {row['overall']:12.4f}"
+        )
+    best_large = max(large_rows, key=lambda r: r["dsc"] if r["dsc"] == r["dsc"] else -1)
+    print(
+        f"\n  Large 최적: thr={best_large['thr']:.2f}  DSC={best_large['dsc']:.4f}  "
+        f"P={best_large['prec']:.4f}  R={best_large['rec']:.4f}  overall={best_large['overall']:.4f}"
+    )
+    print(f"  권장 Stage 2 임계값: {fixed_thr[0]:.2f},{fixed_thr[1]:.2f},{best_large['thr']:.2f}")
 
     if args.plot:
         _plot(args.plot, thresholds, results, counts, overall, agg, base)

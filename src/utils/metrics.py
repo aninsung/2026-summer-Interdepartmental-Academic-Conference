@@ -63,3 +63,25 @@ def gt_size_class(gt: np.ndarray) -> int:
     if area < 700:
         return 1
     return 2
+
+
+def filter_small_components(mask: np.ndarray, min_size: int) -> np.ndarray:
+    """min_size 미만 연결요소를 제거한다. 전부 사라지면 원본 이진화 마스크를 유지한다."""
+    from scipy.ndimage import label as cc_label
+
+    if min_size <= 0:
+        return mask.astype(np.float32)
+    binary = (mask > 0.5).astype(np.uint8)
+    labeled, n = cc_label(binary)
+    if n == 0:
+        return binary.astype(np.float32)
+    out = np.zeros_like(binary, dtype=np.float32)
+    kept = 0
+    for i in range(1, n + 1):
+        comp = labeled == i
+        if int(comp.sum()) >= min_size:
+            out[comp] = 1.0
+            kept += 1
+    if kept == 0:
+        return binary.astype(np.float32)
+    return out

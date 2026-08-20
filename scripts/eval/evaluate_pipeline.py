@@ -6,7 +6,7 @@ import numpy as np
 from src.data.brats2020_dataset import BraTS2020Dataset
 from src.data.patient_split import load_or_create_patient_split, DEFAULT_SPLIT_PATH
 from src.models.dynamic_router import AdaptivePipeline
-from src.utils.metrics import apply_monotonic_dsc_gate, dice, hd95, precision, recall
+from src.utils.metrics import apply_monotonic_dsc_gate, dice, filter_small_components, hd95, precision, recall
 from src.envs.mask_refinement_env import MaskRefinementEnv
 from stable_baselines3 import PPO
 from scipy.ndimage import sobel, binary_dilation, binary_erosion, binary_closing, binary_opening
@@ -96,19 +96,25 @@ def main():
     parser.add_argument("--split_role", type=str, default="val", choices=["train", "val", "all"])
     parser.add_argument("--oracle_routing", action="store_true", help="GT 면적으로 Expert를 고르는 상한 평가")
     parser.add_argument("--confidence_threshold", type=float, default=None, help="이 값 이상 평균 확률이면 PPO 생략")
-    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.60",
-                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. train split 스윕으로 선택.")
+    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
+                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. Large는 과소분할이라 0.50.")
     parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
     parser.add_argument("--micro_area_floor", type=float, default=80.0,
                         help="Small 마스크 면적이 이 값 미만이면 임계값을 단계적으로 낮춘다.")
     parser.add_argument("--micro_thr_floor", type=float, default=0.15,
                         help="마이크로 조각 임계값 완화의 하한.")
+    parser.add_argument("--cc_min_sizes", type=str, default="0,15,25",
+                        help="클래스별(Small,Medium,Large) 연결요소 최소 픽셀. 0이면 비활성.")
     args = parser.parse_args()
 
     stage2_thr = [float(t) for t in args.stage2_thresholds.split(",")]
     if len(stage2_thr) != 3:
         parser.error("--stage2_thresholds 는 쉼표로 구분된 3개 값이어야 합니다.")
+    cc_min = [int(t) for t in args.cc_min_sizes.split(",")]
+    if len(cc_min) != 3:
+        parser.error("--cc_min_sizes 는 쉼표로 구분된 3개 정수여야 합니다.")
     print(f"Stage 2 이진화 임계값: Small={stage2_thr[0]}, Medium={stage2_thr[1]}, Large={stage2_thr[2]}")
+    print(f"CC filter min_size: Small={cc_min[0]}, Medium={cc_min[1]}, Large={cc_min[2]}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -130,8 +136,8 @@ def main():
     
     # Extract arrays
     images, gt_masks, _ = dataset.get_numpy_arrays()
+    images_25d = dataset.get_numpy_25d_arrays()
     
-    # 2. Stage 1 & 2: Dynamic Router
     print("Loading 3-Stage Pipeline Models...")
     in_ch = images.shape[1] if images.ndim == 4 else 1
     pipeline = AdaptivePipeline(device, in_channels=in_ch)
@@ -179,8 +185,9 @@ def main():
     
     print("\nStarting Evaluation...")
     for i in range(len(images)):
-        img_np = images[i]
+        img_np = images_25d[i]
         gt_np = gt_masks[i]
+        center_np = images[i]
         
         if img_np.ndim == 2:
             img_t = torch.from_numpy(img_np).unsqueeze(0).unsqueeze(0).to(device)
@@ -221,6 +228,7 @@ def main():
                 rough_mask_np = cand_mask
                 if np.sum(cand_mask) >= args.micro_area_floor:
                     break
+        rough_mask_np = filter_small_components(rough_mask_np, cc_min[c])
             
         init_dsc = dice(rough_mask_np, gt_np)
         init_hd95 = hd95(rough_mask_np, gt_np)
@@ -264,9 +272,9 @@ def main():
             dilate_iter = 2 if ck == 0 else 3
             comp_dilated = binary_dilation(comp_mask_k, struct_k, iterations=dilate_iter)
             is_micro = (ck == 0 and comp_area < 50)
-            # TTA 재이진화도 Stage 2와 같은 임계값을 써야 한다.
-            # 0.50 고정이면 상향된 Stage 2 마스크를 다시 느슨하게 되돌린다.
-            tta_thr = 0.30 if is_micro else stage2_thr[ck]
+            # TTA 재이진화는 Stage 2와 같은 슬라이스 클래스 임계값을 쓴다.
+            # 컴포넌트 크기 ck 로 자르면 Large 슬라이스의 작은 덩어리가 Small 0.80으로 다시 잘린다.
+            tta_thr = 0.30 if is_micro else stage2_thr[c]
             comp_from_tta = (prob_tta_np > tta_thr).astype(np.float32) * comp_dilated
             if np.sum(comp_from_tta) == 0:
                 comp_from_tta = comp_mask_k.copy()
@@ -335,7 +343,7 @@ def main():
         # Save representative samples per class for visualization later
         all_candidates.append({
             "class": c,
-            "img": img_np[0] if img_np.ndim == 3 else img_np,
+            "img": center_np[0] if center_np.ndim == 3 else center_np,
             "gt": gt_np,
             "rough": rough_mask_np,
             "final": final_mask_np,
@@ -347,7 +355,9 @@ def main():
         if (i+1) % 100 == 0:
             print(f"Processed {i+1}/{len(images)} slices...")
             
-    print("\n--- Pipeline Evaluation (classifier routing, PPO all classes, monotonic DSC gate) ---")
+    print("\n--- Pipeline Evaluation ({routing}, PPO all classes, monotonic DSC gate, CC filter) ---".format(
+        routing="oracle routing" if args.oracle_routing else "classifier routing"
+    ))
     print(f"Total Slices Evaluated: {len(initial_dsc_list)}")
     print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
     print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
@@ -382,16 +392,40 @@ def main():
               f"| Initial DSC: {np.mean(small_micro_init):.4f} -> Final DSC: {np.mean(small_micro_fin):.4f} "
               f"| Initial HD95: {np.mean(small_micro_init_hd):.4f} -> Final HD95: {np.mean(small_micro_hd):.4f} (px)")
     
-    # 시각화: 클래스별 Rough vs RL DSC 차이가 가장 큰 원본 2장 → 총 6장
+    # 시각화: 클래스 평균 Final DSC에 가깝고, Final > Initial인 원본 2장 → 총 6장
+    pipeline_samples = _select_pipeline_samples(all_candidates, class_final_dsc, n=2)
+    _plot_pipeline_results(pipeline_samples, output_dir="results")
+
+
+def _select_pipeline_samples(all_candidates, class_final_dsc, n=2):
+    """클래스 평균 Final DSC에 가깝고, PPO가 실제로 올린 슬라이스의 원본을 고른다."""
+    names = {0: "Small", 1: "Medium", 2: "Large"}
     pipeline_samples = {}
     for c in [0, 1, 2]:
         class_candidates = [s for s in all_candidates if s["class"] == c]
-        class_candidates.sort(key=lambda x: (abs(x["delta_dsc"]), x["fin_dsc"]), reverse=True)
-        pipeline_samples[c] = class_candidates[:2]
-        print(f"[Viz] class {c}: selected {len(pipeline_samples[c])} samples "
-              f"(ΔDSC={[round(s['delta_dsc'], 4) for s in pipeline_samples[c]]})")
-
-    _plot_pipeline_results(pipeline_samples, output_dir="results")
+        if not class_candidates:
+            pipeline_samples[c] = []
+            continue
+        mean_fin = float(np.mean(class_final_dsc[c])) if class_final_dsc[c] else float(
+            np.mean([s["fin_dsc"] for s in class_candidates])
+        )
+        improved = [s for s in class_candidates if s["fin_dsc"] > s["init_dsc"] + 1e-8]
+        used_fallback = False
+        if improved:
+            pool = improved
+        else:
+            pool = class_candidates
+            used_fallback = True
+        pool = sorted(pool, key=lambda s: abs(s["fin_dsc"] - mean_fin))
+        selected = pool[:n]
+        pipeline_samples[c] = selected
+        print(
+            f"[Viz] {names[c]}: mean Final DSC={mean_fin:.4f}, "
+            f"pool={'final>initial' if not used_fallback else 'fallback(all)'} n={len(pool)}, "
+            f"selected Final={[round(s['fin_dsc'], 4) for s in selected]} "
+            f"Δ={[round(s['delta_dsc'], 4) for s in selected]}"
+        )
+    return pipeline_samples
 
 
 def _crop_box(gt: np.ndarray, margin: int = 15):
@@ -407,6 +441,21 @@ def _crop_box(gt: np.ndarray, margin: int = 15):
         ymin, ymax = 0, gt.shape[0] - 1
         xmin, xmax = 0, gt.shape[1] - 1
     return xmin, xmax, ymin, ymax
+
+
+def _save_original(s: dict, save_path: str):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    img = s["img"]
+    fig, ax = plt.subplots(1, 1, figsize=(4.0, 4.0))
+    ax.imshow(img, cmap="gray", vmin=0, vmax=1)
+    ax.set_axis_off()
+    plt.tight_layout(pad=0)
+    plt.savefig(save_path, dpi=150, bbox_inches="tight", pad_inches=0)
+    plt.close()
+    print(f"[Viz] original saved {save_path}")
 
 
 def _plot_one_sample(s: dict, title: str, save_path: str):
@@ -477,7 +526,10 @@ def _plot_pipeline_results(pipeline_samples: dict, output_dir: str = "results"):
             fname = f"pipeline_sample_{class_names[c]}_{idx + 1}.png"
             save_path = os.path.join(output_dir, fname)
             _plot_one_sample(s, title, save_path)
+            orig_path = os.path.join(output_dir, f"pipeline_sample_{class_names[c]}_{idx + 1}_original.png")
+            _save_original(s, orig_path)
             saved_files.append(save_path)
+            saved_files.append(orig_path)
             sample_list.append(s)
             class_labels.append(f"{class_titles[c]}\nSample {idx + 1}")
 

@@ -4,19 +4,20 @@ import torch.nn as nn
 from src.models.shape_classifier import build_shape_classifier
 from src.models import build_unet, build_unetplusplus, build_segresnet, build_attention_unet, build_caranet
 from src.models.unet3plus import build_unet3plus
+from src.models.segresnet import region_logits_to_wt
 import numpy as np
 
 class AdaptivePipeline(nn.Module):
     """
-    3-Stage Adaptive Pipeline - Stage 1 & 2 
-    1. MRI(T1ce) 입력 -> Shape Classifier가 종양 크기 클래스(0, 1, 2) 예측
-    2. 클래스에 맞춰 알맞은 Expert Backbone(Attention U-Net, UNet++, SegResNet)을 선택하여 분할(Segmentation) 수행
+    3-Stage Adaptive Pipeline - Stage 1 & 2
+    Small Expert는 2.5D(prev/center/next) 입력을 쓰고,
+    Large Expert는 ED/TC 2채널 출력을 WT로 합친다.
     """
     def __init__(self, device, in_channels=1):
         super().__init__()
         self.device = device
+        self.base_in_channels = in_channels
         
-        # 1. Shape Classifier 로드 (가중치 파일의 채널 수 자동 감지)
         cls_ckpt = 'checkpoints/shape_classifier_best.pt'
         cls_in_channels = in_channels
         if os.path.exists(cls_ckpt):
@@ -29,8 +30,6 @@ class AdaptivePipeline(nn.Module):
             self.classifier = build_shape_classifier(in_channels=in_channels, num_classes=3).to(device)
         self.classifier.eval()
         
-        # 2. Expert 백본 모델 로드 (가중치 파일의 채널 수 자동 감지)
-        # Expert 0 (Small): CaraNet (Sniper for Small Objects)
         self.expert_small = self._load_expert(
             'checkpoints/caranet_best.pt',
             build_caranet,
@@ -38,14 +37,16 @@ class AdaptivePipeline(nn.Module):
             build_attention_unet,
             fallback_fn=build_caranet,
             device=device,
-            in_channels=in_channels,
+            in_channels=in_channels * 3,
+            out_channels=1,
             desc_primary="Expert 0 (Small): CaraNet",
             desc_secondary="Expert 0 (Small): Attention U-Net (Fallback)",
-            desc_fallback="Expert 0 (Small): Default CaraNet"
+            desc_fallback="Expert 0 (Small): Default CaraNet",
         )
         self.expert_small.eval()
+        self.small_zoom = True
+        self.small_zoom_patch = 64
         
-        # Expert 1 (Medium): UNet++ / UNet 3+
         self.expert_medium = self._load_expert(
             'checkpoints/unetplusplus_best.pt',
             build_unetplusplus,
@@ -54,13 +55,13 @@ class AdaptivePipeline(nn.Module):
             fallback_fn=build_unetplusplus,
             device=device,
             in_channels=in_channels,
+            out_channels=1,
             desc_primary="Expert 1 (Medium): UNet++",
             desc_secondary="Expert 1 (Medium): UNet 3+",
-            desc_fallback="Expert 1 (Medium): Default UNet++"
+            desc_fallback="Expert 1 (Medium): Default UNet++",
         )
         self.expert_medium.eval()
         
-        # Expert 2 (Large): SegResNet
         self.expert_large = self._load_expert(
             'checkpoints/segresnet_best.pt',
             build_segresnet,
@@ -69,28 +70,66 @@ class AdaptivePipeline(nn.Module):
             fallback_fn=build_segresnet,
             device=device,
             in_channels=in_channels,
+            out_channels=2,
             desc_primary="Expert 2 (Large): SegResNet",
             desc_secondary="",
-            desc_fallback="Expert 2 (Large): Default SegResNet"
+            desc_fallback="Expert 2 (Large): Default SegResNet",
         )
         self.expert_large.eval()
 
-    def _load_expert(self, primary_ckpt, primary_fn, secondary_ckpt, secondary_fn, fallback_fn, device, in_channels, desc_primary, desc_secondary, desc_fallback):
+    def _load_expert(
+        self,
+        primary_ckpt,
+        primary_fn,
+        secondary_ckpt,
+        secondary_fn,
+        fallback_fn,
+        device,
+        in_channels,
+        out_channels,
+        desc_primary,
+        desc_secondary,
+        desc_fallback,
+    ):
         for ckpt, fn, desc in [(primary_ckpt, primary_fn, desc_primary), (secondary_ckpt, secondary_fn, desc_secondary)]:
             if ckpt and os.path.exists(ckpt):
                 print(f"[Router] Loading {desc} ({ckpt})...")
                 st = torch.load(ckpt, map_location=device, weights_only=True)
-                ex_in_ch = in_channels
-                for v in st.values():
-                    if hasattr(v, 'ndim') and v.ndim == 4:
-                        ex_in_ch = v.shape[1]
-                        break
-                model = fn(in_channels=ex_in_ch, out_channels=1).to(device)
-                model.load_state_dict(st)
-                return model
+                convs = [v for v in st.values() if hasattr(v, "ndim") and v.ndim == 4]
+                ex_in_ch = convs[0].shape[1] if convs else in_channels
+                ex_out_ch = convs[-1].shape[0] if convs else out_channels
+                try:
+                    model = fn(in_channels=ex_in_ch, out_channels=ex_out_ch).to(device)
+                    model.load_state_dict(st)
+                    return model
+                except Exception as e:
+                    print(f"[Router] {desc} load failed ({e}), trying default out_channels={out_channels}")
+                    model = fn(in_channels=ex_in_ch, out_channels=out_channels).to(device)
+                    model.load_state_dict(st, strict=False)
+                    return model
         print(f"[Router] Loading {desc_fallback}...")
-        return fallback_fn(in_channels=in_channels, out_channels=1).to(device)
-        
+        return fallback_fn(in_channels=in_channels, out_channels=out_channels).to(device)
+
+    def _match_in_channels(self, img, exp_in_ch):
+        c = img.shape[1]
+        if c == exp_in_ch:
+            return img
+        if c % 3 == 0:
+            base = c // 3
+            if exp_in_ch == base:
+                return img[:, base:2 * base]
+            if exp_in_ch == c:
+                return img
+        if c < exp_in_ch and exp_in_ch % c == 0:
+            return img.repeat(1, exp_in_ch // c, 1, 1)
+        if c > exp_in_ch:
+            if c % 3 == 0:
+                base = c // 3
+                start = base if exp_in_ch <= base else 0
+                return img[:, start:start + exp_in_ch]
+            return img[:, :exp_in_ch]
+        return img.repeat(1, exp_in_ch, 1, 1)[:, :exp_in_ch]
+
     @torch.no_grad()
     def _forward_expert(self, expert, img):
         exp_in_ch = 1
@@ -98,47 +137,46 @@ class AdaptivePipeline(nn.Module):
             if isinstance(m, nn.Conv2d):
                 exp_in_ch = m.weight.shape[1]
                 break
-        if img.shape[1] != exp_in_ch:
-            if img.shape[1] == 1:
-                img_inp = img.repeat(1, exp_in_ch, 1, 1)
-            else:
-                img_inp = img[:, :exp_in_ch, :, :]
-        else:
-            img_inp = img
-        return expert(img_inp)
+        return expert(self._match_in_channels(img, exp_in_ch))
+
+    def _to_wt_prob(self, logits):
+        prob = torch.sigmoid(logits)
+        if prob.shape[1] == 1:
+            return prob
+        return region_logits_to_wt(prob, from_logits=False)
 
     def forward(self, x, true_class_preds=None):
         """
-        x: (B, C, H, W) 텐서
-        true_class_preds: (B,) 정답 기반 수학적 클래스 (옵션)
-        반환: rough_mask (B, 1, H, W) 텐서, class_preds (B,) 텐서
+        x: (B, C, H, W) — C는 중심 모달리티이거나 2.5D(3C).
         """
-        # 1. 형태/크기 분류 (채널 수 차이 발생 시 자동 적응)
         if true_class_preds is not None:
             class_preds = true_class_preds
         else:
             cls_in_ch = self.classifier.conv1.weight.shape[1]
-            if x.shape[1] != cls_in_ch:
-                if x.shape[1] == 1:
-                    x_cls = x.repeat(1, cls_in_ch, 1, 1)
-                else:
-                    x_cls = x[:, :cls_in_ch, :, :]
-            else:
-                x_cls = x
+            x_cls = self._match_in_channels(x, cls_in_ch)
             class_logits = self.classifier(x_cls)
             _, class_preds = torch.max(class_logits, 1)
         
-        # 2. 결과 저장용 텐서 (마스크는 항상 1채널)
         B, C, H, W = x.shape
         rough_masks = torch.zeros((B, 1, H, W), device=x.device, dtype=x.dtype)
         
-        # 3. 클래스별 배치 라우팅
         experts = [self.expert_small, self.expert_medium, self.expert_large]
         for c, expert in enumerate(experts):
             idx = (class_preds == c).nonzero(as_tuple=True)[0]
             if idx.numel() == 0:
                 continue
-            out = torch.sigmoid(self._forward_expert(expert, x[idx]))
+            logits = self._forward_expert(expert, x[idx])
+            out = self._to_wt_prob(logits)
+            if c == 0 and self.small_zoom:
+                from src.utils.zoom_crop import refine_with_zoom
+                out = refine_with_zoom(
+                    lambda z: self._forward_expert(expert, z),
+                    x[idx],
+                    out,
+                    patch_size=self.small_zoom_patch,
+                )
+                if out.shape[1] != 1:
+                    out = self._to_wt_prob(out)
             rough_masks[idx] = out
                 
         return rough_masks, class_preds

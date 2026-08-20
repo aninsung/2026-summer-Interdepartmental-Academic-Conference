@@ -25,9 +25,11 @@ GT 레이블(seg) 값:
   → 이진화: 0 이외 = 종양 (Whole Tumor)
 
 출력 슬라이스:
-  - image      : (1, H, W)  — 단일 채널 MRI 이미지
-  - gt_mask    : (1, H, W)  — 이진 Whole Tumor 마스크
-  - rough_mask : (1, H, W)  — make_noisy_mask()로 시뮬레이션한 U-Net 초기 예측
+  - image       : (C, H, W)     — 중심 슬라이스 MRI (모달리티 수 C)
+  - image_25d   : (3C, H, W)    — z-1 / z / z+1 스택 (Small 2.5D용)
+  - gt_mask     : (1, H, W)     — 이진 Whole Tumor 마스크
+  - gt_regions  : (2, H, W)     — ED(label 2), TC(NCR∪ET)
+  - rough_mask  : (1, H, W)     — make_noisy_mask()로 시뮬레이션한 초기 예측
 """
 
 import os
@@ -112,6 +114,17 @@ def _find_seg_file(pdir: Path, pid: str) -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def _clip_z(z: int, depth: int) -> int:
+    return int(max(0, min(depth - 1, z)))
+
+
+def regions_from_seg(seg: np.ndarray) -> np.ndarray:
+    """BraTS 레이블 → (2, H, W) = ED(label 2), TC(NCR 1 ∪ ET 4)."""
+    ed = (seg == 2).astype(np.float32)
+    tc = np.isin(seg, (1, 4)).astype(np.float32)
+    return np.stack([ed, tc], axis=0)
 
 
 def _select_slices(
@@ -277,30 +290,30 @@ class BraTS2020Dataset(Dataset):
                 # 유효 슬라이스 선택
                 valid_zs = _select_slices(seg_vol, self.min_tumor_ratio)
                 for z in valid_zs:
-                    if len(mod_vols) == 1:
-                        img_sl = mod_vols[0][:, :, z]                            # (H,W)
-                        if self.target_size > 0:
-                            img_sl = self._resize(img_sl)
-                    else:
-                        channels = []
-                        for m_vol in mod_vols:
-                            c_sl = m_vol[:, :, z]
-                            if self.target_size > 0:
-                                c_sl = self._resize(c_sl)
-                            channels.append(c_sl)
-                        img_sl = np.stack(channels, axis=0)                     # (C,H,W)
+                    img_sl = self._modal_slice(mod_vols, z)
+                    img_25d = np.concatenate(
+                        [
+                            self._modal_slice(mod_vols, z - 1),
+                            img_sl,
+                            self._modal_slice(mod_vols, z + 1),
+                        ],
+                        axis=0,
+                    )
+                    if img_sl.shape[0] == 1:
+                        img_sl = img_sl[0]
 
-                    gt_sl  = (seg_vol[:, :, z] > 0).astype(np.float32)          # 이진화
+                    gt_sl = (seg_vol[:, :, z] > 0).astype(np.float32)
+                    seg_sl = seg_vol[:, :, z].astype(np.float32)
                     if self.target_size > 0:
-                        gt_sl  = self._resize(gt_sl, is_mask=True)
+                        gt_sl = self._resize(gt_sl, is_mask=True)
+                        seg_sl = np.rint(self._resize(seg_sl, is_mask=True)).astype(np.float32)
 
-                    # rough_mask 생성
                     if self.simulate_rough:
                         rough_sl = make_noisy_mask(gt_sl, self.rng)
                     else:
                         rough_sl = gt_sl.copy()
 
-                    self._samples.append((img_sl, gt_sl, rough_sl, has_et))
+                    self._samples.append((img_sl, gt_sl, rough_sl, has_et, img_25d, seg_sl))
                     self._sample_pids.append(pid)
 
                 total_slices += len(valid_zs)
@@ -317,6 +330,17 @@ class BraTS2020Dataset(Dataset):
                 continue
 
         print(f"[BraTS Dataset] 완료: 총 {total_slices}개 유효 슬라이스 로드. (건너뜀: {skipped}명)")
+
+    def _modal_slice(self, mod_vols: List[np.ndarray], z: int) -> np.ndarray:
+        """모달리티 볼륨에서 z 슬라이스를 (C, H, W)로 반환. 범위 밖은 가장자리로 클램프."""
+        z = _clip_z(z, int(mod_vols[0].shape[2]))
+        channels = []
+        for m_vol in mod_vols:
+            sl = m_vol[:, :, z]
+            if self.target_size > 0:
+                sl = self._resize(sl)
+            channels.append(sl)
+        return np.stack(channels, axis=0).astype(np.float32)
 
     def _resize(self, arr: np.ndarray, is_mask: bool = False) -> np.ndarray:
         """간단한 바이선형/최근접 이웃 리사이즈 (skimage)."""
@@ -337,16 +361,32 @@ class BraTS2020Dataset(Dataset):
         return len(self._samples)
 
     def __getitem__(self, idx: int) -> dict:
-        img, gt, rough, has_et = self._samples[idx]
+        sample = self._samples[idx]
+        img, gt, rough, has_et = sample[0], sample[1], sample[2], sample[3]
+        img_25d = sample[4] if len(sample) > 4 else None
+        seg_sl = sample[5] if len(sample) > 5 else None
         if img.ndim == 2:
-            img_tensor = torch.from_numpy(img).unsqueeze(0)  # (1,H,W)
+            img_tensor = torch.from_numpy(img).unsqueeze(0)
         else:
-            img_tensor = torch.from_numpy(img)              # (C,H,W)
-            
+            img_tensor = torch.from_numpy(img)
+
+        if img_25d is None:
+            img_25d_t = torch.cat([img_tensor, img_tensor, img_tensor], dim=0)
+        else:
+            img_25d_t = torch.from_numpy(img_25d)
+
+        if seg_sl is not None:
+            gt_regions = torch.from_numpy(regions_from_seg(seg_sl))
+        else:
+            wt = torch.from_numpy(gt).unsqueeze(0)
+            gt_regions = torch.cat([wt, wt], dim=0)
+
         return {
             "image":      img_tensor,
-            "gt_mask":    torch.from_numpy(gt).unsqueeze(0),     # (1,H,W)
-            "rough_mask": torch.from_numpy(rough).unsqueeze(0),  # (1,H,W)
+            "image_25d":  img_25d_t,
+            "gt_mask":    torch.from_numpy(gt).unsqueeze(0),
+            "gt_regions": gt_regions,
+            "rough_mask": torch.from_numpy(rough).unsqueeze(0),
             "has_et":     has_et,
         }
 
@@ -359,6 +399,20 @@ class BraTS2020Dataset(Dataset):
         gts    = np.stack([s[1] for s in self._samples], axis=0)
         roughs = np.stack([s[2] for s in self._samples], axis=0)
         return imgs, gts, roughs
+
+    def get_numpy_25d_arrays(self) -> np.ndarray:
+        """(N, 3C, H, W) prev/center/next. 없으면 center를 세 번 복제."""
+        stacks = []
+        for s in self._samples:
+            if len(s) > 4 and s[4] is not None:
+                stacks.append(s[4])
+                continue
+            img = s[0]
+            if img.ndim == 2:
+                stacks.append(np.stack([img, img, img], axis=0))
+            else:
+                stacks.append(np.concatenate([img, img, img], axis=0))
+        return np.stack(stacks, axis=0)
 
     def get_et_presence_array(self) -> np.ndarray:
         """

@@ -23,7 +23,15 @@ from monai.networks.layers.factories import Dropout
 from monai.networks.layers.utils import get_act_layer, get_norm_layer
 from monai.utils import UpsampleMode
 
-__all__ = ["SegResNet", "SegResNetVAE", "build_segresnet", "BCEDiceLoss", "BoundaryLoss"]
+__all__ = [
+    "SegResNet",
+    "SegResNetVAE",
+    "build_segresnet",
+    "BCEDiceLoss",
+    "BoundaryLoss",
+    "MultiChannelBCEDiceLoss",
+    "region_logits_to_wt",
+]
 
 
 class SegResNet(nn.Module):
@@ -369,6 +377,29 @@ class BCEDiceLoss(nn.Module):
         dice_loss = 1.0 - dsc.mean()
 
         return self.bce_weight * bce_loss + (1 - self.bce_weight) * dice_loss
+
+
+class MultiChannelBCEDiceLoss(nn.Module):
+    """채널별 BCEDice를 평균. ED / TC 분리 학습용."""
+
+    def __init__(self, bce_weight: float = 0.5):
+        super().__init__()
+        self.inner = BCEDiceLoss(bce_weight=bce_weight)
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        losses = [
+            self.inner(pred[:, c : c + 1], target[:, c : c + 1])
+            for c in range(pred.shape[1])
+        ]
+        return torch.stack(losses).mean()
+
+
+def region_logits_to_wt(prob_or_logits: torch.Tensor, from_logits: bool = False) -> torch.Tensor:
+    """(B, 2, H, W) ED/TC → (B, 1, H, W) WT 확률."""
+    p = torch.sigmoid(prob_or_logits) if from_logits else prob_or_logits
+    if p.shape[1] == 1:
+        return p
+    return 1.0 - (1.0 - p[:, :1]) * (1.0 - p[:, 1:2])
 
 from src.envs.mask_refinement_env import _hd95
 

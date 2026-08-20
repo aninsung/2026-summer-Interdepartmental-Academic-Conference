@@ -29,7 +29,15 @@ from torch.utils.data import DataLoader
 # 프로젝트 루트를 경로에 추가
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from src.models.segresnet import build_segresnet, DiceLoss, BCEDiceLoss, BoundaryLoss, compute_dice
+from src.models.segresnet import (
+    build_segresnet,
+    DiceLoss,
+    BCEDiceLoss,
+    BoundaryLoss,
+    MultiChannelBCEDiceLoss,
+    compute_dice,
+    region_logits_to_wt,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -60,6 +68,7 @@ def train_segresnet(
     patient_split: str = None,
     seed: int = 42,
     deterministic: bool = False,
+    multi_region: bool = True,
 ) -> None:
     from src.utils.seed import set_seed
     set_seed(seed, deterministic)
@@ -99,32 +108,47 @@ def train_segresnet(
         )
 
     log.info(f"학습 슬라이스: {len(train_ds)}  |  검증 슬라이스: {len(val_ds)}")
+    if multi_region:
+        log.info("Large 영역 헤드: ED + TC(NCR∪ET) → 추론 WT = ED ∪ TC")
 
-    # ── Data Augmentation (학습 시에만) ────────────────────
     def augment_batch(batch):
-        """랜덤 수평 뒤집기 + 랜덤 90° 회전 augmentation."""
-        import torch
         images = torch.stack([b["image"] for b in batch])
         gt_masks = torch.stack([b["gt_mask"] for b in batch])
         rough_masks = torch.stack([b["rough_mask"] for b in batch])
+        gt_regions = torch.stack([b["gt_regions"] for b in batch]) if multi_region else None
 
         if augment:
             for i in range(images.size(0)):
-                # 랜덤 수평 뒤집기 (50% 확률)
                 if torch.rand(1).item() > 0.5:
                     images[i] = torch.flip(images[i], dims=[-1])
                     gt_masks[i] = torch.flip(gt_masks[i], dims=[-1])
-                # 랜덤 수직 뒤집기 (50% 확률)
+                    if gt_regions is not None:
+                        gt_regions[i] = torch.flip(gt_regions[i], dims=[-1])
                 if torch.rand(1).item() > 0.5:
                     images[i] = torch.flip(images[i], dims=[-2])
                     gt_masks[i] = torch.flip(gt_masks[i], dims=[-2])
-                # 랜덤 90° 회전 (25% 확률)
+                    if gt_regions is not None:
+                        gt_regions[i] = torch.flip(gt_regions[i], dims=[-2])
                 if torch.rand(1).item() > 0.75:
                     k = torch.randint(1, 4, (1,)).item()
                     images[i] = torch.rot90(images[i], k, dims=[-2, -1])
                     gt_masks[i] = torch.rot90(gt_masks[i], k, dims=[-2, -1])
+                    if gt_regions is not None:
+                        gt_regions[i] = torch.rot90(gt_regions[i], k, dims=[-2, -1])
 
-        return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
+        out = {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
+        if gt_regions is not None:
+            out["gt_regions"] = gt_regions
+        return out
+
+    def val_collate(batch):
+        images = torch.stack([b["image"] for b in batch])
+        gt_masks = torch.stack([b["gt_mask"] for b in batch])
+        rough_masks = torch.stack([b["rough_mask"] for b in batch])
+        out = {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
+        if multi_region:
+            out["gt_regions"] = torch.stack([b["gt_regions"] for b in batch])
+        return out
 
     n_workers = 0
     train_loader = DataLoader(
@@ -135,7 +159,7 @@ def train_segresnet(
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         num_workers=n_workers, pin_memory=True,
-        collate_fn=augment_batch,
+        collate_fn=val_collate,
     )
     log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
 
@@ -143,31 +167,30 @@ def train_segresnet(
     sample_item = train_ds[0]
     sample_img = sample_item["image"]
     in_ch = sample_img.shape[0] if sample_img.ndim == 3 else 1
+    out_ch = 2 if multi_region else 1
     model = build_segresnet(
         in_channels=in_ch,
-        out_channels=1,
+        out_channels=out_ch,
         init_filters=init_filters,
         dropout_prob=dropout_prob,
     ).to(device)
 
-    if pretrained_path and os.path.exists(pretrained_path):
-        log.info(f"Loading pre-trained weights from {pretrained_path} for fine-tuning...")
-        state_dict = torch.load(pretrained_path, map_location=device)
-        model_state = model.state_dict()
-        for k, v in list(state_dict.items()):
-            if k in model_state and model_state[k].shape != v.shape:
-                log.warning(f"Shape mismatch for {k}: checkpoint {v.shape} vs model {model_state[k].shape}. Adapting weights...")
-                if v.ndim == 4 and v.shape[1] == 1 and model_state[k].shape[1] > 1:
-                    state_dict[k] = v.repeat(1, model_state[k].shape[1], 1, 1) / model_state[k].shape[1]
-                else:
-                    del state_dict[k]
-        model.load_state_dict(state_dict, strict=False)
+    init_path = pretrained_path if pretrained_path and os.path.exists(pretrained_path) else (
+        save_path if os.path.exists(save_path) else ""
+    )
+    if init_path:
+        from src.utils.weight_adapt import load_adapted_state_dict
+        log.info(f"기존 가중치에서 초기화: {init_path}")
+        load_adapted_state_dict(model, init_path, device, logger=log)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"SegResNet 파라미터 수: {n_params:,}  (init_filters={init_filters})")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    if loss_type == "boundary":
+    if multi_region:
+        criterion = MultiChannelBCEDiceLoss(bce_weight=0.5).to(device)
+        log.info("손실 함수: MultiChannelBCEDiceLoss (ED + TC)")
+    elif loss_type == "boundary":
         criterion = BoundaryLoss().to(device)
         log.info("손실 함수: BoundaryLoss")
     elif loss_type == "bce_dice":
@@ -181,7 +204,7 @@ def train_segresnet(
     # ── AMP (자동 혼합 정밀도) ──────────────────────────────
     use_amp = (device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    log.info(f"AMP(FP16 혼합 정밀도): {'✅ 활성화' if use_amp else '❌ 비활성화 (CPU)'})")
+    log.info(f"AMP(FP16 혼합 정밀도): {'✅ 활성화' if use_amp else '❌ 비활성화 (CPU)'}")
 
     best_val_dsc = 0.0
     os.makedirs(
@@ -214,7 +237,10 @@ def train_segresnet(
 
         for step, batch in enumerate(pbar, 1):
             img = batch["image"].to(device, non_blocking=True)
-            gt  = batch["gt_mask"].to(device, non_blocking=True)
+            if multi_region:
+                gt = batch["gt_regions"].to(device, non_blocking=True)
+            else:
+                gt = batch["gt_mask"].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred = model(img)
@@ -250,11 +276,12 @@ def train_segresnet(
             )
             for batch in val_iter:
                 img = batch["image"].to(device, non_blocking=True)
-                gt  = batch["gt_mask"].to(device, non_blocking=True)
+                gt_wt = batch["gt_mask"].to(device, non_blocking=True)
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     pred = torch.sigmoid(model(img))
-                pred_bin = (pred > 0.5).float()
-                val_dsc += compute_dice(pred_bin, gt)
+                pred_wt = region_logits_to_wt(pred, from_logits=False)
+                pred_bin = (pred_wt > 0.5).float()
+                val_dsc += compute_dice(pred_bin, gt_wt)
             if USE_TQDM:
                 val_iter.close()
         val_dsc /= len(val_loader)
@@ -350,16 +377,23 @@ if __name__ == "__main__":
         default=False,
         help="Data Augmentation 비활성화",
     )
+    parser.add_argument(
+        "--no_multi_region",
+        action="store_true",
+        help="ED/TC 분리 헤드 비활성화 (단일 WT 채널)",
+    )
     args = parser.parse_args()
     # --no_bce_dice 플래그 처리
     if args.no_bce_dice:
         args.use_bce_dice = False
     # --no_augment → augment=False
     args.augment = not args.no_augment
+    args.multi_region = not args.no_multi_region
     # argparse 전용 키 제거
     d = vars(args)
     d["loss_type"] = d.pop("loss", "bce_dice")
     d.pop("no_bce_dice", None)
     d.pop("no_augment", None)
     d.pop("use_bce_dice", None)
+    d.pop("no_multi_region", None)
     train_segresnet(**d)

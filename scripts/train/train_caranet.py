@@ -72,6 +72,12 @@ def train_caranet(
     patient_split: str = None,
     seed: int = 42,
     deterministic: bool = False,
+    zoom_crop: bool = True,
+    zoom_patch: int = 64,
+    zoom_prob: float = 0.5,
+    focal_tversky: bool = False,
+    fragment_repeats: int = 4,
+    fragment_area: float = 50.0,
 ) -> None:
     from src.utils.seed import set_seed
     set_seed(seed, deterministic)
@@ -112,13 +118,29 @@ def train_caranet(
 
     log.info(f"학습 슬라이스: {len(train_ds)}  |  검증 슬라이스: {len(val_ds)}")
 
-    # ── Data Augmentation ──────────────────────────────────
-    def augment_batch(batch):
-        images = torch.stack([b["image"] for b in batch])
+    if refinement_mode == "small" and fragment_repeats > 1:
+        from src.data.fragment_oversample import FragmentOversample
+        n0 = len(train_ds)
+        train_ds = FragmentOversample(train_ds, min_area=fragment_area, repeats=fragment_repeats)
+        log.info(
+            f"파편 오버샘플: {n0} → {len(train_ds)} "
+            f"(GT < {fragment_area:.0f}px ×{fragment_repeats})"
+        )
+
+    use_zoom = bool(zoom_crop and (refinement_mode == "small"))
+    if use_zoom:
+        log.info(f"Small zoom-crop: patch={zoom_patch}, train_prob={zoom_prob}")
+
+    def _collate(batch, do_augment: bool, do_zoom: bool):
+        def _img(item):
+            t = item.get("image_25d")
+            return t if t is not None else item["image"]
+
+        images = torch.stack([_img(b) for b in batch])
         gt_masks = torch.stack([b["gt_mask"] for b in batch])
         rough_masks = torch.stack([b["rough_mask"] for b in batch])
 
-        if augment:
+        if do_augment:
             for i in range(images.size(0)):
                 if torch.rand(1).item() > 0.5:
                     images[i] = torch.flip(images[i], dims=[-1])
@@ -131,45 +153,50 @@ def train_caranet(
                     images[i] = torch.rot90(images[i], k, dims=[-2, -1])
                     gt_masks[i] = torch.rot90(gt_masks[i], k, dims=[-2, -1])
 
+        if do_zoom:
+            from src.utils.zoom_crop import zoom_tensors
+            out_size = int(images.shape[-1])
+            for i in range(images.size(0)):
+                if torch.rand(1).item() < zoom_prob:
+                    images[i], gt_masks[i] = zoom_tensors(
+                        images[i], gt_masks[i], patch_size=zoom_patch, out_size=out_size
+                    )
+
         return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
 
     n_workers = 0
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         num_workers=n_workers, pin_memory=True,
-        collate_fn=augment_batch,
+        collate_fn=lambda b: _collate(b, do_augment=augment, do_zoom=use_zoom),
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         num_workers=n_workers, pin_memory=True,
-        collate_fn=augment_batch,
+        collate_fn=lambda b: _collate(b, do_augment=False, do_zoom=False),
     )
     log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
 
     # ── 모델 ────────────────────────────────────────────────
     sample_item = train_ds[0]
-    sample_img = sample_item["image"]
+    sample_img = sample_item["image_25d"] if "image_25d" in sample_item else sample_item["image"]
     in_ch = sample_img.shape[0] if sample_img.ndim == 3 else 1
+    log.info(f"CaraNet in_channels={in_ch} (2.5D stacked)" if in_ch > 2 else f"CaraNet in_channels={in_ch}")
     model = build_caranet(
         in_channels=in_ch,
         out_channels=1,
     ).to(device)
 
-    if pretrained_path and os.path.exists(pretrained_path):
-        log.info(f"Loading pre-trained weights from {pretrained_path} for fine-tuning...")
-        state_dict = torch.load(pretrained_path, map_location=device)
-        model_state = model.state_dict()
-        for k, v in list(state_dict.items()):
-            if k in model_state and model_state[k].shape != v.shape:
-                log.warning(f"Shape mismatch for {k}: checkpoint {v.shape} vs model {model_state[k].shape}. Adapting weights...")
-                if v.ndim == 4 and v.shape[1] == 1 and model_state[k].shape[1] > 1:
-                    state_dict[k] = v.repeat(1, model_state[k].shape[1], 1, 1) / model_state[k].shape[1]
-                else:
-                    del state_dict[k]
-        model.load_state_dict(state_dict, strict=False)
+    init_path = pretrained_path if pretrained_path and os.path.exists(pretrained_path) else (
+        save_path if os.path.exists(save_path) else ""
+    )
+    if init_path:
+        from src.utils.weight_adapt import load_adapted_state_dict
+        log.info(f"기존 가중치에서 초기화: {init_path}")
+        load_adapted_state_dict(model, init_path, device, logger=log)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    if refinement_mode == "small":
+    if focal_tversky:
         criterion = FocalTverskyLoss(alpha=tversky_alpha, beta=tversky_beta, gamma=2.0)
         log.info(f"손실 함수: FocalTverskyLoss (alpha={tversky_alpha}, beta={tversky_beta}, gamma=2.0)")
     elif use_bce_dice:
@@ -285,6 +312,13 @@ if __name__ == "__main__":
     parser.add_argument("--pretrained_path", type=str, default="", help="파인튜닝할 사전 학습 가중치 경로")
     parser.add_argument("--tversky_alpha", type=float, default=0.3, help="FocalTverskyLoss alpha")
     parser.add_argument("--tversky_beta", type=float, default=0.7, help="FocalTverskyLoss beta")
+    parser.add_argument("--focal_tversky", action="store_true", help="Small에도 FocalTversky 사용 (기본은 BCEDice)")
+    parser.add_argument("--zoom_crop", action="store_true", default=True, help="Small 학습 시 GT 중심 zoom-crop 혼합")
+    parser.add_argument("--no_zoom_crop", action="store_true", help="zoom-crop 비활성화")
+    parser.add_argument("--zoom_patch", type=int, default=64, help="zoom-crop 패치 한 변")
+    parser.add_argument("--zoom_prob", type=float, default=0.5, help="학습 배치에서 zoom-crop 적용 확률")
+    parser.add_argument("--fragment_repeats", type=int, default=4, help="Small GT <fragment_area 슬라이스 반복 횟수")
+    parser.add_argument("--fragment_area", type=float, default=50.0, help="파편으로 볼 GT 면적 상한")
     # 학습 관련
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
@@ -299,8 +333,11 @@ if __name__ == "__main__":
     if args.no_bce_dice:
         args.use_bce_dice = False
     args.augment = not args.no_augment
+    if args.no_zoom_crop:
+        args.zoom_crop = False
     d = vars(args)
     d.pop("no_bce_dice", None)
     d.pop("no_augment", None)
+    d.pop("no_zoom_crop", None)
     
     train_caranet(**d)
