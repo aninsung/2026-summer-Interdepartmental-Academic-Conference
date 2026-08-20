@@ -100,16 +100,7 @@ python run_pipeline.py batch_size=64
 
 건너뛰기 플래그: `--skip_classifier`, `--skip_experts`, `--skip_agents`, `--skip_eval`.
 
-```mermaid
-flowchart LR
-    A["Stage 1<br/>train_shape_classifier.py"] --> B["Stage 2 Small<br/>train_caranet.py"]
-    B --> C["Stage 2 Medium<br/>train_unetplusplus.py"]
-    C --> D["Stage 2 Large<br/>train_segresnet.py"]
-    D --> E["Stage 3 Small<br/>train_agent.py · caranet"]
-    E --> F["Stage 3 Medium<br/>train_agent.py · unetplusplus"]
-    F --> G["Stage 3 Large<br/>train_agent.py · segresnet"]
-    G --> H["Stage 4<br/>evaluate_pipeline.py"]
-```
+
 
 PPO는 Stage 2 체크포인트가 있어야 `AdaptivePipeline`이 Expert를 로드할 수 있으므로, Expert 학습이 먼저입니다.
 
