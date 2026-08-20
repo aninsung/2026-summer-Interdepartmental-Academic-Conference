@@ -59,7 +59,8 @@
 ---
 
 ## 파이프라인
-<img width="1479" height="731" alt="image" src="https://github.com/user-attachments/assets/569d8b08-1d2a-4725-9231-819e54adf8ad" />
+<img width="1024" height="507" alt="image" src="https://github.com/user-attachments/assets/78c1aab7-dab0-4c6c-a0bd-c5d98093b11a" />
+
 
 
 | 단계 | 역할 | 산출물 |
