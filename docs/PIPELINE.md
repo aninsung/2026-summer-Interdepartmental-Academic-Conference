@@ -21,8 +21,9 @@
 
 원스톱 진입점은 `run_pipeline.py`입니다. 기본 환자 풀은 Stage 1–4 공통 **210명**이고, 이 중 **train 168명 / val 42명**으로 나뉩니다.
 
-<img width="1479" height="731" alt="image" src="https://github.com/user-attachments/assets/5afc1aaa-3348-4cc3-a627-952ad860c8b7" />
 
+
+<img width="1005" height="481" alt="image" src="https://github.com/user-attachments/assets/c12bc699-bed1-4d28-9074-62934d864656" />
 
 
 구현 위치:
