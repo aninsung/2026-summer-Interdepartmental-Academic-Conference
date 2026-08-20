@@ -60,23 +60,6 @@
 
 ## 파이프라인
 
-```mermaid
-flowchart TD
-    A["MRI 슬라이스<br/>T1ce + FLAIR, 128×128"] --> B["Stage 1<br/>Shape Classifier"]
-    B -->|Small &lt;300px| C["Stage 2 Expert<br/>CaraNet"]
-    B -->|Medium 300–700px| D["Stage 2 Expert<br/>UNet++"]
-    B -->|Large ≥700px| E["Stage 2 Expert<br/>SegResNet"]
-    C --> T["클래스별 임계값 이진화<br/>0.80 / 0.80 / 0.60"]
-    D --> T
-    E --> T
-    T --> F["Stage 3 PPO Small<br/>64×64 zoom / 연속 행동"]
-    T --> G["Stage 3 PPO Medium<br/>128×128 / 이산 SDF"]
-    T --> H["Stage 3 PPO Large<br/>128×128 / 이산 SDF"]
-    F --> I["GT-free 면적 게이트<br/>+ Monotonic DSC 게이트"]
-    G --> I
-    H --> I
-    I --> J["최종 마스크"]
-```
 
 | 단계 | 역할 | 산출물 |
 |:---:|---|---|
