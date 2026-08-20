@@ -21,19 +21,8 @@
 
 원스톱 진입점은 `run_pipeline.py`입니다. 기본 환자 풀은 Stage 1–4 공통 **210명**이고, 이 중 **train 168명 / val 42명**으로 나뉩니다.
 
-```mermaid
-flowchart TD
-    MRI["BraTS 슬라이스<br/>T1ce + FLAIR, 128×128"] --> S1["Stage 1<br/>ResNet18 Shape Classifier"]
-    S1 -->|Class 0 · &lt;300 px| E0["Stage 2 Small<br/>CaraNet"]
-    S1 -->|Class 1 · 300–700 px| E1["Stage 2 Medium<br/>UNet++"]
-    S1 -->|Class 2 · ≥700 px| E2["Stage 2 Large<br/>SegResNet"]
-    E0 --> T["클래스별 임계값 이진화<br/>0.80 / 0.80 / 0.60"]
-    E1 --> T
-    E2 --> T
-    T --> R0["Stage 3 PPO<br/>Small: 64×64 zoom · 연속 Box(-2,2)⁸<br/>Medium/Large: 128×128 · 이산 5×8"]
-    R0 --> GATE["GT-free 면적 게이트 (0.2×~4×)<br/>+ Monotonic DSC Gate<br/>final DSC &lt; initial → Stage 2 유지"]
-    GATE --> OUT["최종 마스크 + DSC / HD95 / P / R"]
-```
+![Uploading image.png…]()
+
 
 구현 위치:
 
