@@ -28,10 +28,11 @@
 | Small Expert | CaraNet **2.5D** + `<50px` ×4 오버샘플 + zoom-crop, BCEDice |
 | Large Expert | 전 구간 학습 + **ED/TC** 2채널 → WT 합집합 |
 | Stage 3 | 세 클래스 **모두** PPO `predict()` 15스텝. 초안 마스크는 평가와 같은 임계값으로 이진화 |
-| 안전장치 | GT-free 면적 게이트(0.2×–4×) + **Monotonic DSC Gate**(DSC만 판정) |
+| 안전장치 | **GT-free 면적**(0.2×–4×, 배포 가능) + **Monotonic DSC Gate**(GT, 상한) |
+| Confidence skip | 기본 **OFF** (`--confidence_threshold` 미지정) |
 | 시드 / 결정적 모드 | 42 / ON |
 
-이전 문서의 **Dual Monotonic Safety Gate**(DSC 하락 **또는 HD95 증가** 시 원복)는 현재 코드에 없습니다. 지금은 DSC만 판정합니다.
+이전 문서의 **Dual Monotonic Safety Gate**(DSC 하락 **또는 HD95 증가** 시 원복)는 현재 코드에 없습니다. 확률–에지 정합 Fallback도 없습니다. 지금은 면적 게이트와 DSC 단조 게이트만 기본으로 켭니다. 상세는 [PIPELINE.md §8.5](PIPELINE.md)를 봅니다.
 
 ### 1.2 파이프라인 종합
 
@@ -73,14 +74,16 @@ Large 임계값을 0.70에서 0.50으로 내린 뒤 P/R이 맞춰졌습니다.
 
 미세 파편 DSC +6.44%p, HD95도 줄었습니다.
 
-### 1.6 Monotonic DSC Gate 발동률
+### 1.6 안전 가드와 Monotonic DSC 발동률
+
+기본 평가 순서: PPO 15스텝 → 면적 게이트(0.2×–4×) → 단조 DSC 게이트. Confidence skip은 끄고 돌렸습니다.
 
 | 항목 | 값 |
 |---|---:|
 | 평가 슬라이스 | 2,434 |
-| 게이트 발동 (최종 < 초기 → Stage 2 유지) | **858 (35.3%)** |
+| 단조 게이트 발동 (최종 DSC &lt; 초기 → Stage 2 유지) | **858 (35.3%)** |
 
-PPO는 슬라이스 3분의 1 이상에서 DSC를 떨어뜨렸고, 보고된 최종 점수는 그 손실을 **GT로 걸러낸** 값입니다. 게이트는 GT를 요구하므로 배포 시에는 쓸 수 없으며, 최종 DSC는 상한으로 읽어야 합니다.
+PPO는 슬라이스 3분의 1 이상에서 DSC를 떨어뜨렸고, 보고된 최종 점수는 그 손실을 **GT로 걸러낸** 값입니다. “클래스별 점수 하락 0%”는 이 게이트 이후의 이야기이며, 게이트 없는 Stage 2가 배포에 가까운 숫자입니다.
 
 ### 1.7 시각화 샘플 (클래스 평균 Final DSC에 가깝고 Final > Initial)
 
