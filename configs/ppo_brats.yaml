@@ -12,43 +12,48 @@ use_real_data: true
 # train_agent.py 에서 80/20 분할합니다.
 train_root: "src/data/archive"
 
-# MRI 모달리티: t1ce (Gadolinium 조영 T1, 종양 대비 가장 선명)
-modality: "t1ce"
+# MRI 모달리티: t1ce+flair (T1ce + FLAIR 2채널 입력)
+modality: "t1ce+flair"
 
 # 2D 슬라이스 해상도
 image_size: 128
 
-# 환자 수 제한 (null이면 전체 사용, 빠른 테스트 시 숫자로 제한)
-# BraTS2021 전체: 약 1251명 → null 이면 전체 사용
-# 테스트 시: 20~50 으로 설정
-max_train_patients: 100   # null → 100: 300K 스텝이 의미 있도록 데이터 수 제한
-
-# 합성 데이터 설정 (use_real_data: false 시 사용, 현재 미사용)
-num_samples: 300
+# 환자 수 제한 (Stage 1–4 공통, run_pipeline.py 기본값과 동일)
+max_train_patients: 210
 
 # ──────────────────────────────────────────────
 # RL 환경 설정
 # ──────────────────────────────────────────────
 max_steps: 30             # 에피소드당 최대 스텝 수 (20 → 30: 더 많은 학습 기회)
-target_dsc: 0.88          # 0.95 → 0.88: SegResNet rough DSC≈0.85 기준 현실적 조기종료 목표
-step_penalty: 0.005       # 0.01 → 0.005: 탐색 억제 완화
+target_dsc: 1.0          # 0.88 → 1.0: 초정밀 보정 학습을 위해 조기종료 비활성화 (1.0 도달 시만 종료)
+step_penalty: 0.001       # 0.005 → 0.001: 탐색 억제 최대한 완화
 
 # ──────────────────────────────────────────────
 # PPO 하이퍼파라미터
 # ──────────────────────────────────────────────
-total_timesteps: 500000   # 500K: 100명 데이터 기준 충분한 반복 학습
-n_envs: 4
-n_steps: 512
-batch_size: 64
-n_epochs: 4
+total_timesteps: 300000    # 80K → 300K: 충분한 수렴을 위한 스텝 수 대폭 확대
+n_envs: 8                 # 병렬 환경 수 8개 유지
+n_steps: 1024             # 512 → 1024: 더 많은 롤아웃 경험으로 폴리시 안정화
+batch_size: 256           # 64 → 256: 더 큰 배치로 그래디언트 안정화
+n_epochs: 10              # 4 → 10: 더 많은 업데이트 횟수
 gamma: 0.99
 gae_lambda: 0.95
 clip_range: 0.2
-ent_coef: 0.02            # 0.01 → 0.02: 탐색 강화 (에이전트가 action=2 유지에만 수렴하는 현상 완화)
-learning_rate: 0.0003
+ent_coef: 0.01            # 0.02 → 0.01: 충분한 학습 후 탐색 일부 유지
+learning_rate: 0.0001     # 0.0003 → 0.0001: 더 세밀한 학습률으로 수렴 안정화
 
-# 정책 네트워크
-net_arch: [256, 256]
+# 정류 네트워크 (더 깊고 넓은 구조로 복잡한 보정 패턴 학습)
+net_arch: [512, 256, 128]
+
+# ──────────────────────────────────────────────
+# Stop Motion
+# ──────────────────────────────────────────────
+# Medium/Large Expert의 rough DSC(0.92/0.94)가 이미 기본 임계값 0.92를 넘어서
+# 첫 체크(2048 스텝)에서 즉시 중단되므로 비활성화한다.
+stop_dsc_target: 0
+
+# Plateau Stop 도 비활성화한다. 세 에이전트 모두 total_timesteps 를 완주시킨다.
+stop_plateau: false
 
 # ──────────────────────────────────────────────
 # 저장 경로
