@@ -248,7 +248,7 @@ def main():
     p.add_argument("--modality", default="t1ce+flair")
     p.add_argument("--kaist", default="baselines/checkpoints/kaist_best.pt")
     p.add_argument("--nvauto", default="baselines/checkpoints/nvauto_best.pt")
-    p.add_argument("--stage2_thresholds", default="0.80,0.80,0.50")
+    p.add_argument("--stage2_thresholds", default="0.70,0.70,0.50")
     p.add_argument("--cc_min_sizes", default="0,15,25")
     p.add_argument("--shortlist", type=int, default=10, help="클래스당 Stage 3 후보 수")
     p.add_argument("--indices", type=str, default="",

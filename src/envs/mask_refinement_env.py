@@ -77,6 +77,7 @@ class MaskRefinementEnv(gym.Env):
         model_type: str = "unet",
         refinement_mode: str = "small", # "small", "medium", "large"
         confidence_threshold: float = 0.85, # RL-Refiner 진입을 결정하는 기준값
+        edge_maps: Optional[np.ndarray] = None,
     ):
         super().__init__()
         self.confidence_threshold = confidence_threshold
@@ -85,9 +86,9 @@ class MaskRefinementEnv(gym.Env):
         self.gt_masks = gt_masks
         self.rough_masks = rough_masks
         
-        # Soft Probability Maps 설정 (없으면 rough_masks에 가우시안 블러 적용하여 시뮬레이션)
+        # Soft Probability Maps 설정 (메모리 절약을 위해 copy 제거)
         if uncertainty_maps is not None:
-            self.probability_maps = uncertainty_maps.copy()
+            self.probability_maps = uncertainty_maps
         else:
             self.probability_maps = np.zeros_like(rough_masks)
             for i in range(len(rough_masks)):
@@ -103,10 +104,13 @@ class MaskRefinementEnv(gym.Env):
         H, W = images.shape[-2:]
         self.H, self.W = H, W
 
-        # 이미지 그래디언트 맵 (Sobel Edge Map) 미리 계산
-        self.edge_maps = np.zeros((N, H, W), dtype=np.float32)
-        for i in range(N):
-            self.edge_maps[i] = _edge_map_from_image(_obs_image_slice(images[i]))
+        # 이미지 그래디언트 맵 (Sobel Edge Map) 외부에서 전달받아 공유하거나 없으면 계산
+        if edge_maps is not None:
+            self.edge_maps = edge_maps
+        else:
+            self.edge_maps = np.zeros((N, H, W), dtype=np.float32)
+            for i in range(N):
+                self.edge_maps[i] = _edge_map_from_image(_obs_image_slice(images[i]))
 
         # 관측 공간 정의 (small은 4채널 64x64 Zoom-in, 그 외는 기존 체크포인트와 호환되는 3채널 128x128)
         if self.refinement_mode == "small":

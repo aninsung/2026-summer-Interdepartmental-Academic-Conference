@@ -296,7 +296,7 @@ def load_real_data(
     refinement_mode: str = "small",
     patient_ids: Optional[list] = None,
     mixup: bool = True,
-    stage2_thresholds: str = "0.80,0.80,0.50",
+    stage2_thresholds: str = "0.70,0.70,0.50",
 ):
     """실제 BraTS2021 데이터를 NumPy 배열로 반환."""
     from src.data.brats2020_dataset import BraTS2020Dataset
@@ -477,7 +477,7 @@ def train_agent(
     # 모드
     refinement_mode:     str   = "small",     # "small", "medium", "large"
     patient_split:       Optional[str] = None,
-    stage2_thresholds:   str   = "0.80,0.80,0.50",
+    stage2_thresholds:   str   = "0.70,0.70,0.50",
     # 재현성
     seed:                int   = 42,
     deterministic:       bool  = False,
@@ -550,14 +550,27 @@ def train_agent(
         tr_img, tr_gt, tr_rough, tr_uncert = images[:-split_n], gt_masks[:-split_n], rough_masks[:-split_n], uncertainty_maps[:-split_n:]
 
     # ── VecEnv 생성 ─────────────────────────────────────────
+    # 공유 Edge Map 사전 계산 (메모리 중복 방지: n_envs 복제 시 RAM 폭증 해결)
+    from src.envs.mask_refinement_env import _edge_map_from_image, _obs_image_slice
+    log.info("공유 Sobel Edge Map 사전 계산 중...")
+    tr_edge = np.zeros((len(tr_img), tr_img.shape[-2], tr_img.shape[-1]), dtype=np.float32)
+    for idx in range(len(tr_img)):
+        tr_edge[idx] = _edge_map_from_image(_obs_image_slice(tr_img[idx]))
+        
+    val_edge = np.zeros((len(val_img), val_img.shape[-2], val_img.shape[-1]), dtype=np.float32) if val_img is not None else None
+    if val_edge is not None:
+        for idx in range(len(val_img)):
+            val_edge[idx] = _edge_map_from_image(_obs_image_slice(val_img[idx]))
+
     # Monitor wrapper 적용 팩토리
-    def make_monitored_env_fn(images, gt_masks, rough_masks, uncertainty_maps, max_steps, target_dsc, step_penalty, model_type, refinement_mode):
+    def make_monitored_env_fn(images, gt_masks, rough_masks, uncertainty_maps, edge_maps, max_steps, target_dsc, step_penalty, model_type, refinement_mode):
         def _init():
             env = MaskRefinementEnv(
                 images=images,
                 gt_masks=gt_masks,
                 rough_masks=rough_masks,
                 uncertainty_maps=uncertainty_maps,
+                edge_maps=edge_maps,
                 max_steps=max_steps,
                 target_dsc=target_dsc,
                 step_penalty=step_penalty,
@@ -567,8 +580,8 @@ def train_agent(
             return Monitor(env)
         return _init
 
-    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, tr_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode), n_envs=n_envs)
-    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, val_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode)])
+    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, tr_uncert, tr_edge, max_steps, target_dsc, step_penalty, model_type, refinement_mode), n_envs=n_envs)
+    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, val_uncert, val_edge, max_steps, target_dsc, step_penalty, model_type, refinement_mode)])
 
     # ── PPO 에이전트 ─────────────────────────────────────────
     # TensorBoard 설치 여부 확인
@@ -774,7 +787,7 @@ def main():
     parser.add_argument("--refinement_mode",     type=str, default="small", choices=["small", "medium", "large"],
                         help="학습할 PPO 에이전트의 타겟 Shape Class (small, medium, large)")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
-    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
+    parser.add_argument("--stage2_thresholds", type=str, default="0.70,0.70,0.50",
                         help="평가와 동일한 클래스별(Small,Medium,Large) Stage 2 이진화 임계값")
     parser.add_argument("--seed", type=int, default=42, help="전역 시드 (PPO 포함)")
     parser.add_argument("--deterministic", action="store_true", help="cuDNN 결정적 모드 (느려짐)")
