@@ -55,10 +55,56 @@ def _gt_free_accept(rough: np.ndarray, refined: np.ndarray) -> bool:
     return (0.2 * r) <= f <= (4.0 * r)
 
 
-def _refine_with_ppo(agent, image, gt, init_mask, prob_map, refinement_mode, n_steps=15, clip_shrink=False):
+def _edge_alignment_score(image: np.ndarray, mask: np.ndarray) -> float:
+    """
+    정답(GT) 없이 MRI 밝기 경계선(Sobel Gradient)과 마스크 외곽선 간의 물리적 일치도를 측정하는 비지도 점수
+    """
+    if float(np.sum(mask)) < 1.0:
+        return 0.0
+    
+    # 2D 슬라이스 추출 (T1ce 또는 FLAIR 평균)
+    if image.ndim == 3:
+        img_slice = np.mean(image, axis=0).astype(np.float32)
+    else:
+        img_slice = image.astype(np.float32)
+        
+    from scipy.ndimage import sobel
+    gx = sobel(img_slice, axis=0)
+    gy = sobel(img_slice, axis=1)
+    grad_mag = np.sqrt(gx**2 + gy**2)
+    max_g = np.max(grad_mag)
+    if max_g > 1e-6:
+        grad_mag /= max_g
+        
+    # 마스크 외곽선(Boundary) 추출 (1-pixel band)
+    struct = np.ones((3, 3), dtype=bool)
+    mask_b = mask > 0.5
+    boundary = binary_dilation(mask_b, structure=struct) ^ binary_erosion(mask_b, structure=struct)
+    b_count = float(np.sum(boundary))
+    if b_count < 1.0:
+        return 0.0
+    return float(np.sum(grad_mag * boundary)) / b_count
+
+
+def _edge_accept(image: np.ndarray, rough: np.ndarray, refined: np.ndarray, margin: float = 0.02) -> bool:
+    """
+    PPO 보정 마스크의 MRI 에지 일치도가 초기 마스크보다 우수하거나 동등한지 검사하는 비지도 물리 가드
+    """
+    e_rough = _edge_alignment_score(image, rough)
+    e_refined = _edge_alignment_score(image, refined)
+    return e_refined >= (e_rough * (1.0 - margin))
+
+
+def _refine_with_ppo(agent, image, init_mask, prob_map, refinement_mode, n_steps=15, clip_shrink=False, clip_shrink_threshold=150):
+    """
+    100% GT-Free 순수 자율 추론:
+    정답(GT)을 보지 않고 입력 영상, 초기 마스크, 확률 맵만으로 PPO가 15스텝 동안 경계를 보정합니다.
+    """
+    # 환경 초기화를 위한 가상 더미 GT (추론 관측값 obs에는 GT가 포함되지 않음)
+    dummy_gt = init_mask.copy()
     env = MaskRefinementEnv(
         image[None, ...],
-        gt[None, ...],
+        dummy_gt[None, ...],
         np.expand_dims(init_mask, 0),
         uncertainty_maps=np.expand_dims(prob_map, 0),
         max_steps=n_steps,
@@ -66,24 +112,19 @@ def _refine_with_ppo(agent, image, gt, init_mask, prob_map, refinement_mode, n_s
         refinement_mode=refinement_mode,
     )
     obs, _ = env.reset(seed=0)
-    best_mask = init_mask.copy()
-    best_dsc = dice(init_mask, gt)
     for _ in range(n_steps):
         try:
             action, _ = agent.predict(obs, deterministic=True)
-            if clip_shrink and np.sum(env._current_mask) < 35:
+            if clip_shrink and np.sum(env._current_mask) < clip_shrink_threshold:
                 action = np.maximum(0.0, action)
-            obs, _, _, truncated, info = env.step(action)
-            step_dsc = float(info.get("dsc", dice(env._current_mask, gt)))
-            if step_dsc >= best_dsc:
-                best_dsc = step_dsc
-                best_mask = env._current_mask.copy()
+            obs, _, _, truncated, _ = env.step(action)
             if truncated:
                 break
         except Exception as e:
             print(f"Skipping RL step for component due to: {e}")
             break
-    return apply_monotonic_dsc_gate(init_mask, best_mask, gt)
+    # 15스텝 완주 후의 최종 결과 마스크 반환 (GT 대조 최고점 선택 없음)
+    return env._current_mask.copy()
 
 def main():
     import argparse
@@ -95,10 +136,13 @@ def main():
     parser.add_argument("--patient_split", type=str, default=DEFAULT_SPLIT_PATH)
     parser.add_argument("--split_role", type=str, default="val", choices=["train", "val", "all"])
     parser.add_argument("--oracle_routing", action="store_true", help="GT 면적으로 Expert를 고르는 상한 평가")
-    parser.add_argument("--confidence_threshold", type=float, default=None, help="이 값 이상 평균 확률이면 PPO 생략")
-    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
-                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. Large는 과소분할이라 0.50.")
+    parser.add_argument("--confidence_threshold", type=float, default=0.95, help="이 값 이상 평균 확률이면 PPO 생략 (고신뢰도 보호 우회, 기본값: 0.95)")
+    parser.add_argument("--small_confidence_threshold", type=float, default=0.80, help="Small 클래스용 고신뢰도 보호 우회 임계값 (기본값: 0.80)")
+    parser.add_argument("--disable_edge_gate", action="store_true", help="비지도 MRI 에지 물리 일치도 게이트 비활성화")
+    parser.add_argument("--stage2_thresholds", type=str, default="0.70,0.70,0.50",
+                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. Small=0.70, Medium=0.70, Large=0.50.")
     parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
+    parser.add_argument("--allow_oracle_gate", action="store_true", help="연구용 오라클 단조 게이트(GT 필요) 활성화")
     parser.add_argument("--micro_area_floor", type=float, default=80.0,
                         help="Small 마스크 면적이 이 값 미만이면 임계값을 단계적으로 낮춘다.")
     parser.add_argument("--micro_thr_floor", type=float, default=0.15,
@@ -282,34 +326,47 @@ def main():
             if args.confidence_threshold is not None:
                 nz = comp_from_tta > 0.5
                 mean_p = float(np.mean(prob_tta_np[nz])) if np.any(nz) else 0.0
-                if mean_p >= args.confidence_threshold:
+                bypass_thr = args.small_confidence_threshold if ck == 0 else args.confidence_threshold
+                if mean_p >= bypass_thr:
                     final_mask_np = np.maximum(final_mask_np, comp_from_tta)
                     continue
 
             refined_k_mask = _refine_with_ppo(
                 agent_k,
                 images[i],
-                gt_masks[i],
                 comp_from_tta,
                 prob_tta_np * comp_from_tta,
                 ref_mode_k,
                 n_steps=15,
                 clip_shrink=(ck == 0),
+                clip_shrink_threshold=150,
             )
             if np.sum(refined_k_mask) > 0:
                 refined_k_mask = binary_closing(refined_k_mask, struct_k).astype(np.float32)
+            # 1. 면적 가드 검사 (0.2x ~ 4.0x)
             if np.sum(refined_k_mask) == 0 or not _gt_free_accept(comp_from_tta, refined_k_mask):
                 refined_k_mask = comp_from_tta
-            refined_k_mask = apply_monotonic_dsc_gate(comp_from_tta, refined_k_mask, gt_np)
+            # 2. 비지도 MRI 에지 물리 일치도 가드 검사 (정답 불필요)
+            elif not args.disable_edge_gate:
+                if not _edge_accept(images[i], comp_from_tta, refined_k_mask):
+                    refined_k_mask = comp_from_tta
+
+            if args.allow_oracle_gate:
+                refined_k_mask = apply_monotonic_dsc_gate(comp_from_tta, refined_k_mask, gt_np)
             final_mask_np = np.maximum(final_mask_np, refined_k_mask)
 
+        # 슬라이스 레벨 2중 비지도 안전 가드 검사 (GT 불필요)
         if not _gt_free_accept(rough_mask_np, final_mask_np):
             final_mask_np = rough_mask_np
+        elif not args.disable_edge_gate:
+            if not _edge_accept(images[i], rough_mask_np, final_mask_np):
+                final_mask_np = rough_mask_np
 
-        gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
-        if not np.array_equal(gated_mask, final_mask_np):
-            monotonic_reverts += 1
-        final_mask_np = gated_mask
+        if args.allow_oracle_gate:
+            gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
+            if not np.array_equal(gated_mask, final_mask_np):
+                monotonic_reverts += 1
+            final_mask_np = gated_mask
 
         fin_dsc = dice(final_mask_np, gt_np)
         fin_hd95 = hd95(final_mask_np, gt_np)
@@ -355,11 +412,15 @@ def main():
         if (i+1) % 100 == 0:
             print(f"Processed {i+1}/{len(images)} slices...")
             
-    print("\n--- Pipeline Evaluation ({routing}, PPO all classes, monotonic DSC gate, CC filter) ---".format(
-        routing="oracle routing" if args.oracle_routing else "classifier routing"
-    ))
+    gate_str = "monotonic DSC gate (Oracle upper bound)" if args.allow_oracle_gate else "100% GT-Free Deployable Mode"
+    print(f"\n--- Pipeline Evaluation ({'oracle routing' if args.oracle_routing else 'classifier routing'}, PPO all classes, {gate_str}, CC filter) ---")
     print(f"Total Slices Evaluated: {len(initial_dsc_list)}")
-    print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
+    if args.allow_oracle_gate:
+        print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
+    else:
+        conf_str = f"Confidence Bypass (Small >= {args.small_confidence_threshold}, Med/Large >= {args.confidence_threshold})" if args.confidence_threshold is not None else "Confidence Bypass: OFF"
+        edge_str = "MRI Edge Physical Guard: ON" if not args.disable_edge_gate else "MRI Edge Physical Guard: OFF"
+        print(f"Unsupervised Safety Guards: {conf_str} | {edge_str} (100% GT-Free)")
     print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
     print(f"Average Initial DSC  (Stage 2):        {np.mean(initial_dsc_list):.4f}")
     print(f"Average Final   DSC  (Stage 3 RL):     {np.mean(final_dsc_list):.4f}")
