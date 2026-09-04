@@ -2,11 +2,14 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.bak
 
 # Large dataset, checkpoints, and logs
 src/data/archive/
 src/data/archive (1)/
-checkpoints/
+checkpoints/*
+!checkpoints/patient_split.json
+ppo/checkpoints/
 logs/
 
 # Virtual environments

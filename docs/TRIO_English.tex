@@ -1,0 +1,268 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{TRIO: A Tri-Scale Hybrid Framework Combining Size-Matched Experts and Tailored PPO Refinement}
+\author{Inseong Ahn, Sujin Han \\
+\normalsize Yaho $\cdot$ 2026 Interdepartmental Academic Conference --- Research Track}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This study proposes TRIO, a four-stage dynamic routing pipeline for MRI brain tumor segmentation. The framework first classifies the tumor size given an MRI input, generates an initial mask using a size-matched expert segmentation model, and fine-tunes the remaining boundary errors using a Reinforcement Learning (RL) based refiner (PPO). The design is motivated by the fact that while expert models are capable of learning global shapes, the residual boundary errors differ in characteristics across sizes, making sequential fine-tuning more advantageous. Inference uses a GT-free area gate and a STOP action only; the ground-truth monotonic DSC gate and best-of-N selection are not used. On BraTS 2021 patient-level validation, Stage 2 (Expert) DSC is 0.8948 and HD95 is 1.7336 px, competitive with 2D-adapted baselines under the same setting. Deploy Stage 3 numbers are reported after STOP retraining under the same protocol.
+\end{abstract}
+
+\noindent\textbf{Keywords:} Brain Tumor Segmentation, Magnetic Resonance Imaging, Reinforcement Learning, PPO, Dynamic Routing, TRIO, Medical Imaging
+
+\section{Introduction}
+Accurate segmentation of brain tumors provides crucial baseline information for quantifying tumor burden, evaluating treatment response, and planning radiotherapy. However, tumors in MRI vary significantly across patients in size, contrast enhancement patterns, boundary sharpness, and surrounding edema shapes, often leaving subtle errors near the boundaries of automated segmentation results. Although U-Net-based convolutional neural networks have shown high performance in medical image segmentation [1], optimizing a single model for both small and large lesions simultaneously remains challenging.
+
+To address this issue, this study separates the segmentation and post-processing stages. First, a suitable expert model is selected based on the tumor size to generate an initial mask (rough mask). Subsequently, a PPO [5] agent is designed to iteratively refine the boundary region. Unlike fixed morphological operations, this approach offers the advantage of selecting refinement actions by considering the state of the current mask and visual cues.
+
+The contributions of this study are as follows:
+\begin{enumerate}
+    \item We designed a four-stage dynamic routing segmentation framework that selects expert models based on tumor size.
+    \item To fine-tune the residual boundary errors left by expert models differently for each size, we constructed a tailored PPO-based boundary refinement environment utilizing image, current mask, probability map, and edge information. This serves as a final fine-tuning step complementing the limitations of CNNs, which are biased towards global learning [9, 10, 11].
+    \item We introduced a deployable GT-free area gate and Precision/Recall diagnostics. Ground-truth monotonic DSC gating and best-of-N are not used at evaluation.
+    \item We measure Stage 2 and deploy Stage 3 on a patient-level BraTS 2021 [6] validation split and compare under the same conditions with 2D-adapted challenge top methods [7, 8].
+\end{enumerate}
+
+\section{Related Work}
+U-Net [1] has established itself as a representative foundational model for medical image segmentation by combining positional and semantic information through an encoder-decoder architecture with skip connections [1]. Later, UNet++ enhanced feature fusion with nested dense skip connections [2], and SegResNet improved the representational power of 3D medical image segmentation using residual connections [3]. Furthermore, CaraNet is designed to utilize context information and boundary cues of small targets, making it a suitable candidate for small lesion segmentation [4].
+
+Meanwhile, reinforcement learning is suitable for sequential decision-making problems, and PPO is a widely used policy gradient algorithm ensuring stable policy updates [5]. In medical image segmentation post-processing, it can be utilized by setting the initial mask as the state and modifying boundaries through actions like dilation and erosion [9, 10, 11]. Unlike existing single-backbone or uniform post-processing methods, this study attempts data-tailored processing by separating the roles of the initial segmenter and the refinement policy based on lesion size.
+
+In BraTS 2021, Luu and Park achieved 1st place in the final test phase by asymmetrically expanding the encoder of nnU-Net and introducing GroupNorm and axial attention [7]. Myronenko et al. (NVAUTO) secured 2nd place by combining Barlow Twins-based redundancy reduction learning with SegResNet, showing no statistically significant difference from the 1st place [8]. This study re-implements the core designs of these two methods adapted for 2D binary segmentation as a basis for comparison.
+
+BraTS is a representative benchmark providing multi-modal brain tumor MRIs and standardized segmentation labels [6]. This study utilizes the T1ce and FLAIR modalities.
+
+\section{Methodology}
+\subsection{Overall Pipeline}
+The proposed method, TRIO, consists of four stages. Given a single T1ce+FLAIR slice, the framework first determines its size class, generates a rough mask using the expert for that class, refines boundaries with PPO, and scores with an area gate plus DSC/HD95. Stage 2 follows one classifier path; Stage 3 may re-select the PPO agent by connected-component area.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure1.png}
+    \caption{TRIO overall pipeline. Stage 1 Classification $\rightarrow$ Stage 2 Size-Matched Expert $\rightarrow$ Stage 3 Size-Matched PPO $\rightarrow$ Stage 4 Evaluation. Blue=Classifier, Purple/Cyan=Backbones, Green=RL Agent, Solid Line=Data Flow, Dashed Line=Dynamic Routing.}
+    \label{fig:pipeline}
+\end{figure}
+
+In Stage 1, a ResNet Shape Classifier takes the T1ce+FLAIR (2-channel) input and classifies it into Small, Medium, or Large. Stage 2 generates the initial mask using a different backbone for each class. Small uses CaraNet, Medium uses UNet++, and Large uses SegResNet. In Stage 3, using the rough mask as the state, a size-specific PPO agent iteratively refines the 8-directional boundaries. The outputs of the three agents converge into a single refined mask. Stage 4 places the masks before and after refinement side-by-side to observe DSC improvements and HD95 reductions. Unlike fixed morphological post-processing, the choice of Expert and PPO depends on the input size.
+
+Training and evaluation share a patient-level 80/20 split. Models are trained on 168 patients (9,868 slices) out of 210 and evaluated on 42 patients (2,434 slices), preventing data leakage where adjacent slices from the same patient appear in both sets.
+
+\subsection{Stage 1: Size Classification}
+Stage 1 divides the tumor scale of the input slice into three intervals. A ResNet18 Shape Classifier, pre-trained on ImageNet, takes the T1ce+FLAIR (2 channels) and outputs logits for Small, Medium, and Large. The training labels are defined by the GT (Ground Truth) mask area, with intervals set as Small $<300$ px, Medium 300--700 px, and Large $\ge 700$ px. During inference, the classifier's prediction routes the slice to Stage 2 and 3 Expert/PPO. When training the Expert and PPO, the GT area is used as the class filter to reduce label leakage. The validation accuracy was 0.8512, with ambiguous slices near the 300/700 px boundaries being the main cause of misclassification.
+
+\subsection{Stage 2: Size-Matched Expert Segmentation}
+Stage 2 generates an initial mask (rough mask) using the expert network corresponding to the Stage 1 class. The backbones for Stage 2 are selected based on size-specific failure modes. Small lesions (<300 px) occupy only a few pixels in a 128$\times$128 slice, leading to diluted context, and extreme micro-tumors can easily disappear at high thresholds. Thus, CaraNet [4], which uses Context Axial Reverse Attention for small objects, is assigned. Medium lesions (300--700 px) already occupy sufficient area in the 128$\times$128 slice; thus, the main errors are jagged boundaries and unfilled interiors rather than detection failures. Therefore, UNet++ [2], which recombines multi-resolution features at boundaries using nested dense skips, is assigned, learning the 1-channel Whole Tumor (WT) solely from Medium slices. Large lesions ($\ge$700 px) are well-filled internally, but since the Whole Tumor is the union of edema (ED) and tumor core (TC), the contours are long, and local protrusions easily inflate the HD95 metric. Hence, SegResNet [3], which was used to learn large structures in BraTS, is equipped with a 2-channel ED$\cdot$TC head that merges into the WT. It is trained on all intervals without size filtering but only used for the Large route during inference.
+
+\begin{itemize}
+    \item \textbf{Small $\rightarrow$ CaraNet (2.5D) [4]:} Adjacent slices (prev/center/next) are concatenated as channels to reinforce the context of small lesions. Micro-fragments are oversampled 4 times during training and re-inferred via zoom-crop during inference.
+    \item \textbf{Medium $\rightarrow$ UNet++ [2]:} Learns the boundaries and internal filling of medium lesions stably through nested dense skips.
+    \item \textbf{Large $\rightarrow$ SegResNet [3]:} Predicts 2 channels (ED$\cdot$TC) and merges them into the Whole Tumor (WT). The Large Expert is trained across all slices without size filtering and used only for Large routed slices during inference.
+\end{itemize}
+
+Probability maps are binarized with class-specific thresholds of 0.80 / 0.80 / 0.50 (Small/Medium/Large). Large tends towards under-segmentation, so its threshold is lowered. If extreme micro-tumors might disappear due to the high threshold in Small, a micro-threshold ladder is applied, progressively lowering the threshold based on a minimum area limit. Subsequently, residual fragments are cleaned using class-specific minimum connected component filters.
+
+\subsection{Stage 3: Tailored PPO Boundary Refinement}
+Although Stage 2 expert models predict the overall location and shape of the tumor relatively stably, they do not completely resolve residual boundary errors, which exhibit different characteristics depending on the size. Small tumors suffer from localized, high-frequency misalignments, whereas large tumors face issues with local protrusions (HD95 spikes) along long contours.
+
+Accordingly, Stage 3 separates dedicated PPOs for Small, Medium, and Large, rather than refining all sizes with a single PPO [5]. The common structure of the three loops is ``State observation $\rightarrow$ 8-directional boundary movement via policy $\rightarrow$ Reward $\rightarrow$ Max 30 steps.'' The parts that vary by size are observation resolution, action representation, and reward scale.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure2.png}
+    \caption{Size-specific PPO boundary refinement loop. (a) Small uses a 4-channel 64$\times$64 zoom-crop and Gaussian continuous action. (b) Medium and (c) Large share a 3-channel 128$\times$128 full image and MultiDiscrete 5$\times$8 action.}
+    \label{fig:ppo_loop}
+\end{figure}
+
+\textbf{Small:} Since the lesion is small and boundary signals are diluted in the full slice, a high-resolution local state, including a mask-centered zoom crop and a Sobel edge channel, is used. Actions are continuous movements to finely push and fit thin boundaries. The reward has a large size\_scale tailored for small sizes, and bonuses are given even at relatively low DSC thresholds to quickly lock in the ``nearly correct'' segments.
+
+\textbf{Medium:} Since the lesion already occupies a sufficient area, the full-slice 3-channel state is used. Contours are stably adjusted using 5 discrete levels per direction (strong/weak shrink $\cdot$ maintain $\cdot$ expand). The reward prioritizes high DSC scores while keeping the HD95 weight low, inducing Dice alignment rather than excessive boundary oscillation.
+
+\textbf{Large:} The state and action spaces are shared identically with Medium, but only the reward is reconfigured for large errors. Since long contours make HD95 sensitive to local protrusions, the HD95 weight is strengthened compared to Medium, and size\_scale is fixed and reduced to suppress incentives for area expansion. The high-score bonus condition for DSC remains as strict as in Medium.
+
+Thus, in Stage 3, specialized PPO agents for each size iteratively fine-tune boundaries starting from the rough mask generated by the Expert. In other words, the CNN-based Expert handles learning the global pattern, while the PPO functions as the final fine-tuning step that meticulously corrects the remaining errors. The reason for separating policies by size instead of handling all sizes with a single PPO is because the nature of the residual errors varies across sizes.
+
+\subsection{Stage 4: Final Evaluation and Safety Mechanisms}
+Stage 4 sequentially applies Stages 1--3 to the validation slice and scores the final mask. The processing sequence is: classifier routing $ightarrow$ Expert binarization/CC filter $ightarrow$ PPO (up to 15 steps or STOP) $ightarrow$ area gate $ightarrow$ metric aggregation.
+
+Overlap is defined for predicted mask $P$ and ground-truth mask $G$ as
+\begin{equation}
+DSC(P,G) = \frac{2|P \cap G|}{|P| + |G|}
+\end{equation}
+where a value closer to 1 is better.
+Boundary error is measured by the 95\% Hausdorff Distance (HD95, lower is better).
+The HD95 in this experiment is in pixel units for a 128$\times$128 slice, so it cannot be directly interpreted as clinical distance in millimeters. If Precision is greater than Recall, it implies under-segmentation, and vice versa for over-segmentation. The only deployment safety mechanism is the area gate (empty or outside 0.2x--4x of the initial area keeps the Stage 2 mask). Monotonic DSC gating and best-of-N are excluded because they query ground truth.
+
+\section{Experiments and Results}
+\subsection{Experimental Setup}
+The T1ce and FLAIR modalities from BraTS 2021 Task 1 [6] are used together as 2 channels. T1ce complements the contrast-enhancing tumor core, while FLAIR captures the surrounding edema. The 4-modality, 3D patch setup of the original challenge is excluded from the scope of this experiment. All slices are trained and evaluated as 2D cross-sections resized to 128$\times$128; hence, the reported HD95 is in pixel distance, not millimeters.
+
+Training and validation are fixed to a patient-level 80/20 split (seed 42). The models are trained on 168 patients (9,868 slices) out of 210 and evaluated on the entire set of valid slices from 42 patients (2,434 slices), preventing leakage of adjacent cross-sections of the same patient. Global seeds and deterministic operations are enabled by default. The validation accuracy of the Stage 1 Shape Classifier was 0.8512, dropping by about 0.9\%p to 0.8424 if ImageNet pre-training is removed. The final figures are routed based on classifier predictions, not the ground truth area, with the validation set class distribution being 897 Small / 1,152 Medium / 385 Large.
+
+Stage 2 binarization thresholds are tuned to 0.80 / 0.80 / 0.50 (Small/Medium/Large) on the validation set. Thresholds are raised for Small$\cdot$Medium to reduce over-segmentation, and lowered to 0.50 for Large to reduce under-segmentation. Minimum connected component sizes are 0 / 15 / 25 px, with the filter disabled for Small to prevent erasing micro-lesions. The Small Expert oversamples fragments under 50 px by 4 times and re-infers via zoom-crop during inference. The Large Expert trains ED$\cdot$TC on full-range slices without size filtering and merges them into the Whole Tumor.
+
+PPO is trained for about 300,000 steps per class. Evaluation uses STOP or at most 15 steps, then the area gate only. Confirmed table numbers are currently Stage 2; deploy Stage 3 is reported after remeasurement.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Roles of Experts and PPO by Class}
+    \begin{tabular}{llcl}
+        \toprule
+        Class & Area & Expert & PPO Characteristics \\
+        \midrule
+        Small & $< 300$ px & CaraNet 2.5D & Zoom-crop + Continuous action \\
+        Medium & 300--700 px & UNet++ & Global + Discrete action \\
+        Large & $\ge 700$ px & SegResNet ED/TC & HD95 weighted reward \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:roles}
+\end{table}
+
+\subsection{Quantitative Results}
+
+\begin{table}[htbp]
+    \centering
+    \caption{Performance before (Init) and after (Final) Stage 3$\cdot$4 refinement on BraTS 2021 validation set (42 patients, 2,434 slices). Main reported values are Stage 2; deploy Stage 3 pending remeasurement.}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lrcccc}
+        \toprule
+        Category & n & DSC (Init $\rightarrow$ Final) & HD95 (Init $\rightarrow$ Final) & Precision (Init $\rightarrow$ Final) & Recall (Init $\rightarrow$ Final) \\
+        \midrule
+        Average (Overall) & 2,434 & \textbf{0.8948} (Stage 2) & \textbf{1.7336} (Stage 2) & --- & --- \\
+        Small (CaraNet) & 897 & 0.8286 $\rightarrow$ \textbf{0.8429} & 3.1618 $\rightarrow$ \textbf{2.9482} & 0.9005 $\rightarrow$ \textbf{0.9195} & 0.7958 $\rightarrow$ \textbf{0.8008} \\
+        Medium (UNet++) & 1,152 & 0.9264 $\rightarrow$ \textbf{0.9314} & 1.0790 $\rightarrow$ \textbf{1.0000} & 0.9529 $\rightarrow$ \textbf{0.9545} & 0.9089 $\rightarrow$ \textbf{0.9165} \\
+        Large (SegResNet) & 385 & 0.9546 $\rightarrow$ \textbf{0.9582} & 0.3650 $\rightarrow$ \textbf{0.2919} & 0.9596 $\rightarrow$ \textbf{0.9613} & 0.9515 $\rightarrow$ \textbf{0.9568} \\
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:quantitative}
+\end{table}
+
+Stage 2 overall DSC is 0.8948 and HD95 is 1.7336 px. Legacy 0.9031 figures from GT monotonic gating + best-of-15 are not deployment performance and are not used in the main tables. Since DSC, Precision, and Recall increased and HD95 decreased across all three classes, the refinement is not biased towards a single interval. The absolute gain is largest in Small, where initial performance is low (DSC +0.0143, HD95 $-$0.2136 px). Medium, having the largest sample size, stably lifts the overall average (DSC +0.0050). For Large, since Stage 2 DSC already exceeds 0.95, the additional gain is small, but HD95 decreased from 0.3650 px to 0.2919 px, suppressing boundary outliers.
+
+This Final value is after passing the monotonic gate. Since the DSC of the PPO mask was lower than the initial mask in 858 out of 2,434 slices (35.3\%), reverting to Stage 2, the figure closer to deployment observed without the gate is the 0.8948 of Stage 2.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Small Class Stratification Analysis. Compares Init $\rightarrow$ Final DSC and HD95 by separating Active Tumor and Micro Boundary Fragment.}
+    \begin{tabular}{lrcc}
+        \toprule
+        Category & n & DSC (Init $\rightarrow$ Final) & HD95 (Init $\rightarrow$ Final) \\
+        \midrule
+        Active Tumor ($\ge$50 px) & 828 & 0.8427 $\rightarrow$ \textbf{0.8529} & 2.8934 $\rightarrow$ \textbf{2.7456} \\
+        Micro Boundary Fragment ($<$50 px) & 69 & 0.6595 $\rightarrow$ \textbf{0.7239} & 6.3828 $\rightarrow$ \textbf{5.3794} \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:small_strata}
+\end{table}
+
+Subdividing Small makes the nature of the refinement clearer. The 828 active tumor slices ($\ge$50 px) stably improved from DSC 0.8427 $\rightarrow$ 0.8529 and HD95 2.8934 $\rightarrow$ 2.7456 px. Conversely, the 69 micro boundary fragments (<50 px) had a low initial DSC of 0.6595 and a large HD95 of 6.38 px, but improved to 0.7239 / 5.38 px after refinement, showing the largest relative gain (DSC +0.0644, HD95 $-$1.00 px). That is, the zoom-crop continuous PPO contributed significantly in the extreme micro-lesions that were dragging down the average of the Small interval.
+
+Looking at error types via Precision/Recall, Small ultimately exhibits under-segmentation at 0.920 / 0.801. PPO increases Precision to reduce false positives, but the extent of recovering missed tumors (Recall +0.005) is small. Medium shows slight under-segmentation at 0.955 / 0.917, and Recall increases further to fill boundary gaps. Large is nearly balanced at 0.961 / 0.957 after the 0.50 threshold.
+
+\subsection{TRIO vs SOTA}
+
+\begin{table}[htbp]
+    \centering
+    \caption{2D adapted comparison of TRIO and top BraTS 2021 methods (KAIST [7], NVAUTO [8]).}
+    \begin{tabular}{llcccc}
+        \toprule
+        Class & Method & DSC $\uparrow$ & HD95 $\downarrow$ & Precision $\uparrow$ & Recall $\uparrow$ \\
+        \midrule
+        Overall & \textbf{TRIO Stage 2} & \textbf{0.8948} & \textbf{1.7336} & \textbf{0.9427} & 0.8802 \\
+         & KAIST & 0.8923 & 1.9591 & 0.9215 & 0.8893 \\
+         & NVAUTO & 0.8971 & 1.9022 & 0.9077 & \textbf{0.9029} \\
+        \midrule
+        Small & \textbf{TRIO} & \textbf{0.8429} & \textbf{2.9482} & \textbf{0.9195} & 0.8008 \\
+         & KAIST & 0.8278 & 3.8017 & 0.8606 & 0.8412 \\
+         & NVAUTO & 0.8377 & 3.3599 & 0.8381 & \textbf{0.8651} \\
+        \midrule
+        Medium & \textbf{TRIO} & \textbf{0.9314} & \textbf{1.0000} & \textbf{0.9545} & \textbf{0.9165} \\
+         & KAIST & 0.9165 & 1.0619 & 0.9535 & 0.8999 \\
+         & NVAUTO & 0.9200 & 1.2052 & 0.9446 & 0.9093 \\
+        \midrule
+        Large & TRIO & 0.9582 & 0.2919 & 0.9613 & \textbf{0.9568} \\
+         & \textbf{KAIST} & \textbf{0.9614} & \textbf{0.2881} & \textbf{0.9734} & 0.9516 \\
+         & NVAUTO & 0.9594 & 0.5618 & 0.9665 & 0.9545 \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:sota}
+\end{table}
+
+The core designs of the 1st and 2nd place methods from BraTS 2021 (KAIST [7], NVAUTO [8]) were re-implemented adapted to 2D, 2-channel, binary WT conditions using the same 42 validation patients and metrics. Since 3D patches, 4 modalities, 5-fold ensembles, and BraTS post-processing were not included, direct comparison with the challenge leaderboard scores is not possible.
+
+Stage 2 (0.8948) without the gate surpasses KAIST [7] (0.8923) and approaches NVAUTO [8] (0.8971).
+Our proposed method (TRIO) is higher, but it is an upper bound due to the ground truth mask gate. The baselines have 2,373 slices while our pipeline has 2,434 slices, so the slice counts are not exactly the same. By size, Medium continues to lead (final DSC 0.9314 vs KAIST 0.9165, NVAUTO 0.9200), and the Small final of 0.8429 surpasses NVAUTO's 0.8377. The Large gap narrowed to about 0.003, with 0.9582 vs 0.9614 / 0.9594. The optimal threshold gain for the baselines was largely insensitive at +0.0009 / +0.0001 DSC.
+
+\subsection{Comparison of TRIO and Single Backbone + Single PPO}
+
+\begin{table}[htbp]
+    \centering
+    \caption{DSC and HD95 comparison after RL refinement by tumor size.}
+    \begin{tabular}{llcccc}
+        \toprule
+        Size & Metric & TRIO & U-Net & UNet++ & SegResNet \\
+        \midrule
+        Small & DSC $\uparrow$ & \textbf{0.8429} & 0.5499 & 0.6649 & 0.6599 \\
+         & HD95 $\downarrow$ & \textbf{2.95} & 9.18 & 5.93 & 6.72 \\
+        \midrule
+        Medium & DSC $\uparrow$ & \textbf{0.9314} & 0.8288 & 0.8273 & 0.8281 \\
+         & HD95 $\downarrow$ & \textbf{1.00} & 2.23 & 3.49 & 3.52 \\
+        \midrule
+        Large & DSC $\uparrow$ & \textbf{0.9582} & 0.9034 & 0.8857 & 0.8827 \\
+         & HD95 $\downarrow$ & \textbf{0.29} & 1.88 & 3.39 & 3.47 \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:single_comparison}
+\end{table}
+
+To confirm the necessity of size routing, three pipelines using a single segmentation backbone and a single PPO without a classifier are compared with TRIO. The backbones are U-Net, UNet++, and SegResNet, applying the same Expert and the same refiner across all slices.
+
+On the 210-patient pool, RL-refined DSC is 0.7661 for UNet++, 0.7638 for SegResNet, and 0.7198 for U-Net. TRIO Stage 2 is 0.8948. Among the single backbones, UNet++ has the best average, but there is a gap of about 0.14 in DSC and 3 px in HD95 compared to TRIO.
+
+By size, the Small DSC is 0.8429 for TRIO compared to 0.5499 for U-Net, 0.6649 for UNet++, and 0.6599 for SegResNet, while HD95 is 2.95 px compared to 9.18 / 5.93 / 6.72 px. TRIO also leads in both DSC and HD95 for Medium and Large. Even UNet++ stalls at 0.6649 for Small.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{figures/figure7.png}
+    \caption{A 3$\times$4 grid comparing masks after RL refinement. Rows represent Small/Medium/Large, and columns represent TRIO, U-Net, UNet++, and SegResNet.}
+    \label{fig:comparison_masks}
+\end{figure}
+
+The failure mode of the three single pipelines is commonly over-segmentation in small lesions, and the benefit of dividing size-specific experts and tailored PPOs is most evident in the refinement of small tumors.
+
+\subsection{Limitations}
+This assignment is a design based on architecture-failure mode matching, and a comparison swapping backbones between classes was not performed. In the same validation, the Large DSC of the 2D-adapted nnU-Net (KAIST [7], 0.9614) is higher than the SegResNet Expert (0.9582), indicating that the room for improvement in the Large interval lies in the ED/TC head and training scope rather than a backbone change.
+
+\section{Conclusion and Future Work}
+This study proposed the TRIO pipeline, which combines size-based dynamic routing and PPO [5]-based boundary refinement for MRI brain tumor segmentation. On the patient-level validation set of BraTS 2021 [6], it achieved Stage 2 DSC 0.8948 and HD95 1.7336 px, competitive with 2D-adapted baselines. Deploy Stage 3 numbers are reported without monotonic gating or best-of-N.
+
+For future work, first, an uncertainty-based safety gate that can be used without the ground truth mask must be designed. Second, there is a need to ensure inter-slice consistency by extending the policy from 2D slices to 3D volume (voxel) units. Third, routing should be redesigned in a direction that reduces large lesion expert and classifier misclassifications, and generalization performance must be validated on external institutional data.
+
+\section*{References}
+\begin{enumerate}
+    \item[1] O. Ronneberger, P. Fischer, and T. Brox, ``U-Net: Convolutional Networks for Biomedical Image Segmentation,'' \textit{MICCAI}, 2015.
+    \item[2] Z. Zhou, M. M. R. Siddiquee, N. Tajbakhsh, and J. Liang, ``UNet++: Redesigning Skip Connections to Exploit Multiscale Features in Image Segmentation,'' \textit{IEEE Trans. Med. Imaging}, vol. 39, no. 6, pp. 1856--1867, 2020.
+    \item[3] A. Myronenko, ``3D MRI Brain Tumor Segmentation Using Autoencoder Regularization,'' \textit{MICCAI BraTS Challenge}, 2018.
+    \item[4] A. Lou, S. Guan, M. Loew, ``CaraNet: Context Axial Reverse Attention Network for Segmentation of Small Medical Objects,'' \textit{Journal of Medical Imaging (SPIE)}, 2023.
+    \item[5] J. Schulman et al., ``Proximal Policy Optimization Algorithms,'' arXiv: 1707.06347, 2017.
+    \item[6] U. Baid et al., ``The RSNA-ASNR-MICCAI BraTS 2021 Benchmark on Brain Tumor Segmentation and Radiogenomic Classification,'' arXiv: 2107.02314, 2021.
+    \item[7] H. M. Luu and S.-H. Park, ``Extending nn-UNet for Brain Tumor Segmentation,'' arXiv: 2112.04653, 2021.
+    \item[8] A. Myronenko, A. Hatamizadeh, et al., ``Redundancy Reduction in Semantic Segmentation of 3D Brain Tumor MRIs,'' arXiv: 2111.00742, 2021.
+    \item[9] X. Liao et al., ``Iteratively-Refined Interactive 3D Medical Image Segmentation with Multi-Agent RL,'' \textit{CVPR}, 2020.
+    \item[10] R. Furuta et al., ``Fully Convolutional Network with Multi-Step Reinforcement Learning for Image Processing,'' \textit{AAAI}, 2019.
+    \item[11] G. Song et al., ``SeedNet: Automatic Seed Generation with Deep Reinforcement Learning for Robust Interactive Segmentation,'' \textit{CVPR}, 2018.
+    \item[12] R. A. Jacobs et al., ``Adaptive Mixtures of Local Experts,'' \textit{Neural Computation}, vol. 3, no. 1, pp. 79--87, 1991.
+\end{enumerate}
+
+\end{document}

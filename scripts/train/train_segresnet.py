@@ -38,9 +38,50 @@ from src.models.segresnet import (
     compute_dice,
     region_logits_to_wt,
 )
+from src.utils.dataloader import loader_kwargs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+
+class _SegResCollate:
+    """Picklable collate for SegResNet (optional multi-region + augment)."""
+
+    def __init__(self, do_augment: bool = True, multi_region: bool = True):
+        self.do_augment = do_augment
+        self.multi_region = multi_region
+
+    def __call__(self, batch):
+        images = torch.stack([b["image"] for b in batch])
+        gt_masks = torch.stack([b["gt_mask"] for b in batch])
+        rough_masks = torch.stack([b["rough_mask"] for b in batch])
+        gt_regions = (
+            torch.stack([b["gt_regions"] for b in batch]) if self.multi_region else None
+        )
+
+        if self.do_augment:
+            for i in range(images.size(0)):
+                if torch.rand(1).item() > 0.5:
+                    images[i] = torch.flip(images[i], dims=[-1])
+                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-1])
+                    if gt_regions is not None:
+                        gt_regions[i] = torch.flip(gt_regions[i], dims=[-1])
+                if torch.rand(1).item() > 0.5:
+                    images[i] = torch.flip(images[i], dims=[-2])
+                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-2])
+                    if gt_regions is not None:
+                        gt_regions[i] = torch.flip(gt_regions[i], dims=[-2])
+                if torch.rand(1).item() > 0.75:
+                    k = torch.randint(1, 4, (1,)).item()
+                    images[i] = torch.rot90(images[i], k, dims=[-2, -1])
+                    gt_masks[i] = torch.rot90(gt_masks[i], k, dims=[-2, -1])
+                    if gt_regions is not None:
+                        gt_regions[i] = torch.rot90(gt_regions[i], k, dims=[-2, -1])
+
+        out = {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
+        if gt_regions is not None:
+            out["gt_regions"] = gt_regions
+        return out
 
 
 def train_segresnet(
@@ -111,57 +152,18 @@ def train_segresnet(
     if multi_region:
         log.info("Large 영역 헤드: ED + TC(NCR∪ET) → 추론 WT = ED ∪ TC")
 
-    def augment_batch(batch):
-        images = torch.stack([b["image"] for b in batch])
-        gt_masks = torch.stack([b["gt_mask"] for b in batch])
-        rough_masks = torch.stack([b["rough_mask"] for b in batch])
-        gt_regions = torch.stack([b["gt_regions"] for b in batch]) if multi_region else None
-
-        if augment:
-            for i in range(images.size(0)):
-                if torch.rand(1).item() > 0.5:
-                    images[i] = torch.flip(images[i], dims=[-1])
-                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-1])
-                    if gt_regions is not None:
-                        gt_regions[i] = torch.flip(gt_regions[i], dims=[-1])
-                if torch.rand(1).item() > 0.5:
-                    images[i] = torch.flip(images[i], dims=[-2])
-                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-2])
-                    if gt_regions is not None:
-                        gt_regions[i] = torch.flip(gt_regions[i], dims=[-2])
-                if torch.rand(1).item() > 0.75:
-                    k = torch.randint(1, 4, (1,)).item()
-                    images[i] = torch.rot90(images[i], k, dims=[-2, -1])
-                    gt_masks[i] = torch.rot90(gt_masks[i], k, dims=[-2, -1])
-                    if gt_regions is not None:
-                        gt_regions[i] = torch.rot90(gt_regions[i], k, dims=[-2, -1])
-
-        out = {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
-        if gt_regions is not None:
-            out["gt_regions"] = gt_regions
-        return out
-
-    def val_collate(batch):
-        images = torch.stack([b["image"] for b in batch])
-        gt_masks = torch.stack([b["gt_mask"] for b in batch])
-        rough_masks = torch.stack([b["rough_mask"] for b in batch])
-        out = {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
-        if multi_region:
-            out["gt_regions"] = torch.stack([b["gt_regions"] for b in batch])
-        return out
-
-    n_workers = 0
+    dl_kw = loader_kwargs()
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=n_workers, pin_memory=True,
-        collate_fn=augment_batch,
+        collate_fn=_SegResCollate(do_augment=augment, multi_region=multi_region),
+        **dl_kw,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=n_workers, pin_memory=True,
-        collate_fn=val_collate,
+        collate_fn=_SegResCollate(do_augment=False, multi_region=multi_region),
+        **dl_kw,
     )
-    log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
+    log.info(f"DataLoader: num_workers={dl_kw['num_workers']}, batch_size={batch_size}")
 
     # ── 모델 ────────────────────────────────────────────────
     sample_item = train_ds[0]

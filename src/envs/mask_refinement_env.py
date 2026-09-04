@@ -1,15 +1,17 @@
 """
 Step 2: RL 환경 설계 (Gymnasium 기반 커스텀 환경)
 
-State  : [image, current_mask, soft_probability, (optional edge)]
-         - Medium/Large: (3, H, W) [Image, Current Mask, Soft Prob Map]
-         - Small (Zoom-in): (4, 64, 64) [Zoomed Image, Mask, Prob, Edge Map]
+State  : [MRI (C ch), current_mask, soft_probability, (optional edge)]
+         - Medium/Large: (C+2, H, W)
+         - Small (Zoom-in): (C+3, 64, 64) + edge
 Action : 8방위 섹터별 마스크 수축/팽창 조절
-         - Medium/Large: MultiDiscrete([5]*8)
+         - Medium/Large: MultiDiscrete([5]*8) 또는 STOP 포함 시 ([5]*8 + [2])
            0=강수축(-1.0px), 1=약수축(-0.4px), 2=유지, 3=약팽창(+0.4px), 4=강팽창(+1.0px)
-         - Small: Box(-2.0, 2.0, shape=(8,)) 연속 픽셀 조절
+           STOP 채널: 0=계속, 1=에피소드 종료
+         - Small: Box(-2.0, 2.0, shape=(8,)) 또는 STOP 포함 시 shape=(9,)
+           마지막 차원 > 0 이면 에피소드 종료
 Reward : Boundary-DSC 기반 보상 강화 + HD95(px 단위) 패널티 + 위상 최적화
-Episode: 최대 max_steps 스텝, DSC >= target_dsc 이면 조기 종료
+Episode: 최대 max_steps 스텝, DSC >= target_dsc, 또는 STOP 행동
 """
 
 import numpy as np
@@ -23,11 +25,14 @@ from src.utils.metrics import dice as _dice, hd95 as _hd95, apply_monotonic_dsc_
 __all__ = ["MaskRefinementEnv", "_dice", "_hd95", "apply_monotonic_dsc_gate"]
 
 
-def _obs_image_slice(img: np.ndarray) -> np.ndarray:
-    """다채널 MRI는 t1ce(첫 채널)만 관측에 사용."""
-    if img.ndim == 3:
-        return img[0].astype(np.float32)
-    return img.astype(np.float32)
+def _obs_image_array(img: np.ndarray) -> np.ndarray:
+    """MRI → (C, H, W) float32. 단채널이면 C=1."""
+    arr = np.asarray(img, dtype=np.float32)
+    if arr.ndim == 2:
+        return arr[None]
+    if arr.ndim == 3:
+        return arr
+    raise ValueError(f"Unexpected image ndim={arr.ndim}")
 
 
 def _edge_map_from_image(img_2d: np.ndarray) -> np.ndarray:
@@ -57,8 +62,9 @@ class MaskRefinementEnv(gym.Env):
         채널 1: 현재 마스크 (H,W)
         채널 2: Uncertainty Map (H,W)
 
-    Action space: MultiDiscrete([5]*8)
-        8개 방위 섹터에 대해 독립적으로 0=강수축, 1=약수축, 2=유지, 3=약팽창, 4=강팽창
+    Action space:
+        - enable_stop=False: MultiDiscrete([5]*8) 또는 Box(8,)
+        - enable_stop=True: MultiDiscrete([5]*8+[2]) 또는 Box(9,) — 마지막 채널이 STOP
 
     Reward: Boundary-DSC 향상분 중심 보상 + HD95 패널티 + 위상 최적화
     """
@@ -77,6 +83,7 @@ class MaskRefinementEnv(gym.Env):
         model_type: str = "unet",
         refinement_mode: str = "small", # "small", "medium", "large"
         confidence_threshold: float = 0.85, # RL-Refiner 진입을 결정하는 기준값
+        enable_stop: bool = False,  # True면 에피소드 종료 STOP 행동 추가
     ):
         super().__init__()
         self.confidence_threshold = confidence_threshold
@@ -98,39 +105,53 @@ class MaskRefinementEnv(gym.Env):
         self.step_penalty = step_penalty
         self.model_type = model_type.lower()
         self.refinement_mode = refinement_mode
+        self.enable_stop = bool(enable_stop)
 
         N = images.shape[0]
         H, W = images.shape[-2:]
         self.H, self.W = H, W
+        sample_img = _obs_image_array(images[0])
+        self.img_ch = int(sample_img.shape[0])
 
-        # 이미지 그래디언트 맵 (Sobel Edge Map) 미리 계산
+        # 이미지 그래디언트 맵: 첫 채널(보통 T1ce) 기준
         self.edge_maps = np.zeros((N, H, W), dtype=np.float32)
         for i in range(N):
-            self.edge_maps[i] = _edge_map_from_image(_obs_image_slice(images[i]))
+            img_i = _obs_image_array(images[i])
+            self.edge_maps[i] = _edge_map_from_image(img_i[0])
 
-        # 관측 공간 정의 (small은 4채널 64x64 Zoom-in, 그 외는 기존 체크포인트와 호환되는 3채널 128x128)
+        # 관측: MRI(C) + mask + prob (+ edge for small)
         if self.refinement_mode == "small":
+            self._obs_ch = self.img_ch + 3
             self.observation_space = spaces.Box(
                 low=0.0, high=1.0,
-                shape=(4, 64, 64),
+                shape=(self._obs_ch, 64, 64),
                 dtype=np.float32
             )
         else:
+            self._obs_ch = self.img_ch + 2
             self.observation_space = spaces.Box(
                 low=0.0, high=1.0,
-                shape=(3, self.H, self.W),
+                shape=(self._obs_ch, self.H, self.W),
                 dtype=np.float32
             )
         
-        # 8개 섹터, 각 섹터별 행동 정의 (small은 연속 행동 공간 Box, 그 외는 이산 MultiDiscrete)
+        # 8개 섹터 + (옵션) STOP. STOP은 방위 Keep과 달리 에피소드를 끝낸다.
         if self.refinement_mode == "small":
-            self.action_space = spaces.Box(low=-2.0, high=2.0, shape=(8,), dtype=np.float32)
+            if self.enable_stop:
+                low = np.array([-2.0] * 8 + [-2.0], dtype=np.float32)
+                high = np.array([2.0] * 8 + [2.0], dtype=np.float32)
+                self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
+            else:
+                self.action_space = spaces.Box(low=-2.0, high=2.0, shape=(8,), dtype=np.float32)
         else:
-            self.action_space = spaces.MultiDiscrete([5] * 8)
+            if self.enable_stop:
+                self.action_space = spaces.MultiDiscrete([5] * 8 + [2])
+            else:
+                self.action_space = spaces.MultiDiscrete([5] * 8)
 
         self._idx = 0
         self._current_mask: np.ndarray = np.zeros((H, W), dtype=np.float32)
-        self._current_image: np.ndarray = np.zeros((H, W), dtype=np.float32)
+        self._current_image: np.ndarray = np.zeros((self.img_ch, H, W), dtype=np.float32)
         self._current_prob: np.ndarray = np.zeros((H, W), dtype=np.float32)
         self._current_edge: np.ndarray = np.zeros((H, W), dtype=np.float32)
         self._current_gt: np.ndarray = np.zeros((H, W), dtype=np.float32)
@@ -140,9 +161,15 @@ class MaskRefinementEnv(gym.Env):
 
     # ── 내부 유틸 ──────────────────────────────────────────
     def _obs(self) -> np.ndarray:
+        img = self._current_image
+        if img.ndim == 2:
+            img = img[None]
         if self.refinement_mode == "small":
-            obs = np.stack([self._current_image, self._current_mask, self._current_prob, self._current_edge], axis=0).astype(np.float32)
-            
+            obs = np.concatenate(
+                [img, self._current_mask[None], self._current_prob[None], self._current_edge[None]],
+                axis=0,
+            ).astype(np.float32)
+
             # Find connected components to avoid center-of-mass falling in empty space between disconnected components
             lbl, num_features = label(self._current_mask > 0.5)
             if num_features > 0:
@@ -152,22 +179,24 @@ class MaskRefinementEnv(gym.Env):
                 cy, cx = int(y_indices.mean()), int(x_indices.mean())
             else:
                 cy, cx = self.H // 2, self.W // 2
-            
+
             half = 32
             y1, y2 = max(0, cy - half), min(self.H, cy + half)
             x1, x2 = max(0, cx - half), min(self.W, cx + half)
-            
-            cropped = np.zeros((4, 64, 64), dtype=np.float32)
+
+            cropped = np.zeros((self._obs_ch, 64, 64), dtype=np.float32)
             pad_y1 = half - (cy - y1)
             pad_y2 = 64 - (half - (y2 - cy))
             pad_x1 = half - (cx - x1)
             pad_x2 = 64 - (half - (x2 - cx))
-            
+
             cropped[:, pad_y1:pad_y2, pad_x1:pad_x2] = obs[:, y1:y2, x1:x2]
             return cropped
         else:
-            # 실제 Uncertainty(Probability) Map을 3번째 채널로 전달 (버그 수정: 기존 zeros → 실제 prob map)
-            obs = np.stack([self._current_image, self._current_mask, self._current_prob], axis=0).astype(np.float32)
+            obs = np.concatenate(
+                [img, self._current_mask[None], self._current_prob[None]],
+                axis=0,
+            ).astype(np.float32)
             return obs
 
     # ── Gymnasium API ──────────────────────────────────────
@@ -179,7 +208,7 @@ class MaskRefinementEnv(gym.Env):
             self._idx = self.np_random.integers(0, len(self.images))
 
         img = self.images[self._idx]
-        self._current_image = _obs_image_slice(img)
+        self._current_image = _obs_image_array(img)
         self._current_mask = self.rough_masks[self._idx].copy()
         self._current_prob = self.probability_maps[self._idx].copy()
         self._current_edge = self.edge_maps[self._idx].copy()
@@ -207,6 +236,42 @@ class MaskRefinementEnv(gym.Env):
         return self._obs(), {}
 
     def step(self, action):
+        # STOP: 방위 Keep과 달리 에피소드를 즉시 종료 (마스크는 현재 상태 유지)
+        do_stop = False
+        if self.enable_stop:
+            action = np.asarray(action).reshape(-1)
+            if self.refinement_mode == "small":
+                do_stop = bool(float(action[8]) > 0.0)
+                sector_action = action[:8]
+            else:
+                do_stop = bool(int(action[8]) == 1)
+                sector_action = action[:8]
+        else:
+            sector_action = action
+
+        if do_stop:
+            cur_dsc = float(self._prev_dsc)
+            # STOP은 더 움직이지 않음. 초기보다 나쁘면 감점, 아니면 소폭 보너스.
+            if cur_dsc + 1e-6 < self._initial_dsc:
+                reward = -5.0
+            else:
+                reward = 1.0
+                if self.refinement_mode == "small" and cur_dsc >= 0.85:
+                    reward += 50.0
+                elif self.refinement_mode in ["medium", "large"] and cur_dsc >= 0.95:
+                    reward += 50.0
+            self._step_count += 1
+            info = {
+                "dsc": cur_dsc,
+                "boundary_dsc": float(self._prev_boundary_dsc),
+                "prev_dsc": cur_dsc,
+                "prev_boundary_dsc": float(self._prev_boundary_dsc),
+                "delta_dsc": 0.0,
+                "delta_boundary": 0.0,
+                "stopped": True,
+            }
+            return self._obs(), float(reward), True, False, info
+
         # 8개 섹터 개별 변형 (SDF 기반 연속 미세 변형 적용)
         # 분리된 종양이 있을 때 질량 중심이 빈 공간에 놓이는 현상을 방지하기 위해 가장 큰 연결 요소의 중심 사용
         lbl, num_features = label(self._current_mask > 0.5)
@@ -244,14 +309,14 @@ class MaskRefinementEnv(gym.Env):
             sector_pixels = (sectors == i)
             if self.refinement_mode == "small":
                 # 연속 공간: action[i] 가 직접 픽셀 shift 거리로 사용됨 (예: [-2, 2] 범위)
-                shift_val = float(action[i])
+                shift_val = float(sector_action[i])
                 mapped_actions.append(shift_val)
                 # Keep 여부 판정 (실수값이므로 절대값 0.1 이하는 Keep으로 간주)
                 if abs(shift_val) > 0.1:
                     num_non_keep += 1
             else:
                 # 이산 공간: 기존 checkpoints 호환성 유지하면서 미세 SDF shift로 변환
-                act = int(action[i])
+                act = int(sector_action[i])
                 mapped_actions.append(act)
                 # 0=강수축(-1.0px), 1=약수축(-0.4px), 2=유지(0.0px), 3=약팽창(0.4px), 4=강팽창(1.0px)
                 # 고정밀 보정을 위해 기존 morphology(1px/3px)보다 폭을 줄여 오버슈트 방지
@@ -302,11 +367,14 @@ class MaskRefinementEnv(gym.Env):
         hd95_weight = delta_hd95 if delta_hd95 >= 0 else delta_hd95 * 2.0
 
         # ── 타겟 달성 보너스 (Target Bonus) ──
+        # STOP이 켜져 있으면 매 스텝 +50을 주지 않는다 (멈추지 않게 되므로).
+        # STOP 시에만 목표 DSC면 +50을 준다.
         target_bonus = 0.0
-        if self.refinement_mode == "small" and new_dsc >= 0.85:
-            target_bonus = 50.0
-        elif self.refinement_mode in ["medium", "large"] and new_dsc >= 0.95:
-            target_bonus = 50.0
+        if not self.enable_stop:
+            if self.refinement_mode == "small" and new_dsc >= 0.85:
+                target_bonus = 50.0
+            elif self.refinement_mode in ["medium", "large"] and new_dsc >= 0.95:
+                target_bonus = 50.0
 
         # ── 고정밀 성능 유지 패널티 (Strict Monotonic Penalty) ──
         # 현재 DSC가 에피소드 초기 예측 성능(self._initial_dsc)보다 하락하는 행동을 하면 -5.0의 벌점을 부과
@@ -347,5 +415,6 @@ class MaskRefinementEnv(gym.Env):
             "prev_boundary_dsc": old_prev_boundary_dsc,
             "delta_dsc": delta_dsc,
             "delta_boundary": delta_boundary_dsc,
+            "stopped": False,
         }
         return self._obs(), reward, terminated, truncated, info

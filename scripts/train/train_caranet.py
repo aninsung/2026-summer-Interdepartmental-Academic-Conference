@@ -24,9 +24,53 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 from src.models.caranet import build_caranet
 from src.models.segresnet import BCEDiceLoss, DiceLoss, compute_dice
+from src.utils.dataloader import loader_kwargs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+
+class _CaraNetCollate:
+    """Picklable collate for Windows DataLoader workers."""
+
+    def __init__(self, do_augment: bool, do_zoom: bool, zoom_prob: float = 0.5, zoom_patch: int = 64):
+        self.do_augment = do_augment
+        self.do_zoom = do_zoom
+        self.zoom_prob = zoom_prob
+        self.zoom_patch = zoom_patch
+
+    def __call__(self, batch):
+        def _img(item):
+            t = item.get("image_25d")
+            return t if t is not None else item["image"]
+
+        images = torch.stack([_img(b) for b in batch])
+        gt_masks = torch.stack([b["gt_mask"] for b in batch])
+        rough_masks = torch.stack([b["rough_mask"] for b in batch])
+
+        if self.do_augment:
+            for i in range(images.size(0)):
+                if torch.rand(1).item() > 0.5:
+                    images[i] = torch.flip(images[i], dims=[-1])
+                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-1])
+                if torch.rand(1).item() > 0.5:
+                    images[i] = torch.flip(images[i], dims=[-2])
+                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-2])
+                if torch.rand(1).item() > 0.75:
+                    k = torch.randint(1, 4, (1,)).item()
+                    images[i] = torch.rot90(images[i], k, dims=[-2, -1])
+                    gt_masks[i] = torch.rot90(gt_masks[i], k, dims=[-2, -1])
+
+        if self.do_zoom:
+            from src.utils.zoom_crop import zoom_tensors
+            out_size = int(images.shape[-1])
+            for i in range(images.size(0)):
+                if torch.rand(1).item() < self.zoom_prob:
+                    images[i], gt_masks[i] = zoom_tensors(
+                        images[i], gt_masks[i], patch_size=self.zoom_patch, out_size=out_size
+                    )
+
+        return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
 
 class FocalTverskyLoss(nn.Module):
     def __init__(self, alpha: float = 0.3, beta: float = 0.7, gamma: float = 2.0, smooth: float = 1e-5):
@@ -131,51 +175,19 @@ def train_caranet(
     if use_zoom:
         log.info(f"Small zoom-crop: patch={zoom_patch}, train_prob={zoom_prob}")
 
-    def _collate(batch, do_augment: bool, do_zoom: bool):
-        def _img(item):
-            t = item.get("image_25d")
-            return t if t is not None else item["image"]
-
-        images = torch.stack([_img(b) for b in batch])
-        gt_masks = torch.stack([b["gt_mask"] for b in batch])
-        rough_masks = torch.stack([b["rough_mask"] for b in batch])
-
-        if do_augment:
-            for i in range(images.size(0)):
-                if torch.rand(1).item() > 0.5:
-                    images[i] = torch.flip(images[i], dims=[-1])
-                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-1])
-                if torch.rand(1).item() > 0.5:
-                    images[i] = torch.flip(images[i], dims=[-2])
-                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-2])
-                if torch.rand(1).item() > 0.75:
-                    k = torch.randint(1, 4, (1,)).item()
-                    images[i] = torch.rot90(images[i], k, dims=[-2, -1])
-                    gt_masks[i] = torch.rot90(gt_masks[i], k, dims=[-2, -1])
-
-        if do_zoom:
-            from src.utils.zoom_crop import zoom_tensors
-            out_size = int(images.shape[-1])
-            for i in range(images.size(0)):
-                if torch.rand(1).item() < zoom_prob:
-                    images[i], gt_masks[i] = zoom_tensors(
-                        images[i], gt_masks[i], patch_size=zoom_patch, out_size=out_size
-                    )
-
-        return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
-
-    n_workers = 0
+    dl_kw = loader_kwargs()
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=n_workers, pin_memory=True,
-        collate_fn=lambda b: _collate(b, do_augment=augment, do_zoom=use_zoom),
+        collate_fn=_CaraNetCollate(do_augment=augment, do_zoom=use_zoom,
+                                   zoom_prob=zoom_prob, zoom_patch=zoom_patch),
+        **dl_kw,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=n_workers, pin_memory=True,
-        collate_fn=lambda b: _collate(b, do_augment=False, do_zoom=False),
+        collate_fn=_CaraNetCollate(do_augment=False, do_zoom=False),
+        **dl_kw,
     )
-    log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
+    log.info(f"DataLoader: num_workers={dl_kw['num_workers']}, batch_size={batch_size}")
 
     # ── 모델 ────────────────────────────────────────────────
     sample_item = train_ds[0]
