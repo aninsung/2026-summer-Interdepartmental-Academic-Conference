@@ -23,9 +23,37 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 from src.models.unetplusplus import build_unetplusplus
 from src.models.segresnet import BCEDiceLoss, DiceLoss, compute_dice
+from src.utils.dataloader import loader_kwargs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+
+class _SegCollate:
+    """Picklable collate; do_augment=False for validation."""
+
+    def __init__(self, do_augment: bool = True):
+        self.do_augment = do_augment
+
+    def __call__(self, batch):
+        images = torch.stack([b["image"] for b in batch])
+        gt_masks = torch.stack([b["gt_mask"] for b in batch])
+        rough_masks = torch.stack([b["rough_mask"] for b in batch])
+
+        if self.do_augment:
+            for i in range(images.size(0)):
+                if torch.rand(1).item() > 0.5:
+                    images[i] = torch.flip(images[i], dims=[-1])
+                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-1])
+                if torch.rand(1).item() > 0.5:
+                    images[i] = torch.flip(images[i], dims=[-2])
+                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-2])
+                if torch.rand(1).item() > 0.75:
+                    k = torch.randint(1, 4, (1,)).item()
+                    images[i] = torch.rot90(images[i], k, dims=[-2, -1])
+                    gt_masks[i] = torch.rot90(gt_masks[i], k, dims=[-2, -1])
+
+        return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
 
 
 def train_unetplusplus(
@@ -90,40 +118,18 @@ def train_unetplusplus(
 
     log.info(f"학습 슬라이스: {len(train_ds)}  |  검증 슬라이스: {len(val_ds)}")
 
-    # ── Data Augmentation ──────────────────────────────────
-    def augment_batch(batch):
-        import torch
-        images = torch.stack([b["image"] for b in batch])
-        gt_masks = torch.stack([b["gt_mask"] for b in batch])
-        rough_masks = torch.stack([b["rough_mask"] for b in batch])
-
-        if augment:
-            for i in range(images.size(0)):
-                if torch.rand(1).item() > 0.5:
-                    images[i] = torch.flip(images[i], dims=[-1])
-                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-1])
-                if torch.rand(1).item() > 0.5:
-                    images[i] = torch.flip(images[i], dims=[-2])
-                    gt_masks[i] = torch.flip(gt_masks[i], dims=[-2])
-                if torch.rand(1).item() > 0.75:
-                    k = torch.randint(1, 4, (1,)).item()
-                    images[i] = torch.rot90(images[i], k, dims=[-2, -1])
-                    gt_masks[i] = torch.rot90(gt_masks[i], k, dims=[-2, -1])
-
-        return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
-
-    n_workers = 0
+    dl_kw = loader_kwargs()
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=n_workers, pin_memory=True,
-        collate_fn=augment_batch,
+        collate_fn=_SegCollate(do_augment=augment),
+        **dl_kw,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=n_workers, pin_memory=True,
-        collate_fn=augment_batch,
+        collate_fn=_SegCollate(do_augment=False),
+        **dl_kw,
     )
-    log.info(f"DataLoader: num_workers={n_workers}, batch_size={batch_size}")
+    log.info(f"DataLoader: num_workers={dl_kw['num_workers']}, batch_size={batch_size}")
 
     # ── 모델 ────────────────────────────────────────────────
     sample_item = train_ds[0]

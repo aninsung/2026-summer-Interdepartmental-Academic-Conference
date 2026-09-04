@@ -1,0 +1,39 @@
+{
+  "backbone": "resnet18",
+  "recipe": "p1",
+  "best_epoch": 7,
+  "best_val_acc": 0.8582580115036976,
+  "best_macro_recall": 0.859062673822982,
+  "select_metric": "macro_recall",
+  "best_score": 0.859062673822982,
+  "train_acc_at_best": 0.9155908639523337,
+  "recall_small": 0.8712984054669703,
+  "recall_medium": 0.8487467588591184,
+  "recall_large": 0.8571428571428571,
+  "cm": [
+    [
+      765,
+      113,
+      0
+    ],
+    [
+      78,
+      982,
+      97
+    ],
+    [
+      7,
+      50,
+      342
+    ]
+  ],
+  "params_m": 11.174915,
+  "in_channels": 2,
+  "seed": 42,
+  "epochs": 30,
+  "aug": true,
+  "class_weight": true,
+  "boundary_soft": false,
+  "ordinal_weight": 0.0,
+  "lr": 0.0003
+}

@@ -1,13 +1,18 @@
 # RL-Refiner 실험 결과
 
+> **논문 보고 프로토콜 (중요).** 메인 숫자는 **Stage 2 DSC 0.8948 / HD95 1.7336 px**이다.
+> 아래 표의 Stage 3 Final **0.9031**은 GT 단조 게이트 + best-of-15 **상한**이며 배포·논문 본표에 쓰지 않는다.
+> 배포 평가는 `python scripts/eval/evaluate_pipeline.py --split_role val` (기본 deploy) 또는 `--deploy_mode`.
+> 옛 상한 재현만 `--gt_upper_bound`.
+
 > 실험 이력과 최종 벤치마크를 한 파일로 정리한 문서입니다.
 > 이전 `EXPERIMENTS.md`, `final_models_report.md`, `technical_report.md`의 내용을 통합했습니다.
 
 - **데이터셋**: BraTS 2021 Task 1
 - **입력**: `t1ce+flair`, 128×128 2D 슬라이스
 - **지표**: DSC (↑), HD95 px (↓), Precision, Recall — 구현은 `src/utils/metrics.py`
-- **최신 실행**: 2026-08-20 `python run_pipeline.py batch_size=64` (seed 42, 결정적 모드 ON)
-- **비교 그림 표기**: 파이프라인 Stage 3(단조 DSC 게이트) = **TRIO**
+- **최신 실행**: 2026-08-20 `python run_pipeline.py batch_size=64` (seed 42, 결정적 모드 ON) — 당시 Stage 3는 GT 상한 프로토콜
+- **비교 그림 표기**: 파이프라인 = **TRIO** (논문 비교는 Stage 2 또는 배포형 Stage 3)
 - **파이프라인 구조**: [PIPELINE.md](PIPELINE.md) / **베이스라인**: [baselines/README.md](../baselines/README.md)
 
 ---

@@ -55,7 +55,49 @@ def _gt_free_accept(rough: np.ndarray, refined: np.ndarray) -> bool:
     return (0.2 * r) <= f <= (4.0 * r)
 
 
-def _refine_with_ppo(agent, image, gt, init_mask, prob_map, refinement_mode, n_steps=15, clip_shrink=False):
+def _policy_expects_stop(agent) -> bool:
+    """SB3 정책 action space가 STOP 채널을 포함하는지 판별."""
+    space = agent.policy.action_space
+    if hasattr(space, "nvec"):
+        return len(space.nvec) >= 9 and int(space.nvec[-1]) == 2
+    shape = getattr(space, "shape", None)
+    return bool(shape is not None and len(shape) == 1 and int(shape[0]) >= 9)
+
+
+def _assert_agent_stop_compat(agent, enable_stop: bool, name: str):
+    expects = _policy_expects_stop(agent)
+    if enable_stop and not expects:
+        raise RuntimeError(
+            f"{name}: --enable_stop 인데 체크포인트 action space에 STOP이 없습니다. "
+            "STOP으로 재학습한 zip을 쓰거나 --enable_stop 을 끄세요."
+        )
+    if (not enable_stop) and expects:
+        raise RuntimeError(
+            f"{name}: 체크포인트는 STOP 정책인데 --enable_stop 이 꺼져 있습니다. "
+            "배포 평가에는 --enable_stop --deploy_mode 를 쓰세요."
+        )
+
+
+def _refine_with_ppo(
+    agent,
+    image,
+    gt,
+    init_mask,
+    prob_map,
+    refinement_mode,
+    n_steps=15,
+    clip_shrink=False,
+    select_best=True,
+    apply_monotonic=True,
+    enable_stop=False,
+):
+    """PPO 보정.
+
+    select_best=True  → 15스텝 중 GT DSC 최고 마스크 (상한, 배포 불가)
+    select_best=False → 마지막(또는 STOP) 마스크 (배포에 가깝음)
+    apply_monotonic   → 보정 DSC < 초기면 초기 유지 (GT 필요)
+    enable_stop       → STOP 행동으로 학습된 에이전트일 때 True
+    """
     env = MaskRefinementEnv(
         image[None, ...],
         gt[None, ...],
@@ -64,26 +106,29 @@ def _refine_with_ppo(agent, image, gt, init_mask, prob_map, refinement_mode, n_s
         max_steps=n_steps,
         target_dsc=1.0,
         refinement_mode=refinement_mode,
+        enable_stop=enable_stop,
     )
     obs, _ = env.reset(seed=0)
     best_mask = init_mask.copy()
     best_dsc = dice(init_mask, gt)
+    last_mask = init_mask.copy()
     for _ in range(n_steps):
-        try:
-            action, _ = agent.predict(obs, deterministic=True)
-            if clip_shrink and np.sum(env._current_mask) < 35:
-                action = np.maximum(0.0, action)
-            obs, _, _, truncated, info = env.step(action)
-            step_dsc = float(info.get("dsc", dice(env._current_mask, gt)))
-            if step_dsc >= best_dsc:
-                best_dsc = step_dsc
-                best_mask = env._current_mask.copy()
-            if truncated:
-                break
-        except Exception as e:
-            print(f"Skipping RL step for component due to: {e}")
+        action, _ = agent.predict(obs, deterministic=True)
+        if clip_shrink and np.sum(env._current_mask) < 35:
+            action = np.asarray(action, dtype=np.float32).copy()
+            action[:8] = np.maximum(0.0, action[:8])
+        obs, _, terminated, truncated, info = env.step(action)
+        last_mask = env._current_mask.copy()
+        step_dsc = float(info.get("dsc", dice(last_mask, gt)))
+        if select_best and step_dsc >= best_dsc:
+            best_dsc = step_dsc
+            best_mask = last_mask.copy()
+        if terminated or truncated:
             break
-    return apply_monotonic_dsc_gate(init_mask, best_mask, gt)
+    out = best_mask if select_best else last_mask
+    if apply_monotonic:
+        return apply_monotonic_dsc_gate(init_mask, out, gt)
+    return out
 
 def main():
     import argparse
@@ -99,14 +144,74 @@ def main():
     parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
                         help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. Large는 과소분할이라 0.50.")
     parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
+    parser.add_argument(
+        "--stage3_mode",
+        type=str,
+        default="sl",
+        choices=["sl", "ppo", "skip"],
+        help="Stage3: sl=교대학습 SL refiner(기본), ppo=기존 PPO, skip=생략",
+    )
     parser.add_argument("--micro_area_floor", type=float, default=80.0,
                         help="Small 마스크 면적이 이 값 미만이면 임계값을 단계적으로 낮춘다.")
     parser.add_argument("--micro_thr_floor", type=float, default=0.15,
                         help="마이크로 조각 임계값 완화의 하한.")
     parser.add_argument("--cc_min_sizes", type=str, default="0,15,25",
                         help="클래스별(Small,Medium,Large) 연결요소 최소 픽셀. 0이면 비활성.")
+    parser.add_argument("--skip_plot", action="store_true", help="시각화 PNG 생략")
+    parser.add_argument(
+        "--metrics_out",
+        type=str,
+        default="results/pipeline_slice_metrics.npz",
+        help="슬라이스별 Init/Final 지표 저장 경로 (Wilcoxon·CI용)",
+    )
+    parser.add_argument(
+        "--deploy_mode",
+        action="store_true",
+        default=True,
+        help="배포형 평가(기본): 마지막(또는 STOP) 마스크 + 면적 게이트만",
+    )
+    parser.add_argument(
+        "--gt_upper_bound",
+        action="store_true",
+        help="논문 금지용 상한: GT best-of-N + 단조 DSC 게이트 (배포 아님)",
+    )
+    parser.add_argument(
+        "--last_mask",
+        action="store_true",
+        help="15스텝 중 GT best 대신 마지막 마스크 사용",
+    )
+    parser.add_argument(
+        "--no_monotonic_gate",
+        action="store_true",
+        help="단조 DSC 게이트 비활성화",
+    )
+    parser.add_argument(
+        "--enable_stop",
+        action="store_true",
+        help="STOP 행동으로 학습된 PPO 체크포인트 평가",
+    )
     args = parser.parse_args()
+    if args.skip_ppo:
+        args.stage3_mode = "skip"
 
+    # 기본은 배포 프로토콜. --gt_upper_bound 만 옛 GT 상한을 켠다.
+    if args.gt_upper_bound:
+        args.deploy_mode = False
+        args.last_mask = False
+        args.no_monotonic_gate = False
+        args.enable_stop = False
+        print("[gt_upper_bound] best-of-N + 단조 게이트 ON (논문 메인 수치로 쓰지 말 것)")
+    elif args.deploy_mode:
+        args.last_mask = True
+        args.no_monotonic_gate = True
+        # PPO 모드일 때만 STOP 강제
+        if args.stage3_mode == "ppo" and (not args.enable_stop):
+            args.enable_stop = True
+            print("[deploy_mode] --enable_stop 자동 활성화")
+
+    select_best = not args.last_mask
+    apply_monotonic = not args.no_monotonic_gate
+    enable_stop = bool(args.enable_stop)
     stage2_thr = [float(t) for t in args.stage2_thresholds.split(",")]
     if len(stage2_thr) != 3:
         parser.error("--stage2_thresholds 는 쉼표로 구분된 3개 값이어야 합니다.")
@@ -115,6 +220,11 @@ def main():
         parser.error("--cc_min_sizes 는 쉼표로 구분된 3개 정수여야 합니다.")
     print(f"Stage 2 이진화 임계값: Small={stage2_thr[0]}, Medium={stage2_thr[1]}, Large={stage2_thr[2]}")
     print(f"CC filter min_size: Small={cc_min[0]}, Medium={cc_min[1]}, Large={cc_min[2]}")
+    print(
+        f"Eval mode: select_best={select_best}, monotonic_gate={apply_monotonic}, "
+        f"enable_stop={enable_stop}"
+        + (" [deploy_mode]" if args.deploy_mode else "")
+    )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -139,46 +249,84 @@ def main():
     images_25d = dataset.get_numpy_25d_arrays()
     
     print("Loading 3-Stage Pipeline Models...")
-    in_ch = images.shape[1] if images.ndim == 4 else 1
-    pipeline = AdaptivePipeline(device, in_channels=in_ch)
+    img_in_ch = images.shape[1] if images.ndim == 4 else 1
+    pipeline = AdaptivePipeline(device, in_channels=img_in_ch)
     
-    # 3. Stage 3: RL Refiner (Multi-Agent)
-    print("Loading PPO Refiners...")
+    # 3. Stage 3: SL Refiner and/or PPO
+    print(f"Loading Stage3 refiners (mode={args.stage3_mode})...")
     agents = {}
+    sl_nets = {}
     agent_name_map = {
         "small": "ppo_small.zip",
         "medium": "ppo_medium.zip",
-        "large": "ppo_large.zip"
+        "large": "ppo_large.zip",
     }
+    sl_name_map = {
+        "small": "sl_refiner_small.pt",
+        "medium": "sl_refiner_medium.pt",
+        "large": "sl_refiner_large.pt",
+    }
+    from src.models.sl_refiner import DualHeadRefiner, apply_sl_refiner
+
+    missing_stage3 = []
     for mode, class_idx in zip(["small", "medium", "large"], [0, 1, 2]):
-        agent_path = f"checkpoints/{agent_name_map[mode]}"
-        if args.skip_ppo:
-            agents[class_idx] = None
-        elif os.path.exists(agent_path):
-            print(f"Loading PPO Agent: {agent_path}")
-            agents[class_idx] = PPO.load(agent_path, device=device)
-        else:
-            print(f"[Warning] PPO Agent not found: {agent_path}. S3 Refinement will be skipped for class {class_idx}.")
-            agents[class_idx] = None
-        
-    initial_dsc_list = []
-    initial_hd95_list = []
+        agents[class_idx] = None
+        sl_nets[class_idx] = None
+        if args.stage3_mode == "skip":
+            continue
+        if args.stage3_mode == "sl":
+            sl_path = f"checkpoints/{sl_name_map[mode]}"
+            if os.path.exists(sl_path):
+                print(f"Loading SL Refiner: {sl_path}")
+                ckpt = torch.load(sl_path, map_location=device, weights_only=False)
+                sd = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+                if isinstance(ckpt, dict) and "in_ch" in ckpt:
+                    sl_in_ch = int(ckpt["in_ch"])
+                elif isinstance(sd, dict) and "enc.0.weight" in sd:
+                    sl_in_ch = int(sd["enc.0.weight"].shape[1])
+                else:
+                    sl_in_ch = img_in_ch + 2
+                net = DualHeadRefiner(in_ch=sl_in_ch).to(device)
+                net.load_state_dict(sd)
+                net.eval()
+                sl_nets[class_idx] = net
+            else:
+                missing_stage3.append(sl_path)
+        elif args.stage3_mode == "ppo":
+            agent_path = f"checkpoints/{agent_name_map[mode]}"
+            if os.path.exists(agent_path):
+                print(f"Loading PPO Agent: {agent_path}")
+                agent = PPO.load(agent_path, device=device)
+                _assert_agent_stop_compat(agent, enable_stop, agent_path)
+                agents[class_idx] = agent
+            else:
+                missing_stage3.append(agent_path)
+
+    if missing_stage3:
+        raise FileNotFoundError(
+            f"stage3_mode={args.stage3_mode} 인데 체크포인트가 없습니다: {missing_stage3}. "
+            "Stage3를 학습하거나 --stage3_mode skip 을 쓰세요."
+        )
+
     final_dsc_list = []
     final_hd95_list = []
+    initial_dsc_list = []
+    initial_hd95_list = []
     
     class_initial_dsc = {0: [], 1: [], 2: []}
     class_initial_hd95 = {0: [], 1: [], 2: []}
-    class_final_dsc = {0: [], 1: [], 2: []}
-    class_final_hd95 = {0: [], 1: [], 2: []}
-    # 과분할(precision↓) / 과소분할(recall↓) 진단용 보조 지표
     class_initial_prec = {0: [], 1: [], 2: []}
     class_initial_rec = {0: [], 1: [], 2: []}
+    class_final_dsc = {0: [], 1: [], 2: []}
+    class_final_hd95 = {0: [], 1: [], 2: []}
     class_final_prec = {0: [], 1: [], 2: []}
     class_final_rec = {0: [], 1: [], 2: []}
     
     class_counts = {0:0, 1:0, 2:0}
     monotonic_reverts = 0
     all_candidates = []
+    slice_pids = []
+    slice_cls = []
     
     small_active_init, small_active_fin, small_active_init_hd, small_active_hd = [], [], [], []
     small_micro_init, small_micro_fin, small_micro_init_hd, small_micro_hd = [], [], [], []
@@ -229,11 +377,18 @@ def main():
                 if np.sum(cand_mask) >= args.micro_area_floor:
                     break
         rough_mask_np = filter_small_components(rough_mask_np, cc_min[c])
-            
+
         init_dsc = dice(rough_mask_np, gt_np)
         init_hd95 = hd95(rough_mask_np, gt_np)
         initial_dsc_list.append(init_dsc)
         initial_hd95_list.append(init_hd95)
+        class_initial_dsc[c].append(init_dsc)
+        class_initial_hd95[c].append(init_hd95)
+        class_initial_prec[c].append(precision(rough_mask_np, gt_np))
+        class_initial_rec[c].append(recall(rough_mask_np, gt_np))
+
+        slice_pids.append(dataset._sample_pids[i])
+        slice_cls.append(c)
         
         # Stage 3: Component-wise Independent Refinement
         from scipy.ndimage import label as sp_label
@@ -253,18 +408,14 @@ def main():
             comp_mask_k = (lbl == k).astype(np.float32)
             comp_area = float(np.sum(comp_mask_k))
             
-            # Component-level Size Routing (개별 컴포넌트 크기에 따라 적합한 전문가 에이전트 매핑)
-            if comp_area < 300:
-                ck = 0
-            elif comp_area < 700:
-                ck = 1
-            else:
-                ck = 2
-                
+            # Stage3 라우팅: 슬라이스 분류기 클래스와 동일 (학습 GT-class / Expert와 정합)
+            # 컴포넌트는 독립 보정하되, Refiner는 슬라이스 클래스 ck=c 를 쓴다.
+            ck = int(c)
             agent_k = agents[ck]
+            sl_k = sl_nets[ck]
             ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
             
-            if agent_k is None:
+            if agent_k is None and sl_k is None:
                 final_mask_np = np.maximum(final_mask_np, comp_mask_k)
                 continue
 
@@ -273,7 +424,6 @@ def main():
             comp_dilated = binary_dilation(comp_mask_k, struct_k, iterations=dilate_iter)
             is_micro = (ck == 0 and comp_area < 50)
             # TTA 재이진화는 Stage 2와 같은 슬라이스 클래스 임계값을 쓴다.
-            # 컴포넌트 크기 ck 로 자르면 Large 슬라이스의 작은 덩어리가 Small 0.80으로 다시 잘린다.
             tta_thr = 0.30 if is_micro else stage2_thr[c]
             comp_from_tta = (prob_tta_np > tta_thr).astype(np.float32) * comp_dilated
             if np.sum(comp_from_tta) == 0:
@@ -286,30 +436,46 @@ def main():
                     final_mask_np = np.maximum(final_mask_np, comp_from_tta)
                     continue
 
-            refined_k_mask = _refine_with_ppo(
-                agent_k,
-                images[i],
-                gt_masks[i],
-                comp_from_tta,
-                prob_tta_np * comp_from_tta,
-                ref_mode_k,
-                n_steps=15,
-                clip_shrink=(ck == 0),
-            )
+            if sl_k is not None:
+                img_2d = images[i]
+                refined_k_mask = apply_sl_refiner(
+                    sl_k,
+                    img_2d,
+                    comp_from_tta,
+                    (prob_tta_np * comp_from_tta).astype(np.float32),
+                    device,
+                    morph_small=(ck == 0),
+                )
+            else:
+                refined_k_mask = _refine_with_ppo(
+                    agent_k,
+                    images[i],
+                    gt_masks[i],
+                    comp_from_tta,
+                    prob_tta_np * comp_from_tta,
+                    ref_mode_k,
+                    n_steps=15,
+                    clip_shrink=(ck == 0),
+                    select_best=select_best,
+                    apply_monotonic=apply_monotonic,
+                    enable_stop=enable_stop,
+                )
             if np.sum(refined_k_mask) > 0:
                 refined_k_mask = binary_closing(refined_k_mask, struct_k).astype(np.float32)
             if np.sum(refined_k_mask) == 0 or not _gt_free_accept(comp_from_tta, refined_k_mask):
                 refined_k_mask = comp_from_tta
-            refined_k_mask = apply_monotonic_dsc_gate(comp_from_tta, refined_k_mask, gt_np)
+            if apply_monotonic:
+                refined_k_mask = apply_monotonic_dsc_gate(comp_from_tta, refined_k_mask, gt_np)
             final_mask_np = np.maximum(final_mask_np, refined_k_mask)
 
         if not _gt_free_accept(rough_mask_np, final_mask_np):
             final_mask_np = rough_mask_np
 
-        gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
-        if not np.array_equal(gated_mask, final_mask_np):
-            monotonic_reverts += 1
-        final_mask_np = gated_mask
+        if apply_monotonic:
+            gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
+            if not np.array_equal(gated_mask, final_mask_np):
+                monotonic_reverts += 1
+            final_mask_np = gated_mask
 
         fin_dsc = dice(final_mask_np, gt_np)
         fin_hd95 = hd95(final_mask_np, gt_np)
@@ -317,28 +483,10 @@ def main():
         final_dsc_list.append(fin_dsc)
         final_hd95_list.append(fin_hd95)
         
-        class_initial_dsc[c].append(init_dsc)
-        class_initial_hd95[c].append(init_hd95)
         class_final_dsc[c].append(fin_dsc)
         class_final_hd95[c].append(fin_hd95)
-        class_initial_prec[c].append(precision(rough_mask_np, gt_np))
-        class_initial_rec[c].append(recall(rough_mask_np, gt_np))
         class_final_prec[c].append(precision(final_mask_np, gt_np))
         class_final_rec[c].append(recall(final_mask_np, gt_np))
-        
-        # Stratification for Small Class
-        if c == 0:
-            gt_area = np.sum(gt_np)
-            if gt_area >= 50:
-                small_active_init.append(init_dsc)
-                small_active_fin.append(fin_dsc)
-                small_active_init_hd.append(init_hd95)
-                small_active_hd.append(fin_hd95)
-            else:
-                small_micro_init.append(init_dsc)
-                small_micro_fin.append(fin_dsc)
-                small_micro_init_hd.append(init_hd95)
-                small_micro_hd.append(fin_hd95)
         
         # Save representative samples per class for visualization later
         all_candidates.append({
@@ -352,14 +500,34 @@ def main():
             "delta_dsc": fin_dsc - init_dsc,
         })
 
+        if c == 0:
+            gt_area = np.sum(gt_np)
+            if gt_area >= 50:
+                small_active_init.append(init_dsc)
+                small_active_fin.append(fin_dsc)
+                small_active_init_hd.append(init_hd95)
+                small_active_hd.append(fin_hd95)
+            else:
+                small_micro_init.append(init_dsc)
+                small_micro_fin.append(fin_dsc)
+                small_micro_init_hd.append(init_hd95)
+                small_micro_hd.append(fin_hd95)
+
         if (i+1) % 100 == 0:
             print(f"Processed {i+1}/{len(images)} slices...")
             
-    print("\n--- Pipeline Evaluation ({routing}, PPO all classes, monotonic DSC gate, CC filter) ---".format(
-        routing="oracle routing" if args.oracle_routing else "classifier routing"
+    mode_tag = "deploy (last mask, area gate only)" if args.deploy_mode else (
+        f"select_best={select_best}, monotonic={apply_monotonic}"
+    )
+    print("\n--- Pipeline Evaluation ({routing}, PPO, {mode}) ---".format(
+        routing="oracle routing" if args.oracle_routing else "classifier routing",
+        mode=mode_tag,
     ))
-    print(f"Total Slices Evaluated: {len(initial_dsc_list)}")
-    print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
+    print(f"Total Slices Evaluated: {len(final_dsc_list)}")
+    if apply_monotonic:
+        print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
+    else:
+        print("Monotonic DSC gate: OFF")
     print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
     print(f"Average Initial DSC  (Stage 2):        {np.mean(initial_dsc_list):.4f}")
     print(f"Average Final   DSC  (Stage 3 RL):     {np.mean(final_dsc_list):.4f}")
@@ -369,32 +537,60 @@ def main():
     print("\n--- Class-wise Performance Breakdown ---")
     names = {0: "Small (CaraNet)", 1: "Medium (UNet++)", 2: "Large (SegResNet)"}
     for c in [0, 1, 2]:
-        if len(class_initial_dsc[c]) > 0:
+        if len(class_final_dsc[c]) > 0:
             init_dsc_avg = np.mean(class_initial_dsc[c])
             fin_dsc_avg  = np.mean(class_final_dsc[c])
             init_hd_avg  = np.mean(class_initial_hd95[c])
             fin_hd_avg   = np.mean(class_final_hd95[c])
-            print(f"[{names[c]}] count: {len(class_initial_dsc[c])} "
-                  f"| Initial DSC: {init_dsc_avg:.4f} -> Final DSC: {fin_dsc_avg:.4f} "
-                  f"| Initial HD95: {init_hd_avg:.4f} -> Final HD95: {fin_hd_avg:.4f} (px)")
-            print(f"    └ Precision: {np.mean(class_initial_prec[c]):.4f} -> {np.mean(class_final_prec[c]):.4f} "
-                  f"| Recall: {np.mean(class_initial_rec[c]):.4f} -> {np.mean(class_final_rec[c]):.4f} "
-                  f"(P<R: 과분할 / P>R: 과소분할)")
+            print(f"[{names[c]}] count: {len(class_final_dsc[c])} "
+                  f"| DSC {init_dsc_avg:.4f} → {fin_dsc_avg:.4f} "
+                  f"| HD95 {init_hd_avg:.4f} → {fin_hd_avg:.4f} (px)")
+            print(
+                f"    └ Precision: {np.mean(class_initial_prec[c]):.4f} → {np.mean(class_final_prec[c]):.4f} "
+                f"| Recall: {np.mean(class_initial_rec[c]):.4f} → {np.mean(class_final_rec[c]):.4f} "
+                f"(P<R: 과분할 / P>R: 과소분할)"
+            )
 
+    if small_active_init:
+        print(
+            f"[Small Active ≥50px] n={len(small_active_init)} "
+            f"| DSC {np.mean(small_active_init):.4f} → {np.mean(small_active_fin):.4f} "
+            f"| HD95 {np.mean(small_active_init_hd):.4f} → {np.mean(small_active_hd):.4f}"
+        )
+    if small_micro_init:
+        print(
+            f"[Small Micro <50px] n={len(small_micro_init)} "
+            f"| DSC {np.mean(small_micro_init):.4f} → {np.mean(small_micro_fin):.4f} "
+            f"| HD95 {np.mean(small_micro_init_hd):.4f} → {np.mean(small_micro_hd):.4f}"
+        )
 
-    print("\n--- Stratified Analysis for Small Class ---")
-    if len(small_active_init) > 0:
-        print(f"[Small - Active Tumor (>=50px)] count: {len(small_active_init)} "
-              f"| Initial DSC: {np.mean(small_active_init):.4f} -> Final DSC: {np.mean(small_active_fin):.4f} "
-              f"| Initial HD95: {np.mean(small_active_init_hd):.4f} -> Final HD95: {np.mean(small_active_hd):.4f} (px)")
-    if len(small_micro_init) > 0:
-        print(f"[Small - Micro Boundary Fragment (<50px)] count: {len(small_micro_init)} "
-              f"| Initial DSC: {np.mean(small_micro_init):.4f} -> Final DSC: {np.mean(small_micro_fin):.4f} "
-              f"| Initial HD95: {np.mean(small_micro_init_hd):.4f} -> Final HD95: {np.mean(small_micro_hd):.4f} (px)")
-    
-    # 시각화: 클래스 평균 Final DSC에 가깝고, Final > Initial인 원본 2장 → 총 6장
-    pipeline_samples = _select_pipeline_samples(all_candidates, class_final_dsc, n=2)
-    _plot_pipeline_results(pipeline_samples, output_dir="results")
+    os.makedirs(os.path.dirname(args.metrics_out) or ".", exist_ok=True)
+    np.savez_compressed(
+        args.metrics_out,
+        pid=np.array(slice_pids),
+        cls=np.array(slice_cls, dtype=np.int8),
+        init_dsc=np.array(initial_dsc_list, dtype=np.float64),
+        final_dsc=np.array(final_dsc_list, dtype=np.float64),
+        init_hd95=np.array(initial_hd95_list, dtype=np.float64),
+        final_hd95=np.array(final_hd95_list, dtype=np.float64),
+        deploy_mode=np.array([int(args.deploy_mode)]),
+        select_best=np.array([int(select_best)]),
+        monotonic_gate=np.array([int(apply_monotonic)]),
+    )
+    print(f"Saved slice metrics: {args.metrics_out}")
+    try:
+        import importlib.util
+        stats_path = os.path.join(os.path.dirname(__file__), "paired_stats.py")
+        spec = importlib.util.spec_from_file_location("paired_stats", stats_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.report_from_npz(args.metrics_out)
+    except Exception as exc:
+        print(f"[stats] skipped: {exc}")
+
+    if not args.skip_plot:
+        pipeline_samples = _select_pipeline_samples(all_candidates, class_final_dsc, n=2)
+        _plot_pipeline_results(pipeline_samples, output_dir="results")
 
 
 def _select_pipeline_samples(all_candidates, class_final_dsc, n=2):
@@ -409,21 +605,14 @@ def _select_pipeline_samples(all_candidates, class_final_dsc, n=2):
         mean_fin = float(np.mean(class_final_dsc[c])) if class_final_dsc[c] else float(
             np.mean([s["fin_dsc"] for s in class_candidates])
         )
-        improved = [s for s in class_candidates if s["fin_dsc"] > s["init_dsc"] + 1e-8]
-        used_fallback = False
-        if improved:
-            pool = improved
-        else:
-            pool = class_candidates
-            used_fallback = True
-        pool = sorted(pool, key=lambda s: abs(s["fin_dsc"] - mean_fin))
+        # 클래스 평균 Final에 가까운 표본 (Δ>0 강제 금지: 낙관적 체리피킹)
+        pool = sorted(class_candidates, key=lambda s: abs(s["fin_dsc"] - mean_fin))
         selected = pool[:n]
         pipeline_samples[c] = selected
         print(
             f"[Viz] {names[c]}: mean Final DSC={mean_fin:.4f}, "
-            f"pool={'final>initial' if not used_fallback else 'fallback(all)'} n={len(pool)}, "
-            f"selected Final={[round(s['fin_dsc'], 4) for s in selected]} "
-            f"Δ={[round(s['delta_dsc'], 4) for s in selected]}"
+            f"pool=all n={len(class_candidates)}, "
+            f"selected Final={[round(s['fin_dsc'], 4) for s in selected]}"
         )
     return pipeline_samples
 

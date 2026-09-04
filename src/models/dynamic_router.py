@@ -1,7 +1,11 @@
 import os
 import torch
 import torch.nn as nn
-from src.models.shape_classifier import build_shape_classifier
+from src.models.shape_classifier import (
+    build_shape_classifier,
+    infer_backbone_from_state_dict,
+    infer_in_channels_from_state_dict,
+)
 from src.models import build_unet, build_unetplusplus, build_segresnet, build_attention_unet, build_caranet
 from src.models.unet3plus import build_unet3plus
 from src.models.segresnet import region_logits_to_wt
@@ -20,14 +24,22 @@ class AdaptivePipeline(nn.Module):
         
         cls_ckpt = 'checkpoints/shape_classifier_best.pt'
         cls_in_channels = in_channels
+        cls_backbone = "resnet18"
         if os.path.exists(cls_ckpt):
             state_dict = torch.load(cls_ckpt, map_location=device, weights_only=True)
-            if 'conv1.weight' in state_dict:
-                cls_in_channels = state_dict['conv1.weight'].shape[1]
-            self.classifier = build_shape_classifier(in_channels=cls_in_channels, num_classes=3).to(device)
+            cls_backbone = infer_backbone_from_state_dict(state_dict)
+            cls_in_channels = infer_in_channels_from_state_dict(state_dict, default=in_channels)
+            self.classifier = build_shape_classifier(
+                in_channels=cls_in_channels, num_classes=3, backbone=cls_backbone
+            ).to(device)
             self.classifier.load_state_dict(state_dict)
+            print(f"[Stage1] loaded {cls_ckpt} backbone={cls_backbone} in_ch={cls_in_channels}")
         else:
-            self.classifier = build_shape_classifier(in_channels=in_channels, num_classes=3).to(device)
+            self.classifier = build_shape_classifier(
+                in_channels=in_channels, num_classes=3, backbone=cls_backbone
+            ).to(device)
+        self.cls_in_channels = int(cls_in_channels)
+        self.cls_backbone = cls_backbone
         self.classifier.eval()
         
         self.expert_small = self._load_expert(
@@ -152,8 +164,7 @@ class AdaptivePipeline(nn.Module):
         if true_class_preds is not None:
             class_preds = true_class_preds
         else:
-            cls_in_ch = self.classifier.conv1.weight.shape[1]
-            x_cls = self._match_in_channels(x, cls_in_ch)
+            x_cls = self._match_in_channels(x, self.cls_in_channels)
             class_logits = self.classifier(x_cls)
             _, class_preds = torch.max(class_logits, 1)
         

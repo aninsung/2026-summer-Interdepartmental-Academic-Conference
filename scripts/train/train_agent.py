@@ -297,8 +297,13 @@ def load_real_data(
     patient_ids: Optional[list] = None,
     mixup: bool = True,
     stage2_thresholds: str = "0.80,0.80,0.50",
+    oracle_expert: bool = False,
 ):
-    """실제 BraTS2021 데이터를 NumPy 배열로 반환."""
+    """실제 BraTS2021 데이터를 NumPy 배열로 반환.
+
+    oracle_expert=True 이면 GT 크기 클래스로 필터한 뒤, 해당 Expert만
+    강제 라우팅해 rough를 만든다 (Stage3 학습용 train/serve Expert 정합).
+    """
     from src.data.brats2020_dataset import BraTS2020Dataset
     import torch
     
@@ -323,6 +328,22 @@ def load_real_data(
     )
 
     rng = np.random.default_rng(noise_seed)
+    from src.utils.metrics import gt_size_class
+
+    target_class = {"small": 0, "medium": 1, "large": 2}[refinement_mode.lower()]
+    gt_classes = np.array([gt_size_class(gt) for gt in gts])
+    mask_indices = gt_classes == target_class
+    if not np.any(mask_indices):
+        raise ValueError(f"해당 클래스({refinement_mode})로 분류된 데이터가 하나도 없습니다!")
+
+    # GT 크기 필터를 rough 생성 전에 적용 → Expert/클래스 정합
+    imgs = imgs[mask_indices]
+    gts = gts[mask_indices]
+    imgs_25d = imgs_25d[mask_indices]
+    log.info(
+        "'%s' (GT Class %d) 선필터: %d 슬라이스",
+        refinement_mode, target_class, len(imgs),
+    )
 
     # 1. 합성 노이즈 마스크 및 시뮬레이션된 확률 맵 생성
     from src.data.brats2020_dataset import make_noisy_mask
@@ -337,8 +358,6 @@ def load_real_data(
         synthetic_probs[i] = gaussian_filter(synthetic_roughs[i].astype(float), sigma=2.0)
 
     # 2. 실제 모델 예측 마스크 및 Sigmoid 확률 맵 생성 (AdaptivePipeline 사용)
-    from src.utils.metrics import gt_size_class
-
     _REQUIRED_CKPTS = [
         "checkpoints/shape_classifier_best.pt",
         "checkpoints/caranet_best.pt",
@@ -363,7 +382,11 @@ def load_real_data(
     preds = []
     probs = []
     class_preds_all = []
-    log.info("학습 데이터에 대한 AdaptivePipeline 초안 마스크 및 확률 맵 생성 중...")
+    use_oracle = bool(oracle_expert)
+    log.info(
+        "초안 마스크 생성 중... (oracle_expert=%s, forced_class=%s)",
+        use_oracle, target_class if use_oracle else "classifier",
+    )
     with torch.no_grad():
         for start_idx in range(0, num_slices, batch_size):
             end_idx = min(start_idx + batch_size, num_slices)
@@ -372,8 +395,14 @@ def load_real_data(
                 batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device)
             else:
                 batch_t = torch.from_numpy(batch_imgs).to(device)
-            
-            rough_masks_t, class_preds = pipeline(batch_t)
+
+            if use_oracle:
+                forced = torch.full(
+                    (batch_t.shape[0],), target_class, dtype=torch.long, device=device
+                )
+                rough_masks_t, class_preds = pipeline(batch_t, true_class_preds=forced)
+            else:
+                rough_masks_t, class_preds = pipeline(batch_t)
             batch_preds_prob = rough_masks_t.squeeze(1).cpu().numpy()
             cls_np = class_preds.cpu().numpy()
             thr = np.array(
@@ -393,23 +422,6 @@ def load_real_data(
         actual_probs = np.squeeze(actual_probs, axis=1)
     class_preds_all = np.array(class_preds_all)
     log.info(f"AdaptivePipeline 초안 마스크 생성 완료 (개수: {len(actual_roughs)})")
-
-    # 3. GT 면적 기준 크기 클래스 필터 (Expert 학습과 동일)
-    target_class = {"small": 0, "medium": 1, "large": 2}[refinement_mode.lower()]
-    gt_classes = np.array([gt_size_class(gt) for gt in gts])
-    mask_indices = gt_classes == target_class
-    
-    imgs = imgs[mask_indices]
-    gts = gts[mask_indices]
-    synthetic_roughs = synthetic_roughs[mask_indices]
-    synthetic_probs = synthetic_probs[mask_indices]
-    actual_roughs = actual_roughs[mask_indices]
-    actual_probs = actual_probs[mask_indices]
-    
-    if len(imgs) == 0:
-        raise ValueError(f"해당 클래스({refinement_mode})로 분류된 데이터가 하나도 없습니다!")
-        
-    log.info(f"'{refinement_mode}' (GT Class {target_class}) 필터링 완료: {len(imgs)}개 슬라이스 사용")
 
     if mixup:
         imgs = np.concatenate([imgs, imgs], axis=0)
@@ -476,6 +488,7 @@ def train_agent(
     milestone_ratios:    list  = None,        # 저장 비율 목록 (기본 [0.25, 0.5, 0.75])
     # 모드
     refinement_mode:     str   = "small",     # "small", "medium", "large"
+    enable_stop:         bool  = False,       # 에피소드 STOP 행동 (best-of-N 대체용)
     patient_split:       Optional[str] = None,
     stage2_thresholds:   str   = "0.80,0.80,0.50",
     # 재현성
@@ -516,9 +529,10 @@ def train_agent(
             model_type=model_type,
             refinement_mode=refinement_mode,
             patient_ids=train_ids,
-            mixup=True,
+            mixup=False,
             noise_seed=seed,
             stage2_thresholds=stage2_thresholds,
+            oracle_expert=True,
         )
         val_images, val_gt_masks, val_roughs, val_uncerts = load_real_data(
             train_root=train_root,
@@ -532,6 +546,7 @@ def train_agent(
             mixup=False,
             noise_seed=seed,
             stage2_thresholds=stage2_thresholds,
+            oracle_expert=True,
         )
     else:
         images, gt_masks, rough_masks, uncertainty_maps = load_synthetic_data()
@@ -551,7 +566,7 @@ def train_agent(
 
     # ── VecEnv 생성 ─────────────────────────────────────────
     # Monitor wrapper 적용 팩토리
-    def make_monitored_env_fn(images, gt_masks, rough_masks, uncertainty_maps, max_steps, target_dsc, step_penalty, model_type, refinement_mode):
+    def make_monitored_env_fn(images, gt_masks, rough_masks, uncertainty_maps, max_steps, target_dsc, step_penalty, model_type, refinement_mode, enable_stop=False):
         def _init():
             env = MaskRefinementEnv(
                 images=images,
@@ -563,12 +578,14 @@ def train_agent(
                 step_penalty=step_penalty,
                 model_type=model_type,
                 refinement_mode=refinement_mode,
+                enable_stop=enable_stop,
             )
             return Monitor(env)
         return _init
 
-    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, tr_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode), n_envs=n_envs)
-    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, val_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode)])
+    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, tr_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode, enable_stop), n_envs=n_envs)
+    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, val_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode, enable_stop)])
+    log.info(f"enable_stop={enable_stop} (action space STOP {'ON' if enable_stop else 'OFF'})")
 
     # ── PPO 에이전트 ─────────────────────────────────────────
     # TensorBoard 설치 여부 확인
@@ -773,6 +790,8 @@ def main():
     # 모드
     parser.add_argument("--refinement_mode",     type=str, default="small", choices=["small", "medium", "large"],
                         help="학습할 PPO 에이전트의 타겟 Shape Class (small, medium, large)")
+    parser.add_argument("--enable_stop", action=argparse.BooleanOptionalAction, default=None,
+                        help="에피소드 STOP 행동 추가 (--no-enable_stop 으로 끔). 미지정 시 yaml")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
     parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
                         help="평가와 동일한 클래스별(Small,Medium,Large) Stage 2 이진화 임계값")
@@ -822,6 +841,7 @@ def main():
         "plateau_check_freq":  "plateau_check_freq",
         "milestone_ratios":    "milestone_ratios",
         "refinement_mode":     "refinement_mode",
+        "enable_stop":         "enable_stop",
         "patient_split":       "patient_split",
         "stage2_thresholds":   "stage2_thresholds",
         "seed":                "seed",

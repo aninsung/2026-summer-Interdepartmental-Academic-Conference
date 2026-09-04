@@ -1,0 +1,30 @@
+{
+  "backbone": "efficientnet_b0",
+  "best_epoch": 15,
+  "best_val_acc": 0.8582580115036976,
+  "train_acc_at_best": 0.9987090367428004,
+  "recall_small": 0.8838268792710706,
+  "recall_medium": 0.8470181503889369,
+  "recall_large": 0.8345864661654135,
+  "cm": [
+    [
+      776,
+      102,
+      0
+    ],
+    [
+      114,
+      980,
+      63
+    ],
+    [
+      7,
+      59,
+      333
+    ]
+  ],
+  "params_m": 4.011103,
+  "in_channels": 2,
+  "seed": 42,
+  "epochs": 15
+}

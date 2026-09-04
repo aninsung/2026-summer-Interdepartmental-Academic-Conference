@@ -2,7 +2,9 @@
 
 3단계 동적 라우팅(분류 → 크기별 Expert 분할 → 크기별 경계 보정)과 4번째 평가 단계를 **코드 기준**으로 정리한 문서입니다.
 
-실험 수치와 이력은 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md), 대회 상위 입상 방법과의 비교는 [baselines/README.md](../baselines/README.md), 논문 초안은 [paper_draft_ko.md](paper_draft_ko.md)를 봅니다. 비교 그림·표에서 이 파이프라인 Stage 3(단조 DSC 게이트)는 **TRIO**로 표기합니다.
+실험 수치와 이력은 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md), 대회 상위 입상 방법과의 비교는 [baselines/README.md](../baselines/README.md), 논문 초안은 [paper_draft_ko.md](paper_draft_ko.md)를 봅니다. 비교 그림·표에서 이 파이프라인을 **TRIO**로 표기합니다.
+
+> **논문 주의.** Stage 3 Final 0.9031(단조 DSC 게이트 + best-of-15)은 GT 상한이다. 논문 메인·초록에는 Stage 2(0.8948) 또는 `--deploy_mode` 재측정값만 쓴다. 평가 기본값은 배포 프로토콜이다.
 
 기준 실행: **2026-08-20 `python run_pipeline.py batch_size=64`** (seed 42, 결정적 모드 ON). Stage 2 임계값 0.80 / 0.80 / 0.50, CC 0 / 15 / 25.
 

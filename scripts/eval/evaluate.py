@@ -447,7 +447,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_eval",   type=int, default=50)
     parser.add_argument("--max_steps",  type=int, default=30)
-    parser.add_argument("--output_dir", type=str, default="results")
+    parser.add_argument("--output_dir", type=str, default="results/legacy_single_backbone")
     parser.add_argument("--modality",   type=str, default="t1ce+flair")
     args = parser.parse_args()
 

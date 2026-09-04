@@ -33,8 +33,11 @@ def main():
     parser = argparse.ArgumentParser(description="RL-Refiner Dynamic Routing 파이프라인 실행 스크립트")
     parser.add_argument("--skip_classifier", action="store_true", help="Stage 1: Shape Classifier 학습 단계를 건너뜁니다.")
     parser.add_argument("--skip_experts", action="store_true", help="Stage 2: Expert 백본 모델(3종) 학습 단계를 건너뜁니다.")
-    parser.add_argument("--skip_agents", action="store_true", help="Stage 3: 맞춤형 PPO 에이전트(3종) 학습 단계를 건너뜁니다.")
+    parser.add_argument("--skip_agents", action="store_true", help="Stage 3: 교대 SL/PPO 학습을 건너뜁니다.")
     parser.add_argument("--skip_eval", action="store_true", help="Stage 4: 전체 파이프라인 성능 검증 단계를 건너뜁니다.")
+    parser.add_argument("--alt_rounds", type=int, default=2, help="Stage3 교대 라운드 수")
+    parser.add_argument("--alt_ppo_timesteps", type=int, default=20000, help="라운드당 PPO teacher 스텝")
+    parser.add_argument("--alt_sl_epochs", type=int, default=12, help="라운드당 SL epoch")
     
     # 공통 설정
     parser.add_argument("--config", type=str, default="configs/ppo_brats.yaml", help="Agent 학습용 YAML 설정 파일 경로")
@@ -101,48 +104,53 @@ def main():
         run_command(cmd_unetpp, "Stage 2 (Medium): UNet++ 중형 종양 특화 단독 학습")
         
         # ── Large Expert (SegResNet) ──
-        cmd_seg = [python_exec, "scripts/train/train_segresnet.py"] + extra_args + ["--save_path", "checkpoints/segresnet_best.pt"]
-        run_command(cmd_seg, "Stage 2 (Large): SegResNet 전 구간 + ED/TC 분리 학습")
+        cmd_seg = (
+            [python_exec, "scripts/train/train_segresnet.py"]
+            + extra_args
+            + ["--refinement_mode", "large", "--save_path", "checkpoints/segresnet_best.pt"]
+        )
+        run_command(cmd_seg, "Stage 2 (Large): SegResNet 대형 종양 특화 + ED/TC 분리 학습")
     else:
         log.info("⏭️  Stage 2: Expert 백본 모델 3종 학습 단계를 건너뜁니다.\n")
 
-    # 3. Stage 3: 맞춤형 PPO 에이전트 3종 학습
+    # 3. Stage 3: Alternating SL Fix <-> PPO teacher
     if not args.skip_agents:
-        agent_base_cmd = [
-            python_exec, "scripts/train/train_agent.py",
-            "--config", args.config,
-            "--train_root", "src/data/archive",
-            "--max_train_patients", str(n_patients),
-            "--patient_split", split_path,
-        ] + seed_args
-        if args.modality is not None:
-            agent_base_cmd += ["--modality", str(args.modality)]
-        
-        # Small Agent
-        run_command(agent_base_cmd + ["--model_type", "caranet", "--refinement_mode", "small", "--save_path", "checkpoints/ppo_small.zip"], 
-                    "Stage 3 (Small): Class 0 맞춤형 PPO 에이전트 학습")
-        
-        # Medium Agent
-        run_command(agent_base_cmd + ["--model_type", "unetplusplus", "--refinement_mode", "medium", "--save_path", "checkpoints/ppo_medium.zip"], 
-                    "Stage 3 (Medium): Class 1 맞춤형 PPO 에이전트 학습")
-        
-        # Large Agent
-        run_command(agent_base_cmd + ["--model_type", "segresnet", "--refinement_mode", "large", "--save_path", "checkpoints/ppo_large.zip"], 
-                    "Stage 3 (Large): Class 2 맞춤형 PPO 에이전트 학습")
+        for mode, mtype in (("small", "caranet"), ("medium", "unetplusplus"), ("large", "segresnet")):
+            cmd_alt = [
+                python_exec, "scripts/train/train_alt_stage3.py",
+                "--refinement_mode", mode,
+                "--model_type", mtype,
+                "--train_root", "src/data/archive",
+                "--max_train_patients", str(n_patients),
+                "--patient_split", split_path,
+                "--modality", str(args.modality),
+                "--seed", str(args.seed),
+                "--rounds", str(args.alt_rounds),
+                "--sl_epochs", str(args.alt_sl_epochs),
+                "--ppo_timesteps", str(args.alt_ppo_timesteps),
+                "--save_sl", f"checkpoints/sl_refiner_{mode}.pt",
+                "--save_ppo", f"checkpoints/ppo_{mode}.zip",
+            ]
+            if deterministic:
+                cmd_alt.append("--deterministic")
+            run_command(cmd_alt, f"Stage 3 ({mode}): Alternating SL Fix <-> PPO")
     else:
-        log.info("⏭️  Stage 3: 맞춤형 PPO 에이전트 3종 학습 단계를 건너뜁니다.\n")
+        log.info("⏭️  Stage 3: 교대 SL/PPO 학습 단계를 건너뜁니다.\n")
 
-    # 4. Stage 4: 전체 동적 라우팅 파이프라인 성능 평가 (`scripts/eval/evaluate_pipeline.py`)
+    # 4. Stage 4: 배포형 평가 (SL refiner)
     if not args.skip_eval:
-        cmd_eval = [
+        cmd_deploy = [
             python_exec, "scripts/eval/evaluate_pipeline.py",
             "--max_patients", str(n_patients),
             "--patient_split", split_path,
             "--split_role", "val",
+            "--deploy_mode",
+            "--stage3_mode", "sl",
+            "--metrics_out", "results/pipeline_slice_metrics_deploy.npz",
         ]
         if args.modality is not None:
-            cmd_eval += ["--modality", str(args.modality)]
-        run_command(cmd_eval, "Stage 4: 4-Stage Dynamic Routing Pipeline 최종 성능 검증")
+            cmd_deploy += ["--modality", str(args.modality)]
+        run_command(cmd_deploy, "Stage 4: Deploy-mode eval (SL refiner + area gate)")
     else:
         log.info("⏭️  Stage 4: 성능 검증 단계를 건너뜁니다.\n")
 

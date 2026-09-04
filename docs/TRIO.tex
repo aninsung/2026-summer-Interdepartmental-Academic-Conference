@@ -1,0 +1,148 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{kotex}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{TRIO: A Tri-Scale Hybrid Framework Combining Size-Matched Experts and Tailored PPO Refinement}
+\author{안인성, 한수진 \\
+\normalsize 야호 $\cdot$ 컴공 X 인지 연합 학술제 --- 연구 트랙}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+본 연구는 MRI 입력에 대해 종양 크기를 먼저 분류하고, 크기별 전문가 분할 모델로 초기 마스크를 생성한 뒤, 남은 경계 오차를 강화학습 기반 보정기(PPO)로 미세 조정하는 4단계 동적 라우팅 파이프라인(TRIO)을 제안한다. Expert 모델이 전역적인 형태를 학습하는 데 반해, 크기별로 성격이 다른 잔여 경계 오차는 순차적 미세 조정이 유리하다는 점에 착안하였다. 추론에서는 GT-free 면적 게이트와 STOP 행동만 쓰고, 정답에 의존하는 단조 DSC 게이트·best-of-N은 쓰지 않는다. BraTS 2021의 환자 단위 검증 집합에서 Stage 2(Expert) 평균 DSC는 0.8948, HD95는 1.7336 px이며, 같은 조건의 2차원 각색 베이스라인과 경쟁한다. Stage 3 배포형 수치는 STOP 재학습 후 동일 프로토콜로 보고한다.
+\end{abstract}
+
+\noindent\textbf{Keywords:} 뇌종양 분할, 자기공명영상, 강화학습, PPO, 동적 라우팅, TRIO, 의료영상
+
+\section{서론}
+뇌종양의 정확한 영역 분할은 종양 부담의 정량화, 치료 반응 평가 및 방사선 치료 계획에 중요한 기반 정보를 제공한다. 그러나 MRI에서 종양은 크기, 조영 양상, 경계의 선명도 및 주변 부종의 형태가 환자마다 달라 자동 분할 결과의 경계 부근에 미세한 오차가 남기 쉽다. U-Net 계열의 합성곱 신경망은 의료영상 분할에서 높은 성능을 보였지만[1], 하나의 모델로 작은 병변과 넓은 병변을 동시에 최적화하는 데에는 한계가 있다.
+
+이러한 문제를 해결하기 위해 본 연구는 분할과 후처리를 분리한다. 먼저 종양 크기별로 적합한 전문가 모델을 선택해 초기 마스크(rough mask)를 생성하고, 이후 PPO[5] 에이전트가 경계 주변을 반복적으로 조정하도록 설계하였다. 이는 고정된 형태학 연산과 달리 현재 마스크의 상태 및 영상 단서를 고려해 보정 행동을 선택할 수 있다는 장점이 있다.
+
+본 연구의 기여는 다음과 같다.
+\begin{enumerate}
+    \item 종양 크기별 전문가 모델을 선택하는 4단계 동적 라우팅 분할 구조를 설계하였다.
+    \item Expert 모델이 남긴 잔여 경계 오차를 크기별로 다르게 미세 조정하기 위해, 영상$\cdot$현재 마스크$\cdot$확률 맵$\cdot$에지 정보를 활용하는 맞춤형 PPO 기반 경계 보정 환경을 구성하였다. 이는 전역 학습에 강한 CNN의 한계를 보완하는 마지막 미세 조정 단계로 설계되었다[9, 10, 11].
+    \item 배포 가능한 GT-free 면적 게이트와 Precision/Recall 지표를 도입하였다. 정답에 의존하는 단조 DSC 게이트·best-of-N은 평가에 쓰지 않는다.
+    \item BraTS 2021[6]을 환자 단위로 분할한 검증 집합에서 Stage 2·배포형 Stage 3를 측정하고, 대회 상위 입상 방법[7, 8]의 2차원 각색 구현과 같은 조건에서 비교하였다.
+\end{enumerate}
+
+\section{관련 연구 분석}
+U-Net[1] 은 인코더-디코더 구조와 skip connection을 통해 위치 정보와 의미 정보를 결합하여 의료영상 분할의 대표적 기반 모델로 자리 잡았다[1]. 이후 UNet++는 중첩된 dense skip connection으로 특징 융합을 강화했으며[2], SegResNet은 잔차 연결을 이용해 3차원 의료영상 분할의 표현력을 높였다[3]. 또한 CaraNet은 작은 표적의 문맥 정보와 경계 단서를 활용하도록 설계되어 작은 병변 분할에 적합한 후보가 될 수 있다[4].
+
+한편 강화학습은 순차적 의사결정 문제에 적합하며, PPO는 안정적인 정책 갱신을 위해 널리 사용되는 정책경사 알고리즘이다[5]. 의료영상 분할 후처리에서는 초기 마스크를 상태로 두고, 팽창$\cdot$침식과 같은 행동을 통해 경계를 수정하는 방식으로 활용할 수 있다[9, 10, 11]. 기존의 단일 백본 또는 일괄 후처리 방식과 달리, 본 연구는 병변 크기에 따라 초기 분할기와 보정 정책의 역할을 분리하여 데이터 특성에 맞춘 처리를 시도한다.
+
+BraTS 2021에서 Luu와 Park은 nnU-Net의 인코더를 비대칭으로 확장하고 GroupNorm과 axial attention을 도입하여 최종 테스트 1위를 기록했다[7]. Myronenko 등(NVAUTO)은 SegResNet에 Barlow Twins 기반 중복 감소 학습을 결합해 2위를 기록했으며, 1위와의 차이는 통계적으로 유의하지 않았다[8]. 본 연구는 이 두 방법의 핵심 설계를 2차원 이진 분할 조건에 맞춰 재구현하여 비교 기준으로 삼는다.
+
+BraTS는 다중 모달리티 뇌종양 MRI와 표준화된 분할 레이블을 제공하는 대표 벤치마크이다[6]. 본 연구는 T1ce와 FLAIR를 사용한다.
+
+\section{연구 방법론}
+\subsection{전체 파이프라인}
+제안 방법 TRIO는 Stage 1--4의 네 단계로 구성된다. T1ce+FLAIR 한 장이 들어오면 크기를 먼저 고르고, 그 클래스의 전문가로 rough mask를 만든 뒤 PPO로 경계를 보정하고, 면적 게이트와 DSC$\cdot$HD95로 채점한다. Stage 2 Expert는 분류기 경로 하나를 탄다. Stage 3는 마스크 연결요소 면적으로 에이전트를 다시 고를 수 있다.
+
+Stage 1의 ResNet Shape Classifier가 T1ce+FLAIR(2채널)를 받아 Small / Medium / Large로 나눈다. Stage 2는 클래스마다 다른 백본으로 초기 마스크를 만든다. Small은 CaraNet, Medium은 UNet++, Large는 SegResNet이다. Stage 3는 그 rough mask를 상태로 두고 크기별 PPO 에이전트가 8방위 경계를 반복 수정한다. 세 에이전트의 출력은 하나의 refined mask로 모인다. Stage 4는 보정 전후 마스크를 나란히 두고 DSC 상승과 HD95 감소를 본다. 고정 형태학 후처리와 달리, 어떤 Expert$\cdot$PPO를 쓸지는 입력 크기에 따라 달라진다.
+
+학습$\cdot$평가는 환자 단위 80/20 분할을 공유한다. 210명 중 168명(9,868 슬라이스)으로 학습하고 42명(2,434 슬라이스)으로 평가하여, 같은 환자의 인접 슬라이스가 양쪽에 들어가는 누출을 막는다.
+
+\subsection{Stage 1: 크기 분류}
+Stage 1은 입력 슬라이스의 종양 규모를 세 구간으로 나눈다. ImageNet으로 사전학습한 ResNet18 Shape Classifier가 T1ce+FLAIR(2채널)를 받아 Small / Medium / Large 로짓을 출력한다. 학습 레이블은 GT 마스크 면적으로 정의하며, 구간은 Small $<300$ px, Medium 300--700 px, Large $\ge 700$ px이다. 추론 시에는 분류기 예측으로 Stage 2$\cdot$3 Expert/PPO를 선택하고, Expert$\cdot$PPO 학습 시 클래스 필터는 GT 면적을 사용해 라벨 누출을 줄인다. 검증 정확도는 0.8512였으며, 300/700 px 경계 부근의 모호한 슬라이스가 오분류의 주원인이다.
+
+\subsection{Stage 2: 크기별 전문가 분할}
+Stage 2는 Stage 1 클래스에 맞는 전문가 네트워크로 초기 마스크(rough mask)를 생성한다.
+Stage 2 백본은 크기별 실패 모드에 맞춰 고른다. 소형 병변(<300 px)은 128$\times$128에서 수 픽셀에 불과해 문맥이 희석되고, 높은 임계값에서 극소 종양이 사라지기 쉽다. 이에 작은 객체용 Context Axial Reverse Attention을 쓰는 CaraNet[4]을 배정하고 중형 병변(300--700 px)은 128$\times$128 슬라이스에서 이미 충분한 면적을 차지하므로, 소형처럼 탐지 실패보다 경계의 톱니와 내부 미채움이 주된 오차다. 이에 중첩 dense skip으로 다중 해상도 특징을 경계에서 재결합하는 UNet++[2]를 배정하고, Whole Tumor 1채널을 Medium 슬라이스만으로 학습한다. 대형 병변($\ge$700 px)은 내부는 잘 채워지나 Whole Tumor가 부종(ED)과 종양핵(TC)의 합이라 윤곽이 길고, 국소 돌출이 HD95를 키우기 쉽다. 이에 BraTS에서 큰 구조를 학습하는 데 쓰인 SegResNet[3]에 ED$\cdot$TC 2채널 헤드를 두고 합쳐 WT를 만들며, 학습은 크기 필터 없이 전 구간으로 하고 추론 때만 Large 경로에 사용한다.
+
+\begin{itemize}
+    \item \textbf{Small $\rightarrow$ CaraNet (2.5D)[4]:} 인접 슬라이스(prev/center/next)를 채널로 붙여 작은 병변의 문맥을 보강한다. 미세 파편은 학습 시 4배 오버샘플하고, 추론 시 zoom-crop으로 재추론한다.
+    \item \textbf{Medium $\rightarrow$ UNet++[2]:} 중첩 dense skip으로 중형 병변의 경계$\cdot$내부 채움을 안정적으로 학습한다.
+    \item \textbf{Large $\rightarrow$ SegResNet[3]:} ED$\cdot$TC 2채널을 예측한 뒤 Whole Tumor(WT)로 합친다. Large Expert는 크기 필터 없이 전 구간으로 학습하고, 추론 때만 Large 라우팅 슬라이스에 사용한다.
+\end{itemize}
+
+확률 맵은 클래스별 임계값 0.80 / 0.80 / 0.50(Small/Medium/Large)으로 이진화한다. Large는 과소분할 경향이 있어 임계값을 낮춘다. Small에서 높은 임계값으로 극소 종양이 사라질 수 있는 경우, 면적 하한에 따라 임계값을 단계적으로 낮추는 micro-threshold ladder를 적용한다. 이어서 클래스별 최소 연결요소 필터로 잔여 파편을 정리한다.
+
+\subsection{Stage 3: 맞춤형 PPO 경계 보정}
+Stage 2의 전문가 모델은 종양의 전반적인 위치와 형태를 비교적 안정적으로 예측하지만, 크기별로 성격이 다른 잔여 경계 오차까지 완전히 해소하지는 못한다. 소형 종양에서는 국소적이고 고주파적인 어긋남이, 대형 종양에서는 긴 윤곽에서 발생하는 국소 돌출(HD95 spike)이 주요 문제로 남는다.
+
+이에 Stage 3에서는 단일 PPO[5]로 전 크기를 보정하지 않고 소형$\cdot$중형$\cdot$대형 전용 PPO를 분리한다. 세 루프의 공통 구조는 ``상태 관측 $\rightarrow$ 정책으로 8방향 경계 이동 $\rightarrow$ 보상 $\rightarrow$ 최대 30 step''이며, 크기별로 달라지는 부분은 관측 해상도$\cdot$행동 표현$\cdot$보상 스케일이다.
+
+\textbf{소형:} 병변이 작아 전체 슬라이스에서는 경계 신호가 희석되므로, 마스크 중심 zoom crop과 Sobel 에지 채널을 포함한 고해상도 국소 상태를 사용한다. 행동은 연속 이동으로 두어 얇은 경계를 세밀하게 밀어 맞춘다. 보상은 소형에 맞게 size\_scale을 크게 두고, 상대적으로 낮은 DSC 임계에서도 보너스를 줘 ``거의 맞음'' 구간을 빠르게 고정한다.
+
+\textbf{중형:} 병변이 슬라이스에서 이미 충분한 면적을 차지하므로 전체 슬라이스 3채널 상태를 쓰고, 방향별 이산 5단계(강한/약한 축소$\cdot$유지$\cdot$확장)로 윤곽을 안정적으로 조정한다. 보상은 DSC 고득점을 우선하고 HD95 가중은 낮게 유지해, 과도한 경계 진동보다 Dice 정합을 유도한다.
+
+\textbf{대형:} 상태$\cdot$행동 공간은 중형과 동일하게 공유하되, 보상만 대형 오차에 맞게 재설정한다. 윤곽이 길어 HD95가 국소 돌출에 민감하므로 HD95 비중을 중형 대비 강화하고, size\_scale은 고정$\cdot$축소해 면적 팽창 유인을 억제한다. DSC 고득점 보너스 조건은 중형과 같이 높은 임계를 유지한다.
+
+이에 Stage 3에서는 Expert가 생성한 rough mask를 출발점으로 삼아, 크기별로 특화된 PPO 에이전트가 경계를 순차적으로 미세 조정하도록 설계하였다. 즉, CNN 기반 Expert가 전역적인 패턴을 학습하는 역할을 담당하고, PPO는 그 결과를 바탕으로 남은 오차를 세밀하게 보정하는 마지막 미세 조정(fine-tuning) 단계로 기능한다. 단일 PPO로 모든 크기를 다루지 않고 크기별 정책을 분리한 이유도, 잔여 오차의 성격이 크기마다 다르기 때문이다.
+
+\subsection{Stage 4: 최종 평가와 안전 장치}
+Stage 4는 검증 슬라이스에 Stage 1--3을 순서대로 적용한 뒤 최종 마스크를 채점한다. 처리 순서는 분류기 라우팅 $\rightarrow$ Expert 확률 맵을 클래스별 임계값으로 이진화 $\rightarrow$ 연결요소 필터 $\rightarrow$ PPO(최대 15스텝 또는 STOP) $\rightarrow$ 면적 게이트 $\rightarrow$ 지표 집계이다.
+
+중첩도는 예측 마스크 $P$와 정답 마스크 $G$에 대해
+\begin{equation}
+DSC(P,G) = \frac{2|P \cap G|}{|P| + |G|}
+\end{equation}
+로 정의하며 1에 가까울수록 좋다.
+경계 오차는 95\% Hausdorff 거리(HD95, 낮을수록 좋음)로 본다.
+본 실험의 HD95는 128$\times$128 슬라이스의 픽셀 단위이므로 밀리미터 임상 거리로 바로 해석할 수 없다. Precision이 Recall보다 크면 과소분할, 그 반대이면 과분할로 읽는다. 배포 안전 장치는 면적 게이트뿐이다. 보정 마스크가 비었거나 초기 면적의 0.2배 미만$\cdot$4배 초과이면 초기 마스크를 유지하며, 정답이 필요 없다. 단조 DSC 게이트와 best-of-N은 정답을 조회하므로 본 보고 프로토콜에서 제외한다.
+
+\section{실험 및 결과}
+\subsection{실험 설정}
+BraTS 2021 Task 1[6]의 T1ce와 FLAIR를 2채널로 묶어 사용한다. T1ce는 조영 증강 종양핵을, FLAIR는 주변 부종을 보완하며, 원 대회의 4모달리티$\cdot$3차원 패치 설정은 본 실험 범위에서 제외한다. 모든 슬라이스는 128$\times$128로 리사이즈한 2차원 단면으로 학습$\cdot$평가하므로, 보고하는 HD95는 밀리미터가 아니라 픽셀 거리이다.
+
+학습$\cdot$검증은 환자 단위 80/20 분할(seed 42)로 고정한다. 210명 중 168명(9,868 슬라이스)으로 학습하고 42명(2,434 슬라이스)의 유효 슬라이스 전수로 평가하여, 같은 환자의 인접 단면이 양쪽에 들어가는 누출을 막는다. 전역 시드와 결정적 연산을 기본으로 켠다. Stage 1 Shape Classifier의 검증 정확도는 0.8512였고, ImageNet 사전학습을 제거하면 0.8424로 약 0.9\%p 떨어진다. 최종 수치는 정답 면적이 아니라 분류기 예측으로 라우팅한 결과이며, 검증 집합의 클래스 분포는 Small 897 / Medium 1,152 / Large 385장이다.
+
+Stage 2 이진화 임계값은 검증 집합에서 0.80 / 0.80 / 0.50(Small/Medium/Large)으로 맞춘다. Small$\cdot$Medium은 과분할을 줄이기 위해 임계값을 올리고, Large는 과소분할을 줄이기 위해 0.50까지 내린다. 연결요소 최소 크기는 0 / 15 / 25 px이며 Small은 미세 병변이 지워지지 않도록 필터를 끈다. Small Expert는 50 px 미만 파편을 4배 오버샘플하고 추론 시 zoom-crop으로 재추론하며, Large Expert는 크기 필터 없이 전 구간 슬라이스로 ED$\cdot$TC를 학습한 뒤 Whole Tumor로 합친다.
+
+PPO는 클래스별로 약 300,000 스텝을 학습하고, 평가 시 STOP 또는 최대 15스텝 후 면적 게이트만 적용한다. 표에 넣는 확정 수치는 현재 Stage 2이며, Stage 3 배포형은 재측정 후 보고한다.
+
+\subsection{정량 결과}
+Stage 2 전체 DSC는 0.8948, HD95는 1.7336 px이다. 크기별 DSC는 Small 0.8286 / Medium 0.9264 / Large 0.9546이다. 과거 GT 단조 게이트·best-of-15로 만든 0.9031 계열은 배포 성능이 아니므로 본표·초록·결론에 쓰지 않는다.
+
+Small은 Precision $>$ Recall로 과소분할 경향이 있고, Medium$\cdot$Large는 상대적으로 균형에 가깝다.
+
+\subsection{TRIO vs SOTA}
+같은 42명 검증 환자와 같은 지표 BraTS 2021 1$\cdot$2위 방법(KAIST[7], NVAUTO[8])의 핵심 설계를 2차원$\cdot$2채널$\cdot$이진 WT 조건에 맞춰 재구현하였다. 3차원 패치, 4모달리티, 5-fold 앙상블, BraTS 후처리는 포함하지 않았으므로 대회 리더보드 점수와 직접 비교할 수 없다.
+
+게이트를 쓰지 않은 Stage 2(0.8948)는 KAIST[7](0.8923)를 넘고 NVAUTO[8](0.8971)에 근접한다.
+크기별로는 Medium Stage 2(0.9264)가 앞서고, Small$\cdot 베이스라인과 혼전이다. 베이스라인은 2,373장, 이번 파이프라인은 2,434장이라 슬라이스 수가 완전히 같지는 않다.
+
+\subsection{TRIO와 단일 백본+단일 PPO 비교}
+크기 라우팅이 필요한지를 확인하기 위해, 분류기 없이 한 개의 분할 백본과 한 개의 PPO만 쓰는 파이프라인 세 가지를 TRIO와 비교한다. 백본은 U-Net, UNet++, SegResNet이며, 전 슬라이스에 같은 Expert와 같은 보정기를 적용한다.
+
+210명 풀에서 rough mask 생성, RL 보정 후 전체 DSC는 UNet++ 0.7661, SegResNet 0.7638, U-Net 0.7198이다. TRIO Stage 2는 0.8948이다. 단일 백본 중에서는 UNet++가 평균이 가장 좋지만 Stage 2와의 격차는 크다.
+
+크기별로는 Small DSC는 TRIO Stage 2 0.8286 대비 U-Net 0.5499, UNet++ 0.6649, SegResNet 0.6599이다.
+
+세 단일 파이프라인의 실패 모드는 공통적으로 소형 과분할이며, 크기별 전문가와 맞춤형 PPO를 나눈 이득이 소형 종양 보정에서 가장 뚜렷하게 나타난다.
+
+\subsection{한계}
+이 배정은 아키텍처--실패 모드 대응에 따른 설계이며, 클래스 간 백본을 맞바꾼 비교는 수행하지 않았다. 같은 검증에서 Large DSC는 2차원 각색 nnU-Net(KAIST[7], 0.9614)이 SegResNet Expert(Stage 2 0.9546)보다 높아, 대형 구간의 여지는 백본 교체보다 ED/TC 헤드와 학습 범위에 있다.
+
+\section{결론 및 향후 연구}
+본 연구는 뇌종양 MRI 분할을 위해 크기 기반 동적 라우팅과 PPO[5] 기반 경계 보정을 결합한 TRIO 파이프라인을 제안했다. BraTS 2021[6]의 환자 단위 검증 집합에서 Stage 2 DSC 0.8948과 HD95 1.7336 px를 기록했으며, 같은 조건의 2차원 각색 베이스라인과 경쟁한다. Stage 3 배포형 수치는 단조 게이트·best-of-N 없이 재측정하여 보고한다.
+
+향후에는 첫째, 면적 게이트를 보완하는 불확실성 기반(GT-free) 품질 추정을 고도화한다. 둘째, 2차원 슬라이스가 아닌 3차원 볼륨 단위의 정책으로 확장해 슬라이스 간 일관성을 확보할 필요가 있다. 셋째, 소형 과소분할·분류기 오분류를 줄이고 기관 외부 데이터에서 일반화를 검증해야 한다.
+
+\section*{참고문헌}
+\begin{enumerate}
+    \item[1] O. Ronneberger, P. Fischer, and T. Brox, ``U-Net: Convolutional Networks for Biomedical Image Segmentation,'' \textit{MICCAI}, 2015.
+    \item[2] Z. Zhou, M. M. R. Siddiquee, N. Tajbakhsh, and J. Liang, ``UNet++: Redesigning Skip Connections to Exploit Multiscale Features in Image Segmentation,'' \textit{IEEE Trans. Med. Imaging}, vol. 39, no. 6, pp. 1856--1867, 2020.
+    \item[3] A. Myronenko, ``3D MRI Brain Tumor Segmentation Using Autoencoder Regularization,'' \textit{MICCAI BraTS Challenge}, 2018.
+    \item[4] A. Lou, S. Guan, M. Loew, ``CaraNet: Context Axial Reverse Attention Network for Segmentation of Small Medical Objects,'' \textit{Journal of Medical Imaging (SPIE)}, 2023.
+    \item[5] J. Schulman et al., ``Proximal Policy Optimization Algorithms,'' arXiv: 1707.06347, 2017.
+    \item[6] U. Baid et al., ``The RSNA-ASNR-MICCAI BraTS 2021 Benchmark on Brain Tumor Segmentation and Radiogenomic Classification,'' arXiv: 2107.02314, 2021.
+    \item[7] H. M. Luu and S.-H. Park, ``Extending nn-UNet for Brain Tumor Segmentation,'' arXiv: 2112.04653, 2021.
+    \item[8] A. Myronenko, A. Hatamizadeh, et al., ``Redundancy Reduction in Semantic Segmentation of 3D Brain Tumor MRIs,'' arXiv: 2111.00742, 2021.
+    \item[9] X. Liao et al., ``Iteratively-Refined Interactive 3D Medical Image Segmentation with Multi-Agent RL,'' \textit{CVPR}, 2020.
+    \item[10] R. Furuta et al., ``Fully Convolutional Network with Multi-Step Reinforcement Learning for Image Processing,'' \textit{AAAI}, 2019.
+    \item[11] G. Song et al., ``SeedNet: Automatic Seed Generation with Deep Reinforcement Learning for Robust Interactive Segmentation,'' \textit{CVPR}, 2018.
+    \item[12] R. A. Jacobs et al., ``Adaptive Mixtures of Local Experts,'' \textit{Neural Computation}, vol. 3, no. 1, pp. 79--87, 1991.
+\end{enumerate}
+
+\end{document}
