@@ -2,9 +2,9 @@
 
 2026 컴공&인지 연합학술제 연구트랙 · 팀 야호
 
-**크기별 전문가 분할 + PPO 경계 보정으로 뇌종양 MRI 마스크를 다듬는 시스템**
+**크기별 전문가 분할 + SL 경계 보정(PPO teacher 증류)으로 뇌종양 MRI 마스크를 다듬는 시스템**
 
-딥러닝이 만든 초기 분할(Rough Mask)의 경계 오차를, 종양 크기에 맞는 Expert와 PPO 에이전트가 순서대로 보정합니다. 비교 그림·표에서는 이 파이프라인을 **TRIO**로 표기합니다.
+딥러닝이 만든 초기 분할(Rough Mask)의 경계 오차를, 종양 크기에 맞는 Expert와 **SL Refiner**(학습 시 PPO teacher로 증류)가 순서대로 보정합니다. 비교 그림·표에서는 이 파이프라인을 **TRIO**로 표기합니다.
 
 | 검증 집합 | Stage 2 DSC | Stage 3 DSC (배포) | HD95 |
 |---|---:|---:|---:|
@@ -32,7 +32,7 @@ U-Net 계열 모델은 종양의 대략적인 위치는 잘 잡지만, 경계에
 
 - **정밀도:** 감마나이프 같은 정밀 방사선 치료에서는 1 mm 수준의 오차도 부담이 됩니다.
 - **비용:** 의료진이 모든 경계를 손으로 고치는 과정은 시간과 비용이 큽니다.
-- **접근:** 종양 크기를 먼저 나누고, 크기별 전문가 모델과 PPO 보정기로 후처리를 자동화합니다.
+- **접근:** 종양 크기를 먼저 나누고, 크기별 전문가 모델과 SL 보정기로 후처리를 자동화합니다.
 
 평가 지표는 겹침 비율 **DSC**(높을수록 좋음), 경계 거리 **HD95**(낮을수록 좋음), 과분할/과소분할을 나누는 **Precision / Recall**입니다.
 
@@ -46,18 +46,18 @@ U-Net 계열 모델은 종양의 대략적인 위치는 잘 잡지만, 경계에
 |:---:|---|---|
 | **1** | 종양 면적으로 Small / Medium / Large 분류 | `shape_classifier_best.pt` |
 | **2** | 클래스별 Expert가 확률 맵 생성 → 클래스별 임계값으로 이진화 | `caranet_best.pt`, `unetplusplus_best.pt`, `segresnet_best.pt` |
-| **3** | 클래스별 PPO가 8방위 경계를 SDF로 미세 조정 | `ppo_small.zip`, `ppo_medium.zip`, `ppo_large.zip` |
-| **4** | DSC / HD95 / Precision / Recall 평가 및 시각화 | `results/pipeline_sample_*.png` |
+| **3** | 클래스별 SL Refiner 학습 (PPO teacher 교대 증류). **배포 추론은 SL** | `sl_refiner_*.pt`, `ppo_*.zip`(teacher) |
+| **4** | DSC / HD95 / Precision / Recall 평가 (`--deploy_mode`, area gate) | `results/pipeline_sample_*.png` |
 
 크기별 동작:
 
-| 클래스 | 면적 | Expert | PPO |
+| 클래스 | 면적 | Expert | Stage3 (배포=SL) |
 |---|---|---|---|
-| Small | `<300 px` | CaraNet 2.5D (`z-1, z, z+1`), 64×64 crop, 4채널 | 연속 행동 `[-2, 2]⁸` |
-| Medium | `300–700 px` | UNet++, 전체 128×128, 3채널 | 이산 5단계 × 8섹터 |
-| Large | `≥700 px` | SegResNet (ED/TC → WT), 전체 128×128 | 이산 5단계 × 8섹터, HD95 보상 가중치 강화 |
+| Small | `<300 px` | CaraNet 2.5D (`z-1, z, z+1`) | DualHead SL (+ PPO teacher 학습용) |
+| Medium | `300–700 px` | UNet++ | DualHead SL (+ PPO teacher) |
+| Large | `≥700 px` | SegResNet (ED/TC → WT) | DualHead SL (+ PPO teacher) |
 
-관측에는 GT가 들어가지 않습니다. GT는 학습 시 보상 계산과 평가 시 게이트·지표에만 씁니다.
+관측에는 GT가 들어가지 않습니다. GT는 학습 시 손실/보상과 평가 지표에만 씁니다. **Stage3 학습·평가 라우팅은 모두 Stage1 분류기**를 씁니다(Expert도 동일). Stage2 Expert 단독 학습만 GT 면적으로 특화합니다.
 
 데이터는 **환자 단위**로 나눕니다. 같은 환자의 인접 슬라이스가 train과 val에 동시에 들어가지 않습니다. 분할 파일 `checkpoints/patient_split.json`(seed 42)을 Stage 1–4와 베이스라인이 공유합니다.
 
@@ -78,9 +78,9 @@ U-Net 계열 모델은 종양의 대략적인 위치는 잘 잡지만, 경계에
 |---|---|---|
 | Stage 1 Shape Classifier | Best Val Acc | **0.8512** (ImageNet 사전학습) |
 | Stage 2 Expert 3종 | val 초기 DSC (S / M / L) | **0.8286** / **0.9264** / **0.9546** |
-| Stage 3 PPO 3종 | 학습 스텝 | 303,104 each |
+| Stage 3 | Alternating SL ↔ PPO teacher | `sl_refiner_*.pt` (배포), `ppo_*.zip` (teacher) |
 
-| 지표 | Stage 2 (초기 분할) | Stage 3 (배포, 재측정) |
+| 지표 | Stage 2 (초기 분할) | Stage 3 (배포 SL, `--deploy_mode`) |
 |---|---:|---:|
 | **평균 DSC** | **0.8948** | `--deploy_mode` 재측정 |
 | **평균 HD95** | **1.7336 px** | `--deploy_mode` 재측정 |
@@ -100,7 +100,7 @@ U-Net 계열 모델은 종양의 대략적인 위치는 잘 잡지만, 경계에
 
 Stage 2(0.8948)는 KAIST(0.8923)를 넘고 NVAUTO(0.8971)에 근접합니다.
 
-> **배포 안전 장치.** 면적 게이트(0.2×–4×, GT 불필요)만 사용한다. 단조 DSC 게이트·best-of-15는 쓰지 않는다. PPO는 STOP 행동으로 에피소드를 끝낸다.
+> **배포 안전 장치.** 면적 게이트(**0.85×–1.2×**, GT 불필요)만 사용한다. Medium/Large는 shrink band + zoom delete. 단조 DSC 게이트·best-of-15는 쓰지 않는다. Stage3 배포 경로는 **SL Refiner**이다.
 >
 > 두 베이스라인은 3D·4모달리티·앙상블을 제외한 **2D 각색**이므로 대회 리더보드 점수와 직접 비교할 수 없습니다. 상세는 [베이스라인 README](baselines/README.md)를 봅니다.
 
@@ -134,11 +134,11 @@ python run_pipeline.py batch_size=64
 # 특정 단계만 건너뛰기
 python run_pipeline.py --skip_classifier --skip_experts --skip_agents
 
-# 평가만 (배포 프로토콜: STOP + last mask, 단조 게이트 없음)
-python scripts/eval/evaluate_pipeline.py --split_role val --enable_stop --deploy_mode
+# 평가만 (배포 프로토콜: SL refiner + 면적 게이트, 단조 게이트 없음)
+python scripts/eval/evaluate_pipeline.py --split_role val --deploy_mode --stage3_mode sl
 
-# Stage 2 단독 (PPO·게이트 없음)
-python scripts/eval/evaluate_pipeline.py --split_role val --skip_ppo
+# Stage 2 단독 (Stage3·게이트 없음)
+python scripts/eval/evaluate_pipeline.py --split_role val --stage3_mode skip
 
 # 이진화 임계값 스윕 (확률 맵 캐시 → 재학습 불필요)
 python scripts/eval/sweep_threshold.py --split_role val --plot results/threshold_sweep.png
@@ -156,12 +156,12 @@ python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,14
 
 ```
 ├── run_pipeline.py                 # Stage 1–4 원스톱 실행
-├── configs/ppo_brats.yaml          # PPO 하이퍼파라미터
-├── scripts/train/                  # 분류기 · Expert · PPO 학습
-├── scripts/eval/                   # 파이프라인 평가, 임계값 스윕, 비교 그리드
+├── configs/ppo_brats.yaml          # (legacy) PPO 하이퍼파라미터
+├── scripts/train/                  # 분류기 · Expert · Stage3 SL/PPO 교대
+├── scripts/eval/                   # 배포 평가, 임계값 스윕, 비교 그리드
 ├── src/data/                       # BraTS 로더, 환자 단위 분할
-├── src/envs/                       # MaskRefinementEnv (크기별 PPO 환경)
-├── src/models/                     # Classifier, Experts, AdaptivePipeline
+├── src/envs/                       # MaskRefinementEnv (PPO teacher 환경)
+├── src/models/                     # Classifier, Experts, SL Refiner, AdaptivePipeline
 ├── src/utils/                      # DSC/HD95, 게이트, zoom-crop, 시드
 ├── baselines/                      # BraTS21 1·2위 방법의 2D 각색 비교
 ├── ppo/                            # 단일 백본 + PPO ablation (t1ce)
@@ -185,7 +185,7 @@ python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,14
 
 ### 파이프라인 Stage 2 → Stage 3
 
-초록=GT, 빨강=Stage 2 Rough, 하늘색=Stage 3 RL. 클래스마다 Final DSC가 평균에 가깝고, Final DSC > Initial DSC인 원본 2장씩을 골랐습니다.
+초록=GT, 빨강=Stage 2 Rough, 하늘색=Stage 3 SL. 클래스마다 Final DSC가 평균에 가깝고, Final DSC > Initial DSC인 원본 2장씩을 골랐습니다.
 
 ![Pipeline overview](results/pipeline_sample_comparison.png)
 

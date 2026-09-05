@@ -33,7 +33,7 @@
 | Small Expert | CaraNet **2.5D** + `<50px` ×4 오버샘플 + zoom-crop, BCEDice |
 | Large Expert | 전 구간 학습 + **ED/TC** 2채널 → WT 합집합 |
 | Stage 3 | 세 클래스 **모두** PPO `predict()` 15스텝. 초안 마스크는 평가와 같은 임계값으로 이진화 |
-| 안전장치 | **GT-free 면적**(0.2×–4×, 배포 가능) + **Monotonic DSC Gate**(GT, 상한) |
+| 안전장치 | **GT-free 면적**(0.85×–1.2×, 배포) · Large Stage3 skip · **Monotonic DSC Gate**(GT, 상한 전용) |
 | Confidence skip | 기본 **OFF** (`--confidence_threshold` 미지정) |
 | 시드 / 결정적 모드 | 42 / ON |
 
@@ -81,7 +81,7 @@ Large 임계값을 0.70에서 0.50으로 내린 뒤 P/R이 맞춰졌습니다.
 
 ### 1.6 안전 가드와 Monotonic DSC 발동률
 
-기본 평가 순서: PPO 15스텝 → 면적 게이트(0.2×–4×) → 단조 DSC 게이트. Confidence skip은 끄고 돌렸습니다.
+기본 평가 순서: Stage3(SL, Large skip) → 면적 게이트(0.85×–1.2×). 단조 DSC 게이트는 `--gt_upper_bound` 상한만. Confidence skip은 끄고 돌렸습니다.
 
 | 항목 | 값 |
 |---|---:|

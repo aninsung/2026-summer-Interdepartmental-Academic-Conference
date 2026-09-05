@@ -127,6 +127,16 @@ def filter_dataset_by_size(ds: BraTS2020Dataset, refinement_mode: str) -> None:
     log.info("[%s] 크기 필터: %d → %d 슬라이스", ref_m.upper(), old_len, len(ds._samples))
 
 
+def clone_filtered_by_size(ds: BraTS2020Dataset, refinement_mode: str) -> BraTS2020Dataset:
+    """Shallow-clone dataset then apply size filter (does not mutate the source)."""
+    out = copy.copy(ds)
+    out._samples = list(ds._samples)
+    pids = getattr(ds, "_sample_pids", None)
+    out._sample_pids = list(pids) if pids is not None else [None] * len(out._samples)
+    filter_dataset_by_size(out, refinement_mode)
+    return out
+
+
 def split_dataset_by_patients(
     ds: BraTS2020Dataset,
     train_ids: Sequence[str],

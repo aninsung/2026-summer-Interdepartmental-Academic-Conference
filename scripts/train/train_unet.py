@@ -91,7 +91,8 @@ def train_unet(
 
     try:
         from tqdm import tqdm as _tqdm
-        USE_TQDM = True
+        from src.utils.progress import want_tqdm
+        USE_TQDM = want_tqdm()
     except ImportError:
         USE_TQDM = False
 

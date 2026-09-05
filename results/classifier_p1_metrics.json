@@ -1,30 +1,30 @@
 {
   "backbone": "resnet18",
   "recipe": "p1",
-  "best_epoch": 7,
-  "best_val_acc": 0.8582580115036976,
-  "best_macro_recall": 0.859062673822982,
+  "best_epoch": 2,
+  "best_val_acc": 0.8603122432210353,
+  "best_macro_recall": 0.8744687422452193,
   "select_metric": "macro_recall",
-  "best_score": 0.859062673822982,
-  "train_acc_at_best": 0.9155908639523337,
-  "recall_small": 0.8712984054669703,
-  "recall_medium": 0.8487467588591184,
-  "recall_large": 0.8571428571428571,
+  "best_score": 0.8744687422452193,
+  "train_acc_at_best": 0.8542204568023833,
+  "recall_small": 0.9020501138952164,
+  "recall_medium": 0.8115816767502161,
+  "recall_large": 0.9097744360902256,
   "cm": [
     [
-      765,
-      113,
+      792,
+      86,
       0
     ],
     [
-      78,
-      982,
-      97
+      98,
+      939,
+      120
     ],
     [
-      7,
-      50,
-      342
+      6,
+      30,
+      363
     ]
   ],
   "params_m": 11.174915,

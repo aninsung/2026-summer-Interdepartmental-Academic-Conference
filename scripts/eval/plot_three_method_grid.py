@@ -27,7 +27,6 @@ from src.data.brats2020_dataset import BraTS2020Dataset
 from src.data.patient_split import DEFAULT_SPLIT_PATH, load_or_create_patient_split
 from src.models.dynamic_router import AdaptivePipeline
 from src.utils.metrics import (
-    apply_monotonic_dsc_gate,
     dice,
     filter_small_components,
     gt_size_class,
@@ -97,10 +96,35 @@ def stage2_mask(pipeline, img_25d, stage2_thr, cc_min, micro_floor=80.0, micro_t
     return mask, prob, rough_t, class_pred, c, img_t
 
 
-def stage3_gated(pipeline, agents, image_center, img_25d, gt, stage2_thr, cc_min):
+def stage3_gated(
+    pipeline,
+    agents,
+    image_center,
+    img_25d,
+    gt,
+    stage2_thr,
+    cc_min,
+    area_lo=0.85,
+    area_hi=1.2,
+    skip_classes=None,
+    sl_nets=None,
+    boundary_band_px=3,
+    sl_zoom_patches=16,
+):
+    """Main-eval-aligned Stage3: slice classifier routing, soft-only TTA, area gate.
+
+    Prefer SL nets (deploy path). Falls back to PPO agents if SL missing.
+    """
+    from src.models.sl_refiner import apply_sl_refiner
+
+    skip_classes = set(skip_classes or ())
+    sl_nets = sl_nets or {}
     rough, prob, rough_t, class_pred, c, img_t = stage2_mask(
         pipeline, img_25d, stage2_thr, cc_min
     )
+    if int(c) in skip_classes:
+        return rough.copy(), c
+
     lbl, num_feats = sp_label(rough > 0.2)
     valid = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 5]
     final = np.zeros_like(rough)
@@ -109,35 +133,57 @@ def stage3_gated(pipeline, agents, image_center, img_25d, gt, stage2_thr, cc_min
             final = np.maximum(final, (lbl == k).astype(np.float32))
 
     tta = ev._tta_probability(pipeline, img_t, rough_t, class_pred)
+    ck = int(c)
+    device = next(pipeline.parameters()).device
     for k in valid:
         comp = (lbl == k).astype(np.float32)
-        area = float(np.sum(comp))
-        ck = 0 if area < 300 else (1 if area < 700 else 2)
-        agent = agents[ck]
+        agent = agents.get(ck) if agents else None
+        sl = sl_nets.get(ck)
         mode = {0: "small", 1: "medium", 2: "large"}[ck]
-        if agent is None:
+        if sl is None and agent is None:
             final = np.maximum(final, comp)
             continue
         struct = np.ones((3, 3))
         dilated = binary_dilation(comp, struct, iterations=2 if ck == 0 else 3)
-        thr = 0.30 if (ck == 0 and area < 50) else stage2_thr[c]
-        from_tta = (tta > thr).astype(np.float32) * dilated
-        if np.sum(from_tta) == 0:
-            from_tta = comp.copy()
-        refined = ev._refine_with_ppo(
-            agent, image_center, gt, from_tta, tta * from_tta, mode,
-            n_steps=15, clip_shrink=(ck == 0),
-        )
-        if np.sum(refined) > 0:
-            refined = binary_closing(refined, struct).astype(np.float32)
-        if np.sum(refined) == 0 or not ev._gt_free_accept(from_tta, refined):
-            refined = from_tta
-        refined = apply_monotonic_dsc_gate(from_tta, refined, gt)
+        soft = (tta * dilated).astype(np.float32)
+        if float(np.sum(soft)) == 0.0:
+            soft = (prob * dilated).astype(np.float32)
+        use_band = ck in (1, 2) and int(boundary_band_px) > 0
+        if sl is not None:
+            refined = apply_sl_refiner(
+                sl,
+                image_center,
+                comp,
+                soft,
+                device,
+                cand_thr=(0.40 if use_band else 0.4),
+                morph_small=(ck == 0),
+                boundary_band_px=(int(boundary_band_px) if use_band else 0),
+                boundary_mode=("shrink" if use_band else "replace"),
+                zoom_n_patches=(int(sl_zoom_patches) if use_band else 0),
+                zoom_seed=(k * 17 + ck),
+            )
+            if use_band:
+                refined = np.minimum(refined, comp)
+            elif np.sum(refined) > 0:
+                refined = binary_closing(refined, struct).astype(np.float32)
+        else:
+            refined = ev._refine_with_ppo(
+                agent, image_center, gt, comp, soft, mode,
+                n_steps=15, clip_shrink=(ck == 0),
+                select_best=False,
+                apply_monotonic=False,
+                enable_stop=False,
+            )
+            if np.sum(refined) > 0:
+                refined = binary_closing(refined, struct).astype(np.float32)
+        if np.sum(refined) == 0 or not ev._gt_free_accept(comp, refined, lo=area_lo, hi=area_hi):
+            refined = comp
         final = np.maximum(final, refined)
 
-    if not ev._gt_free_accept(rough, final):
+    if not ev._gt_free_accept(rough, final, lo=area_lo, hi=area_hi):
         final = rough
-    return apply_monotonic_dsc_gate(rough, final, gt), c
+    return final, c
 
 
 def predict_baseline(model, img_center, device, threshold=0.5):
@@ -337,6 +383,26 @@ def main():
         path = f"checkpoints/ppo_{mode}.zip"
         agents[idx] = PPO.load(path, device=device) if os.path.exists(path) else None
 
+    from src.models.sl_refiner import DualHeadRefiner
+    sl_nets = {}
+    for mode, idx in zip(["small", "medium", "large"], [0, 1, 2]):
+        path = f"checkpoints/sl_refiner_{mode}.pt"
+        if not os.path.exists(path):
+            sl_nets[idx] = None
+            continue
+        ckpt = torch.load(path, map_location=device, weights_only=False)
+        sd = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+        if isinstance(ckpt, dict) and "in_ch" in ckpt:
+            sl_in = int(ckpt["in_ch"])
+        elif isinstance(sd, dict) and "enc.0.weight" in sd:
+            sl_in = int(sd["enc.0.weight"].shape[1])
+        else:
+            sl_in = in_ch + 2
+        net = DualHeadRefiner(in_ch=sl_in).to(device)
+        net.load_state_dict(sd)
+        net.eval()
+        sl_nets[idx] = net
+
     print("Stage 2 초안 DSC (후보 선별)...")
     d_s2 = np.zeros(n, dtype=np.float32)
     if not fixed:
@@ -365,7 +431,9 @@ def main():
     pred_pipe = [None] * n
     for j, i in enumerate(short):
         gated, _ = stage3_gated(
-            pipeline, agents, images[i], images_25d[i], gts[i], stage2_thr, cc_min
+            pipeline, agents, images[i], images_25d[i], gts[i], stage2_thr, cc_min,
+            area_lo=0.85, area_hi=1.2, skip_classes=set(),
+            sl_nets=sl_nets, boundary_band_px=3, sl_zoom_patches=16,
         )
         pred_pipe[i] = gated
         d_pipe[i] = dice(gated, gts[i])

@@ -183,6 +183,236 @@ def make_noisy_mask(
     return noisy.astype(np.float32)
 
 
+def _gaussian_blur_batch(x: "torch.Tensor", sigma: float = 2.0, truncate: float = 4.0) -> "torch.Tensor":
+    """Separable Gaussian blur for (N, H, W) float tensors (scipy-like truncate)."""
+    import torch
+    import torch.nn.functional as F
+
+    radius = max(1, int(truncate * sigma + 0.5))
+    coords = torch.arange(-radius, radius + 1, device=x.device, dtype=x.dtype)
+    kernel = torch.exp(-0.5 * (coords / sigma) ** 2)
+    kernel = kernel / kernel.sum()
+    n = x.shape[0]
+    x4 = x.unsqueeze(1)
+    x4 = F.conv2d(F.pad(x4, (radius, radius, 0, 0), mode="reflect"), kernel.view(1, 1, 1, -1))
+    x4 = F.conv2d(F.pad(x4, (0, 0, radius, radius), mode="reflect"), kernel.view(1, 1, -1, 1))
+    return x4.view(n, *x.shape[-2:])
+
+
+def make_noisy_masks_batch(
+    gt_masks: np.ndarray,
+    rng: Optional[np.random.Generator] = None,
+    erosion_prob: float = 0.5,
+    max_morph_px: int = 5,
+    sigma: float = 2.0,
+    device: Optional[str] = None,
+    chunk_size: int = 2048,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Batched GPU (or CPU) morph noise + Gaussian prob maps.
+
+    Returns (noisy_roughs, soft_probs) each float32 with shape (N, H, W).
+    Semantics match make_noisy_mask + scipy.ndimage.gaussian_filter(sigma=2).
+    """
+    import torch
+    import torch.nn.functional as F
+
+    if rng is None:
+        rng = np.random.default_rng()
+    if gt_masks.ndim != 3:
+        raise ValueError(f"gt_masks must be (N,H,W), got {gt_masks.shape}")
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    dev = torch.device(device)
+
+    n_total = int(gt_masks.shape[0])
+    rough_out = np.empty(gt_masks.shape, dtype=np.float32)
+    prob_out = np.empty(gt_masks.shape, dtype=np.float32)
+    if n_total == 0:
+        return rough_out, prob_out
+
+    max_morph_px = int(max_morph_px)
+    for start in range(0, n_total, chunk_size):
+        end = min(start + chunk_size, n_total)
+        n = end - start
+        masks = torch.from_numpy(gt_masks[start:end] > 0.5).to(dev, non_blocking=True)
+
+        n_ops = rng.integers(2, 6, size=n)
+        max_ops = int(n_ops.max()) if n else 0
+        for step in range(max_ops):
+            active = n_ops > step
+            if not np.any(active):
+                continue
+            radii = rng.integers(1, max_morph_px + 1, size=n)
+            do_erode = rng.random(n) < erosion_prob
+            active_t = torch.as_tensor(active, device=dev)
+            for r in range(1, max_morph_px + 1):
+                k = 2 * r + 1
+                pad = r
+                dil_sel = active_t & torch.as_tensor((radii == r) & (~do_erode), device=dev)
+                ero_sel = active_t & torch.as_tensor((radii == r) & do_erode, device=dev)
+                if bool(dil_sel.any()):
+                    m = masks[dil_sel].float().unsqueeze(1)
+                    m = F.max_pool2d(m, kernel_size=k, stride=1, padding=pad) > 0.5
+                    masks[dil_sel] = m.squeeze(1)
+                if bool(ero_sel.any()):
+                    m = (~masks[ero_sel]).float().unsqueeze(1)
+                    m = F.max_pool2d(m, kernel_size=k, stride=1, padding=pad) > 0.5
+                    masks[ero_sel] = ~m.squeeze(1)
+
+        dil = F.max_pool2d(masks.float().unsqueeze(1), 3, 1, 1).squeeze(1) > 0.5
+        ero = ~((F.max_pool2d((~masks).float().unsqueeze(1), 3, 1, 1).squeeze(1) > 0.5))
+        boundary = dil ^ ero
+        flip = boundary & (torch.rand(masks.shape, device=dev) < 0.25)
+        noisy = masks.float()
+        noisy = torch.where(flip, 1.0 - noisy, noisy)
+        probs = _gaussian_blur_batch(noisy, sigma=sigma)
+
+        rough_out[start:end] = noisy.detach().cpu().numpy().astype(np.float32, copy=False)
+        prob_out[start:end] = probs.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    return rough_out, prob_out
+
+
+def _resize_slice(arr: np.ndarray, target_size: int, is_mask: bool = False) -> np.ndarray:
+    from skimage.transform import resize as sk_resize
+
+    if target_size <= 0:
+        return arr.astype(np.float32)
+    order = 0 if is_mask else 1
+    resized = sk_resize(
+        arr,
+        (target_size, target_size),
+        order=order,
+        mode="constant",
+        anti_aliasing=(not is_mask),
+        preserve_range=True,
+    )
+    return resized.astype(np.float32)
+
+
+def _modal_slice_from_vols(
+    mod_vols: List[np.ndarray], z: int, target_size: int
+) -> np.ndarray:
+    z = _clip_z(z, int(mod_vols[0].shape[2]))
+    channels = []
+    for m_vol in mod_vols:
+        sl = m_vol[:, :, z]
+        if target_size > 0:
+            sl = _resize_slice(sl, target_size, is_mask=False)
+        channels.append(sl)
+    return np.stack(channels, axis=0).astype(np.float32)
+
+
+def _cache_dir_for(
+    root_dir: str,
+    modality_list: List[str],
+    target_size: int,
+    min_tumor_ratio: float,
+    simulate_rough: bool,
+    noise_seed: int,
+) -> Path:
+    key = (
+        f"{'+'.join(modality_list)}_s{target_size}_"
+        f"r{min_tumor_ratio:g}_rough{int(simulate_rough)}_seed{noise_seed}"
+    )
+    base = Path(root_dir)
+    if base.name == "BraTS2021_Training_Data":
+        base = base.parent
+    return base / ".brats_cache" / key
+
+
+def _load_one_patient(
+    pdir_str: str,
+    modality_list: List[str],
+    target_size: int,
+    min_tumor_ratio: float,
+    simulate_rough: bool,
+    noise_seed: int,
+    cache_dir: Optional[str] = None,
+) -> Tuple[str, list, int, Optional[str]]:
+    """(pid, samples, n_slices, error). samples keep BraTS2020Dataset tuple layout."""
+    pdir = Path(pdir_str)
+    pid = pdir.name
+
+    if cache_dir:
+        cpath = Path(cache_dir) / f"{pid}.npz"
+        if cpath.is_file():
+            try:
+                data = np.load(cpath, allow_pickle=False)
+                n = int(data["n"])
+                samples = [
+                    (
+                        data[f"img_{i}"],
+                        data[f"gt_{i}"],
+                        data[f"rough_{i}"],
+                        bool(data[f"has_et_{i}"]),
+                        data[f"img25d_{i}"],
+                        data[f"seg_{i}"],
+                    )
+                    for i in range(n)
+                ]
+                return pid, samples, n, None
+            except Exception:
+                pass
+
+    mod_paths = [_find_modality_file(pdir, pid, m) for m in modality_list]
+    seg_path = _find_seg_file(pdir, pid)
+    if any(p is None for p in mod_paths) or seg_path is None:
+        return pid, [], 0, f"파일 없음: {pid}"
+
+    try:
+        mod_vols = [_normalize_volume(_load_volume(str(p))) for p in mod_paths]
+        seg_vol = _load_volume(str(seg_path))
+        has_et = bool((seg_vol == 4.0).any())
+        valid_zs = _select_slices(seg_vol, min_tumor_ratio)
+        rng = np.random.default_rng(noise_seed + (abs(hash(pid)) % 1_000_000_007))
+
+        samples = []
+        for z in valid_zs:
+            img_sl = _modal_slice_from_vols(mod_vols, z, target_size)
+            img_25d = np.concatenate(
+                [
+                    _modal_slice_from_vols(mod_vols, z - 1, target_size),
+                    img_sl,
+                    _modal_slice_from_vols(mod_vols, z + 1, target_size),
+                ],
+                axis=0,
+            )
+            if img_sl.shape[0] == 1:
+                img_sl = img_sl[0]
+
+            gt_sl = (seg_vol[:, :, z] > 0).astype(np.float32)
+            seg_sl = seg_vol[:, :, z].astype(np.float32)
+            if target_size > 0:
+                gt_sl = _resize_slice(gt_sl, target_size, is_mask=True)
+                seg_sl = np.rint(_resize_slice(seg_sl, target_size, is_mask=True)).astype(np.float32)
+
+            rough_sl = make_noisy_mask(gt_sl, rng) if simulate_rough else gt_sl.copy()
+            samples.append((img_sl, gt_sl, rough_sl, has_et, img_25d, seg_sl))
+
+        if cache_dir and samples:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            payload = {"n": np.asarray(len(samples), dtype=np.int32)}
+            for i, (img, gt, rough, het, img25, seg) in enumerate(samples):
+                payload[f"img_{i}"] = img
+                payload[f"gt_{i}"] = gt
+                payload[f"rough_{i}"] = rough
+                payload[f"has_et_{i}"] = np.asarray(het, dtype=np.bool_)
+                payload[f"img25d_{i}"] = img25
+                payload[f"seg_{i}"] = seg
+            # numpy savez appends .npz if missing — keep final suffix as .npz
+            out = Path(cache_dir) / f"{pid}.npz"
+            tmp = Path(cache_dir) / f"{pid}.tmp.npz"
+            np.savez_compressed(tmp, **payload)
+            tmp.replace(out)
+
+        return pid, samples, len(samples), None
+    except Exception as e:
+        return pid, [], 0, f"{pid}: {e}"
+
+
 # ──────────────────────────────────────────────
 # Dataset
 # ──────────────────────────────────────────────
@@ -192,24 +422,8 @@ class BraTS2020Dataset(Dataset):
     BraTS2020 / BraTS2021 2D 슬라이스 데이터셋.
     .nii 와 .nii.gz 형식을 모두 자동 감지합니다.
 
-    Parameters
-    ----------
-    root_dir : str
-        BraTS20_Training_* 또는 BraTS2021_* 폴더들이 있는 최상위 경로.
-        예) "src/data/archive/BraTS2021_Training_Data"
-    modality : str
-        사용할 MRI 모달리티 ('t1ce', 't1', 't2', 'flair'). 기본 t1ce.
-    target_size : int
-        슬라이스를 리사이즈할 해상도 (H=W=target_size). 0이면 원본 크기 유지.
-    max_patients : int or None
-        로드할 최대 환자 수. None이면 전체.
-    min_tumor_ratio : float
-        유효 슬라이스로 인정할 최소 종양 픽셀 비율.
-    noise_seed : int
-        rough_mask 생성용 랜덤 시드.
-    simulate_rough : bool
-        True면 make_noisy_mask()로 rough_mask를 합성.
-        False면 gt_mask를 그대로 rough_mask로 사용 (디버그용).
+    Parallel load via BRATS_NUM_WORKERS (default min(32, CPU)).
+    Slice cache under <archive>/.brats_cache/ (disable with BRATS_NO_CACHE=1).
     """
 
     def __init__(
@@ -222,6 +436,8 @@ class BraTS2020Dataset(Dataset):
         noise_seed: int = 42,
         simulate_rough: bool = True,
         patient_ids: Optional[List[str]] = None,
+        num_workers: Optional[int] = None,
+        use_cache: bool = True,
     ):
         self.root_dir        = root_dir
         self.modality        = modality
@@ -229,14 +445,22 @@ class BraTS2020Dataset(Dataset):
         self.min_tumor_ratio = min_tumor_ratio
         self.simulate_rough  = simulate_rough
         self.patient_ids     = set(patient_ids) if patient_ids is not None else None
+        self.noise_seed      = noise_seed
         self.rng = np.random.default_rng(noise_seed)
+        if num_workers is None:
+            num_workers = int(os.environ.get("BRATS_NUM_WORKERS", "0")) or min(
+                32, (os.cpu_count() or 4)
+            )
+        self.num_workers = max(1, int(num_workers))
+        self.use_cache = bool(use_cache) and os.environ.get("BRATS_NO_CACHE", "") != "1"
 
         self._samples: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         self._sample_pids: List[str] = []
         self._build(max_patients)
 
-    # ── 내부 빌더 ──────────────────────────────────────────
     def _build(self, max_patients: Optional[int]) -> None:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         patient_dirs = _find_patient_dirs(self.root_dir)
         if not patient_dirs:
             print(f"[BraTS2020Dataset] 경고: '{self.root_dir}' 에서 환자 폴더를 찾을 수 없습니다.")
@@ -247,114 +471,110 @@ class BraTS2020Dataset(Dataset):
         elif max_patients is not None:
             patient_dirs = patient_dirs[:max_patients]
 
-        try:
-            from tqdm import tqdm
-            _iter = tqdm(patient_dirs, desc="[BraTS] Loading patients", unit="pt", ncols=80, ascii=True)
-        except ImportError:
-            _iter = patient_dirs
-            print(f"[BraTS Dataset] {len(patient_dirs)}명 환자 로딩 중...")
-
         import sys
-        sys.stdout.reconfigure(errors='replace') if hasattr(sys.stdout, 'reconfigure') else None
-        total_slices = 0
-        skipped = 0
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
 
-        # 모달리티 파싱 (단일 't1ce' 또는 복합 't1ce+flair', 't1ce+t2' 등 지원)
         if isinstance(self.modality, str):
-            self.modality_list = [m.strip() for m in self.modality.replace(',', '+').split('+')]
+            self.modality_list = [m.strip() for m in self.modality.replace(",", "+").split("+")]
         else:
             self.modality_list = list(self.modality)
 
-        for pdir in _iter:
-            pid = pdir.name
+        cache_path = None
+        if self.use_cache:
+            cache_path = _cache_dir_for(
+                self.root_dir,
+                self.modality_list,
+                self.target_size,
+                self.min_tumor_ratio,
+                self.simulate_rough,
+                self.noise_seed,
+            )
+            cache_path.mkdir(parents=True, exist_ok=True)
+            print(
+                f"[BraTS Dataset] workers={self.num_workers}, cache={cache_path} "
+                f"({len(patient_dirs)} patients)"
+            )
+        else:
+            print(f"[BraTS Dataset] workers={self.num_workers}, cache=OFF")
 
-            mod_paths = [_find_modality_file(pdir, pid, m) for m in self.modality_list]
-            seg_path = _find_seg_file(pdir, pid)
+        total_slices = 0
+        skipped = 0
+        results_by_pid = {}
 
-            if any(p is None for p in mod_paths) or seg_path is None:
-                skipped += 1
-                if hasattr(_iter, 'write'):
-                    _iter.write(f"  [SKIP] 파일 없음: {pid}")
-                else:
-                    print(f"  [SKIP] 파일 없음: {pid}")
-                continue
+        def _job(pdir: Path):
+            return _load_one_patient(
+                str(pdir),
+                self.modality_list,
+                self.target_size,
+                self.min_tumor_ratio,
+                self.simulate_rough,
+                self.noise_seed,
+                str(cache_path) if cache_path is not None else None,
+            )
 
-            try:
-                # 볼륨 로드 및 정규화
-                mod_vols = [_normalize_volume(_load_volume(str(p))) for p in mod_paths] # list of (H,W,D)
-                seg_vol = _load_volume(str(seg_path))                                   # (H,W,D) 레이블
+        try:
+            from src.utils.progress import want_tqdm
+            from tqdm import tqdm
+            pbar = (
+                tqdm(
+                    total=len(patient_dirs),
+                    desc="[BraTS] Loading patients",
+                    unit="pt",
+                    ncols=80,
+                    ascii=True,
+                )
+                if want_tqdm()
+                else None
+            )
+        except ImportError:
+            pbar = None
 
-                # 해당 환자의 전체 볼륨에 레이블 4(ET)가 존재하는지 체크
-                has_et = bool((seg_vol == 4.0).any())
+        n_patients = len(patient_dirs)
+        log_every = max(1, n_patients // 10)
+        done_pts = 0
 
-                # 유효 슬라이스 선택
-                valid_zs = _select_slices(seg_vol, self.min_tumor_ratio)
-                for z in valid_zs:
-                    img_sl = self._modal_slice(mod_vols, z)
-                    img_25d = np.concatenate(
-                        [
-                            self._modal_slice(mod_vols, z - 1),
-                            img_sl,
-                            self._modal_slice(mod_vols, z + 1),
-                        ],
-                        axis=0,
-                    )
-                    if img_sl.shape[0] == 1:
-                        img_sl = img_sl[0]
-
-                    gt_sl = (seg_vol[:, :, z] > 0).astype(np.float32)
-                    seg_sl = seg_vol[:, :, z].astype(np.float32)
-                    if self.target_size > 0:
-                        gt_sl = self._resize(gt_sl, is_mask=True)
-                        seg_sl = np.rint(self._resize(seg_sl, is_mask=True)).astype(np.float32)
-
-                    if self.simulate_rough:
-                        rough_sl = make_noisy_mask(gt_sl, self.rng)
+        with ThreadPoolExecutor(max_workers=self.num_workers) as pool:
+            futs = {pool.submit(_job, p): p.name for p in patient_dirs}
+            for fut in as_completed(futs):
+                pid, samples, n, err = fut.result()
+                if err:
+                    skipped += 1
+                    if pbar is not None and hasattr(pbar, "write"):
+                        pbar.write(f"  [SKIP] {err}")
                     else:
-                        rough_sl = gt_sl.copy()
-
-                    self._samples.append((img_sl, gt_sl, rough_sl, has_et, img_25d, seg_sl))
-                    self._sample_pids.append(pid)
-
-                total_slices += len(valid_zs)
-                if hasattr(_iter, 'set_postfix'):
-                    _iter.set_postfix({"slices": total_slices, "this_pt": len(valid_zs)})
-
-            except Exception as e:
-                skipped += 1
-                msg = f"  [ERROR] {pid}: {e}"
-                if hasattr(_iter, 'write'):
-                    _iter.write(msg)
+                        print(f"  [SKIP] {err}")
                 else:
-                    print(msg)
+                    results_by_pid[pid] = samples
+                    total_slices += n
+                done_pts += 1
+                if pbar is not None:
+                    pbar.set_postfix({"slices": total_slices})
+                    pbar.update(1)
+                elif done_pts == 1 or done_pts % log_every == 0 or done_pts >= n_patients:
+                    print(
+                        f"[BraTS] Loading patients: {done_pts}/{n_patients} "
+                        f"(slices={total_slices})",
+                        flush=True,
+                    )
+        if pbar is not None:
+            pbar.close()
+
+        for pdir in patient_dirs:
+            samples = results_by_pid.get(pdir.name)
+            if not samples:
                 continue
+            for s in samples:
+                self._samples.append(s)
+                self._sample_pids.append(pdir.name)
 
         print(f"[BraTS Dataset] 완료: 총 {total_slices}개 유효 슬라이스 로드. (건너뜀: {skipped}명)")
 
     def _modal_slice(self, mod_vols: List[np.ndarray], z: int) -> np.ndarray:
-        """모달리티 볼륨에서 z 슬라이스를 (C, H, W)로 반환. 범위 밖은 가장자리로 클램프."""
-        z = _clip_z(z, int(mod_vols[0].shape[2]))
-        channels = []
-        for m_vol in mod_vols:
-            sl = m_vol[:, :, z]
-            if self.target_size > 0:
-                sl = self._resize(sl)
-            channels.append(sl)
-        return np.stack(channels, axis=0).astype(np.float32)
+        return _modal_slice_from_vols(mod_vols, z, self.target_size)
 
     def _resize(self, arr: np.ndarray, is_mask: bool = False) -> np.ndarray:
-        """간단한 바이선형/최근접 이웃 리사이즈 (skimage)."""
-        from skimage.transform import resize as sk_resize
-        order = 0 if is_mask else 1  # 마스크는 최근접, 이미지는 바이선형
-        resized = sk_resize(
-            arr,
-            (self.target_size, self.target_size),
-            order=order,
-            mode="constant",
-            anti_aliasing=(not is_mask),
-            preserve_range=True,
-        )
-        return resized.astype(np.float32)
+        return _resize_slice(arr, self.target_size, is_mask=is_mask)
 
     # ── Dataset API ────────────────────────────────────────
     def __len__(self) -> int:

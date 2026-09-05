@@ -19,7 +19,7 @@ modality: "t1ce+flair"
 image_size: 128
 
 # 환자 수 제한 (Stage 1–4 공통, run_pipeline.py 기본값과 동일)
-max_train_patients: 210
+max_train_patients: 1251
 
 # ──────────────────────────────────────────────
 # RL 환경 설정

@@ -229,8 +229,8 @@ def main():
             prob_tta_np = _tta_probability(pipeline, img_t, rough_mask_t, class_pred)
             for k in valid:
                 comp_mask_k = (lbl == k).astype(np.float32)
-                comp_area = float(np.sum(comp_mask_k))
-                ck = 0 if comp_area < 300 else (1 if comp_area < 700 else 2)
+                # Align with main eval: slice-level classifier class, not component area
+                ck = int(c)
                 agent_k = agents[ck]
                 ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
                 if agent_k is None:
@@ -241,18 +241,16 @@ def main():
 
                 dilate_iter = 2 if ck == 0 else 3
                 comp_dilated = binary_dilation(comp_mask_k, STRUCT, iterations=dilate_iter)
-                is_micro = ck == 0 and comp_area < 50
-                tta_thr = 0.30 if is_micro else stage2_thr[c]
-                comp_from_tta = (prob_tta_np > tta_thr).astype(np.float32) * comp_dilated
-                if np.sum(comp_from_tta) == 0:
-                    comp_from_tta = comp_mask_k.copy()
-
+                soft_prob = (prob_tta_np * comp_dilated).astype(np.float32)
+                if float(np.sum(soft_prob)) == 0.0:
+                    soft_prob = (rough_prob_np * comp_dilated).astype(np.float32)
+                # Start from Stage2 component (non-TTA mask)
                 last_k, best_k = _ppo_last_and_best(
                     agent_k,
                     images[i],
                     gt_masks[i],
-                    comp_from_tta,
-                    prob_tta_np * comp_from_tta,
+                    comp_mask_k,
+                    soft_prob,
                     ref_mode_k,
                     n_steps=15,
                     clip_shrink=(ck == 0),
@@ -262,19 +260,24 @@ def main():
                 last_final = np.maximum(last_final, last_k)
 
                 area_k = last_k
-                if np.sum(area_k) == 0 or not _gt_free_accept(comp_from_tta, area_k):
-                    area_k = comp_from_tta
+                if np.sum(area_k) == 0 or not _gt_free_accept(
+                    comp_mask_k, area_k, lo=0.85, hi=1.2
+                ):
+                    area_k = comp_mask_k
                 last_area = np.maximum(last_area, area_k)
 
                 e_k = best_k
-                if np.sum(e_k) == 0 or not _gt_free_accept(comp_from_tta, e_k):
-                    e_k = comp_from_tta
-                e_k = apply_monotonic_dsc_gate(comp_from_tta, e_k, gt_np)
+                if np.sum(e_k) == 0 or not _gt_free_accept(
+                    comp_mask_k, e_k, lo=0.85, hi=1.2
+                ):
+                    e_k = comp_mask_k
+                # Column E remains GT-upper-bound for justification; D is deploy-like
+                e_k = apply_monotonic_dsc_gate(comp_mask_k, e_k, gt_np)
                 best_gated = np.maximum(best_gated, e_k)
 
-        if not _gt_free_accept(rough_mask_np, last_area):
+        if not _gt_free_accept(rough_mask_np, last_area, lo=0.85, hi=1.2):
             last_area = rough_mask_np
-        if not _gt_free_accept(rough_mask_np, best_gated):
+        if not _gt_free_accept(rough_mask_np, best_gated, lo=0.85, hi=1.2):
             best_gated = rough_mask_np
         gated = apply_monotonic_dsc_gate(rough_mask_np, best_gated, gt_np)
         if not np.array_equal(gated, best_gated):
