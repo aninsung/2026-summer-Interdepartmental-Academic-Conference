@@ -85,10 +85,10 @@ def main():
     parser.add_argument("--train_root", type=str, default="src/data/archive")
     parser.add_argument("--max_train_patients", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--modality", type=str, default="t1ce+flair")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--no_pretrained", action="store_true")
     parser.add_argument("--backbone", type=str, default="resnet18", choices=list(SUPPORTED_BACKBONES))
@@ -96,16 +96,34 @@ def main():
     parser.add_argument("--metrics_out", type=str, default="")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--deterministic", action="store_true")
-    parser.add_argument("--aug", action="store_true", help="P1: MRI augmentation")
-    parser.add_argument("--class_weight", action="store_true", help="P1: inverse-freq CE weights")
-    parser.add_argument("--select_metric", type=str, default="acc", choices=["acc", "macro_recall"])
-    parser.add_argument("--patience", type=int, default=0, help="early stop patience (0=off)")
+    parser.add_argument("--aug", action="store_true", default=True, help="P1: MRI aug (flip/±15°/bright-contrast)")
+    parser.add_argument("--no_aug", action="store_true", help="Disable MRI augmentation")
+    parser.add_argument("--class_weight", action="store_true", default=True, help="P1: inverse-freq CE weights")
+    parser.add_argument("--no_class_weight", action="store_true", help="Disable CE class weights")
+    parser.add_argument(
+        "--select_metric",
+        type=str,
+        default="macro_recall",
+        choices=["acc", "macro_recall", "joint"],
+        help="Best ckpt: acc | macro_recall | joint(=0.5*acc+0.5*macroR)",
+    )
+    parser.add_argument("--patience", type=int, default=8, help="early stop patience (0=off)")
     parser.add_argument("--boundary_soft", action="store_true", help="P2: soft labels near 300/700")
     parser.add_argument("--boundary_margin", type=float, default=20.0)
     parser.add_argument("--ordinal_weight", type=float, default=0.0, help="P2: ordinal aux loss weight")
-    parser.add_argument("--recipe", type=str, default="", choices=["", "baseline", "p1", "p2"],
-                        help="preset: baseline | p1 | p2 (overrides related flags)")
+    parser.add_argument(
+        "--recipe",
+        type=str,
+        default="p1",
+        choices=["", "baseline", "p1", "p2"],
+        help="preset: baseline | p1 (default) | p2 (overrides related flags)",
+    )
     args = parser.parse_args()
+
+    if args.no_aug:
+        args.aug = False
+    if args.no_class_weight:
+        args.class_weight = False
 
     if args.recipe == "baseline":
         args.aug = False
@@ -235,7 +253,12 @@ def main():
         cur_lr = optimizer.param_groups[0]["lr"]
         scheduler.step()
 
-        score = val["acc"] if args.select_metric == "acc" else val["macro_recall"]
+        if args.select_metric == "acc":
+            score = val["acc"]
+        elif args.select_metric == "joint":
+            score = 0.5 * val["acc"] + 0.5 * val["macro_recall"]
+        else:
+            score = val["macro_recall"]
         elapsed = time.time() - start_time
         print(
             f"Epoch {epoch+1}/{num_epochs} [{elapsed:.1f}s] lr={cur_lr:.2e} "
@@ -244,7 +267,17 @@ def main():
             f"R(S/M/L)={val['recall_small']:.3f}/{val['recall_medium']:.3f}/{val['recall_large']:.3f}"
         )
 
-        if score > best_score:
+        # Prefer higher select score; tie-break on Val Acc then Large recall
+        better = score > best_score + 1e-8
+        if (not better) and best_metrics is not None and abs(score - best_score) <= 1e-8:
+            better = (
+                val["acc"] > best_metrics["best_val_acc"] + 1e-8
+                or (
+                    abs(val["acc"] - best_metrics["best_val_acc"]) <= 1e-8
+                    and val["recall_large"] > best_metrics["recall_large"] + 1e-8
+                )
+            )
+        if better:
             best_score = score
             bad_epochs = 0
             best_metrics = {

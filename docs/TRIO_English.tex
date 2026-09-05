@@ -101,7 +101,7 @@ DSC(P,G) = \frac{2|P \cap G|}{|P| + |G|}
 \end{equation}
 where a value closer to 1 is better.
 Boundary error is measured by the 95\% Hausdorff Distance (HD95, lower is better).
-The HD95 in this experiment is in pixel units for a 128$\times$128 slice, so it cannot be directly interpreted as clinical distance in millimeters. If Precision is greater than Recall, it implies under-segmentation, and vice versa for over-segmentation. The only deployment safety mechanism is the area gate (empty or outside 0.2x--4x of the initial area keeps the Stage 2 mask). Monotonic DSC gating and best-of-N are excluded because they query ground truth.
+The HD95 in this experiment is in pixel units for a 128$\times$128 slice, so it cannot be directly interpreted as clinical distance in millimeters. If Precision is greater than Recall, it implies under-segmentation, and vice versa for over-segmentation. The only deployment safety mechanism is the area gate (empty or outside 0.85x--1.2x of the initial area keeps the Stage 2 mask). Large lesions skip Stage 3 by default. Monotonic DSC gating and best-of-N are excluded because they query ground truth.
 
 \section{Experiments and Results}
 \subsection{Experimental Setup}

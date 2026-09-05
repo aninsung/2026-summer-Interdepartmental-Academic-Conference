@@ -122,6 +122,8 @@ def train_caranet(
     focal_tversky: bool = False,
     fragment_repeats: int = 4,
     fragment_area: float = 50.0,
+    train_ds=None,
+    val_ds=None,
 ) -> None:
     from src.utils.seed import set_seed
     set_seed(seed, deterministic)
@@ -142,7 +144,9 @@ def train_caranet(
         log.info(f"🔧 [Fine-Tuning Mode] 자동 설정 변경: epochs={epochs}, lr={lr:.1e}")
 
     # ── 데이터 ──────────────────────────────────────────────
-    if use_real_data:
+    if train_ds is not None and val_ds is not None:
+        log.info("사전 로드된 train/val 데이터셋 사용 (재로드 생략)")
+    elif use_real_data:
         log.info("실제 BraTS2021 데이터 사용 (환자 단위 train/val 분할)")
         from src.data.patient_split import load_split_brats_datasets
         train_ds, val_ds = load_split_brats_datasets(
@@ -229,7 +233,8 @@ def train_caranet(
 
     try:
         from tqdm import tqdm as _tqdm
-        USE_TQDM = True
+        from src.utils.progress import want_tqdm
+        USE_TQDM = want_tqdm()
     except ImportError:
         USE_TQDM = False
 

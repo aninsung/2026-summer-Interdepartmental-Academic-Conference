@@ -41,18 +41,28 @@ def soft_label_from_area(area: float, margin: float = 20.0) -> np.ndarray:
     return y
 
 
+def _rotate_deg(img: torch.Tensor, angle_deg: float) -> torch.Tensor:
+    """Rotate (C,H,W) by angle_deg with bilinear sampling and zero padding."""
+    rad = np.deg2rad(angle_deg)
+    cos_a, sin_a = float(np.cos(rad)), float(np.sin(rad))
+    theta = img.new_tensor([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0]]).unsqueeze(0)
+    grid = torch.nn.functional.affine_grid(theta, img.unsqueeze(0).size(), align_corners=False)
+    return torch.nn.functional.grid_sample(
+        img.unsqueeze(0), grid, mode="bilinear", padding_mode="zeros", align_corners=False
+    ).squeeze(0)
+
+
 def augment_mri(img: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
-    """img: (C,H,W) float tensor in roughly [0,1]."""
+    """img: (C,H,W) float tensor in roughly [0,1]. H/V flip, ±15° rotate, brightness/contrast."""
     x = img
     if rng.random() < 0.5:
         x = torch.flip(x, dims=[-1])
     if rng.random() < 0.5:
         x = torch.flip(x, dims=[-2])
-    # 90* k rotation
-    if rng.random() < 0.5:
-        k = int(rng.integers(0, 4))
-        if k:
-            x = torch.rot90(x, k, dims=[-2, -1])
+    # ±15° continuous rotation (keeps size cues better than 90° jumps)
+    if rng.random() < 0.7:
+        angle = float(rng.uniform(-15.0, 15.0))
+        x = _rotate_deg(x, angle)
     # brightness / contrast
     if rng.random() < 0.8:
         bright = float(rng.uniform(-0.1, 0.1))

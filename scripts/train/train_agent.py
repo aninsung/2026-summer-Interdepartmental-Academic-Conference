@@ -285,6 +285,42 @@ def load_synthetic_data(*args, **kwargs):
     raise ValueError("합성 데이터 생성기(synthetic_brats.py)가 삭제되어 더 이상 합성 데이터를 사용할 수 없습니다. --use_real_data 옵션을 사용해 주세요.")
 
 
+# Deploy-aligned Stage2 postprocess defaults (evaluate_pipeline under-seg recipe)
+DEFAULT_STAGE2_THRESHOLDS = "0.85,0.92,0.70"
+DEFAULT_CC_MIN_SIZES = "0,35,50"
+DEFAULT_STAGE2_ERODE_CLASSES = "1,2"
+DEFAULT_STAGE2_ERODE_PX = 1
+
+
+def _parse_int_set(csv: str) -> set:
+    return {int(x.strip()) for x in str(csv).split(",") if x.strip() != ""}
+
+
+def _erode_mask_np(mask: np.ndarray, px: int) -> np.ndarray:
+    """1px morphological erosion; keep original if erosion would empty the mask."""
+    if px <= 0 or float(np.sum(mask)) <= 0:
+        return mask.astype(np.float32)
+    from scipy.ndimage import binary_erosion
+
+    eroded = mask > 0.5
+    for _ in range(int(px)):
+        eroded = binary_erosion(eroded, iterations=1)
+    if not np.any(eroded):
+        return mask.astype(np.float32)
+    return eroded.astype(np.float32)
+
+
+def _apply_stage2_erode_batch(
+    roughs: np.ndarray,
+    class_idx: int,
+    erode_classes: set,
+    erode_px: int,
+) -> np.ndarray:
+    if erode_px <= 0 or class_idx not in erode_classes or len(roughs) == 0:
+        return roughs
+    return np.stack([_erode_mask_np(r, erode_px) for r in roughs], axis=0)
+
+
 def load_real_data(
     train_root: str,
     modality:   str,
@@ -296,17 +332,29 @@ def load_real_data(
     refinement_mode: str = "small",
     patient_ids: Optional[list] = None,
     mixup: bool = True,
-    stage2_thresholds: str = "0.80,0.80,0.50",
+    stage2_thresholds: str = DEFAULT_STAGE2_THRESHOLDS,
+    cc_min_sizes: str = DEFAULT_CC_MIN_SIZES,
+    stage2_erode_classes: str = DEFAULT_STAGE2_ERODE_CLASSES,
+    stage2_erode_px: int = DEFAULT_STAGE2_ERODE_PX,
     oracle_expert: bool = False,
+    class_filter: str = "gt",
 ):
     """실제 BraTS2021 데이터를 NumPy 배열로 반환.
 
-    oracle_expert=True 이면 GT 크기 클래스로 필터한 뒤, 해당 Expert만
-    강제 라우팅해 rough를 만든다 (Stage3 학습용 train/serve Expert 정합).
+    class_filter:
+      - "gt": GT 면적 클래스로 선필터 (Stage2 Expert 특화 학습용).
+      - "classifier": Stage1 예측 클래스로 후필터 + 분류기 Expert 라우팅
+        (배포 Stage3 train/serve 정합용). 이 모드에서는 oracle_expert를 무시한다.
+    oracle_expert: class_filter="gt" 일 때만 해당 Expert를 강제 라우팅.
     """
     from src.data.brats2020_dataset import BraTS2020Dataset
+    from src.utils.metrics import filter_small_components, gt_size_class
+    from src.utils.device import get_torch_device
     import torch
-    
+
+    if class_filter not in ("gt", "classifier"):
+        raise ValueError("class_filter must be 'gt' or 'classifier'")
+
     log.info(f"실제 BraTS2021 데이터 로드 중: {train_root}")
     ds = BraTS2020Dataset(
         root_dir=train_root,
@@ -322,40 +370,55 @@ def load_real_data(
     stage2_thr = [float(t) for t in str(stage2_thresholds).split(",")]
     if len(stage2_thr) != 3:
         raise ValueError("--stage2_thresholds 는 Small,Medium,Large 3개 값이어야 합니다.")
+    cc_min = [int(t) for t in str(cc_min_sizes).split(",")]
+    if len(cc_min) != 3:
+        raise ValueError("--cc_min_sizes 는 Small,Medium,Large 3개 정수여야 합니다.")
     log.info(
         "PPO 초안 마스크 이진화 임계값: Small=%.2f, Medium=%.2f, Large=%.2f (평가와 동일)",
         stage2_thr[0], stage2_thr[1], stage2_thr[2],
     )
+    log.info(
+        "CC filter min_size: Small=%d, Medium=%d, Large=%d",
+        cc_min[0], cc_min[1], cc_min[2],
+    )
 
     rng = np.random.default_rng(noise_seed)
-    from src.utils.metrics import gt_size_class
-
     target_class = {"small": 0, "medium": 1, "large": 2}[refinement_mode.lower()]
-    gt_classes = np.array([gt_size_class(gt) for gt in gts])
-    mask_indices = gt_classes == target_class
-    if not np.any(mask_indices):
-        raise ValueError(f"해당 클래스({refinement_mode})로 분류된 데이터가 하나도 없습니다!")
 
-    # GT 크기 필터를 rough 생성 전에 적용 → Expert/클래스 정합
-    imgs = imgs[mask_indices]
-    gts = gts[mask_indices]
-    imgs_25d = imgs_25d[mask_indices]
-    log.info(
-        "'%s' (GT Class %d) 선필터: %d 슬라이스",
-        refinement_mode, target_class, len(imgs),
-    )
+    # GT 선필터는 Expert 특화(Stage2)용. Stage3 배포 정합은 classifier 후필터.
+    if class_filter == "gt":
+        gt_classes = np.array([gt_size_class(gt) for gt in gts])
+        mask_indices = gt_classes == target_class
+        if not np.any(mask_indices):
+            raise ValueError(f"해당 클래스({refinement_mode})로 분류된 데이터가 하나도 없습니다!")
+        imgs = imgs[mask_indices]
+        gts = gts[mask_indices]
+        imgs_25d = imgs_25d[mask_indices]
+        log.info(
+            "'%s' (GT Class %d) 선필터: %d 슬라이스",
+            refinement_mode, target_class, len(imgs),
+        )
 
-    # 1. 합성 노이즈 마스크 및 시뮬레이션된 확률 맵 생성
-    from src.data.brats2020_dataset import make_noisy_mask
-    from scipy.ndimage import gaussian_filter
+    # 1. 합성 노이즈 마스크 (mixup=True 일 때만 필요 — Stage3는 mixup=False)
     morph_px = 5  # train/eval 동일: max_morph_px=5 (분포 일치)
-    log.info(f"학습 데이터에 대한 합성 노이즈 마스크 및 시뮬레이션 확률 맵 생성 중... (max_morph_px={morph_px})")
-    synthetic_roughs = np.stack(
-        [make_noisy_mask(gt, rng, max_morph_px=morph_px) for gt in gts], axis=0
-    )
-    synthetic_probs = np.zeros_like(synthetic_roughs)
-    for i in range(len(synthetic_roughs)):
-        synthetic_probs[i] = gaussian_filter(synthetic_roughs[i].astype(float), sigma=2.0)
+    synthetic_roughs = None
+    synthetic_probs = None
+    if mixup:
+        from src.data.brats2020_dataset import make_noisy_masks_batch
+
+        morph_device = "cuda" if torch.cuda.is_available() else "cpu"
+        if morph_device != "cuda":
+            raise RuntimeError("합성 노이즈 마스크 생성도 CUDA가 필요합니다.")
+        log.info(
+            "학습 데이터에 대한 합성 노이즈 마스크 및 시뮬레이션 확률 맵 생성 중... "
+            "(max_morph_px=%d, device=%s, n=%d)",
+            morph_px, morph_device, len(gts),
+        )
+        synthetic_roughs, synthetic_probs = make_noisy_masks_batch(
+            gts, rng, max_morph_px=morph_px, sigma=2.0, device=morph_device
+        )
+    else:
+        log.info("mixup=False — 합성 노이즈 마스크 생성 생략 (Expert 초안만 사용)")
 
     # 2. 실제 모델 예측 마스크 및 Sigmoid 확률 맵 생성 (AdaptivePipeline 사용)
     _REQUIRED_CKPTS = [
@@ -371,30 +434,37 @@ def load_real_data(
             ", ".join(missing),
         )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_torch_device(prefer_cuda=True, require_cuda=True)
     from src.models.dynamic_router import AdaptivePipeline
     log.info(f"AdaptivePipeline 3-Stage 라우터 로드 중... (Device: {device})")
     in_ch = imgs.shape[1] if imgs.ndim == 4 else 1
     pipeline = AdaptivePipeline(device, in_channels=in_ch)
-    
-    batch_size = 64
+    pipeline.eval()
+
+    # GPU 처리량 우선: 큰 배치 + CC는 클래스 필터 이후에만 (CPU 병목 제거)
+    batch_size = 128 if device.type == "cuda" else 32
     num_slices = len(imgs)
     preds = []
     probs = []
     class_preds_all = []
-    use_oracle = bool(oracle_expert)
+    # 배포 정합: 분류기 라우팅. oracle은 GT-filter 경로의 상한용.
+    use_oracle = bool(oracle_expert) and class_filter == "gt"
     log.info(
-        "초안 마스크 생성 중... (oracle_expert=%s, forced_class=%s)",
-        use_oracle, target_class if use_oracle else "classifier",
+        "초안 마스크 생성 중... (class_filter=%s, oracle_expert=%s, forced_class=%s, "
+        "batch=%d, device=%s, n=%d)",
+        class_filter, use_oracle, target_class if use_oracle else "classifier",
+        batch_size, device, num_slices,
     )
     with torch.no_grad():
+        n_batches = (num_slices + batch_size - 1) // batch_size
+        log_every = max(1, n_batches // 10)
         for start_idx in range(0, num_slices, batch_size):
             end_idx = min(start_idx + batch_size, num_slices)
             batch_imgs = imgs_25d[start_idx:end_idx]
             if batch_imgs.ndim == 3:
-                batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device)
+                batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device, non_blocking=True)
             else:
-                batch_t = torch.from_numpy(batch_imgs).to(device)
+                batch_t = torch.from_numpy(batch_imgs).to(device, non_blocking=True)
 
             if use_oracle:
                 forced = torch.full(
@@ -403,17 +473,21 @@ def load_real_data(
                 rough_masks_t, class_preds = pipeline(batch_t, true_class_preds=forced)
             else:
                 rough_masks_t, class_preds = pipeline(batch_t)
-            batch_preds_prob = rough_masks_t.squeeze(1).cpu().numpy()
-            cls_np = class_preds.cpu().numpy()
-            thr = np.array(
-                [stage2_thr[int(c)] for c in cls_np], dtype=np.float32
-            ).reshape(-1, *([1] * (batch_preds_prob.ndim - 1)))
-            batch_preds_bin = (batch_preds_prob > thr).astype(np.float32)
-            
-            preds.append(batch_preds_bin)
-            probs.append(batch_preds_prob)
-            class_preds_all.extend(class_preds.cpu().numpy().tolist())
-            
+            batch_preds_prob = rough_masks_t.squeeze(1).float()
+            cls_t = class_preds.long()
+            thr_t = torch.tensor(stage2_thr, device=device, dtype=batch_preds_prob.dtype)[cls_t]
+            while thr_t.ndim < batch_preds_prob.ndim:
+                thr_t = thr_t.unsqueeze(-1)
+            batch_preds_bin = (batch_preds_prob > thr_t).to(dtype=torch.float32)
+            # CC는 아래에서 클래스 필터 후 적용 (배치마다 scipy → GPU stall 방지)
+            preds.append(batch_preds_bin.detach().cpu().numpy())
+            probs.append(batch_preds_prob.detach().cpu().numpy())
+            class_preds_all.extend(cls_t.detach().cpu().numpy().tolist())
+            # ~10% 단위만 로그 (batch 단위 spam 방지)
+            step_i = start_idx // batch_size
+            if step_i % log_every == 0 or end_idx >= num_slices:
+                log.info("  rough GPU %d/%d", end_idx, num_slices)
+
     actual_roughs = np.concatenate(preds, axis=0)
     actual_probs = np.concatenate(probs, axis=0)
     if actual_roughs.ndim == 4 and actual_roughs.shape[1] == 1:
@@ -422,6 +496,45 @@ def load_real_data(
         actual_probs = np.squeeze(actual_probs, axis=1)
     class_preds_all = np.array(class_preds_all)
     log.info(f"AdaptivePipeline 초안 마스크 생성 완료 (개수: {len(actual_roughs)})")
+
+    if class_filter == "classifier":
+        keep = class_preds_all == target_class
+        if not np.any(keep):
+            raise ValueError(
+                f"분류기가 '{refinement_mode}'(class {target_class})로 라우팅한 슬라이스가 없습니다!"
+            )
+        imgs = imgs[keep]
+        gts = gts[keep]
+        imgs_25d = imgs_25d[keep]
+        actual_roughs = actual_roughs[keep]
+        actual_probs = actual_probs[keep]
+        if synthetic_roughs is not None:
+            synthetic_roughs = synthetic_roughs[keep]
+            synthetic_probs = synthetic_probs[keep]
+        class_preds_all = class_preds_all[keep]
+        log.info(
+            "'%s' (classifier Class %d) 후필터: %d 슬라이스 (배포 Stage3와 동일 라우팅)",
+            refinement_mode, target_class, len(imgs),
+        )
+
+    # 클래스 확정 슬라이스에만 CC 필터 (eval과 동일 기준)
+    cc_n = int(cc_min[target_class])
+    if cc_n > 0:
+        log.info("CC filter 적용 중 (min_size=%d, n=%d)...", cc_n, len(actual_roughs))
+        actual_roughs = np.stack(
+            [filter_small_components(r, cc_n) for r in actual_roughs], axis=0
+        )
+
+    erode_classes = _parse_int_set(stage2_erode_classes)
+    erode_px = max(0, int(stage2_erode_px))
+    if erode_px > 0 and target_class in erode_classes:
+        log.info(
+            "Stage2 erode: %dpx class=%d (under-seg bias, deploy-aligned)",
+            erode_px, target_class,
+        )
+        actual_roughs = _apply_stage2_erode_batch(
+            actual_roughs, target_class, erode_classes, erode_px
+        )
 
     if mixup:
         imgs = np.concatenate([imgs, imgs], axis=0)
@@ -442,6 +555,133 @@ def load_real_data(
     return imgs, gts, roughs, probs_all
 
 
+def load_stage3_all_classes(
+    train_root: str,
+    modality: str,
+    target_size: int,
+    max_patients: Optional[int],
+    noise_seed: int = 42,
+    patient_ids: Optional[list] = None,
+    stage2_thresholds: str = DEFAULT_STAGE2_THRESHOLDS,
+    cc_min_sizes: str = DEFAULT_CC_MIN_SIZES,
+    stage2_erode_classes: str = DEFAULT_STAGE2_ERODE_CLASSES,
+    stage2_erode_px: int = DEFAULT_STAGE2_ERODE_PX,
+):
+    """Load BraTS + AdaptivePipeline roughs once, then split by classifier class.
+
+    Returns dict: mode -> (images, gts, roughs, probs)
+    Avoids reloading 1001 patients three times for Stage3.
+    """
+    from src.data.brats2020_dataset import BraTS2020Dataset
+    from src.utils.metrics import filter_small_components
+    from src.utils.device import get_torch_device
+    import torch
+
+    log.info("Stage3 bundle: BraTS + AdaptivePipeline 1회 로드 (small/medium/large 공유)")
+    ds = BraTS2020Dataset(
+        root_dir=train_root,
+        modality=modality,
+        target_size=target_size,
+        max_patients=None if patient_ids is not None else max_patients,
+        patient_ids=patient_ids,
+        simulate_rough=False,
+        noise_seed=noise_seed,
+    )
+    imgs, gts, _ = ds.get_numpy_arrays()
+    imgs_25d = ds.get_numpy_25d_arrays()
+    stage2_thr = [float(t) for t in str(stage2_thresholds).split(",")]
+    if len(stage2_thr) != 3:
+        raise ValueError("--stage2_thresholds 는 Small,Medium,Large 3개 값이어야 합니다.")
+    cc_min = [int(t) for t in str(cc_min_sizes).split(",")]
+    if len(cc_min) != 3:
+        raise ValueError("--cc_min_sizes 는 Small,Medium,Large 3개 정수여야 합니다.")
+    erode_classes = _parse_int_set(stage2_erode_classes)
+    erode_px = max(0, int(stage2_erode_px))
+    log.info(
+        "PPO 초안 마스크 이진화 임계값: Small=%.2f, Medium=%.2f, Large=%.2f (평가와 동일)",
+        stage2_thr[0], stage2_thr[1], stage2_thr[2],
+    )
+    log.info(
+        "CC filter min_size: Small=%d, Medium=%d, Large=%d",
+        cc_min[0], cc_min[1], cc_min[2],
+    )
+    if erode_px > 0 and erode_classes:
+        log.info(
+            "Stage2 erode: %dpx classes=%s (under-seg bias, deploy-aligned)",
+            erode_px, sorted(erode_classes),
+        )
+
+    device = get_torch_device(prefer_cuda=True, require_cuda=True)
+    from src.models.dynamic_router import AdaptivePipeline
+    in_ch = imgs.shape[1] if imgs.ndim == 4 else 1
+    pipeline = AdaptivePipeline(device, in_channels=in_ch)
+    pipeline.eval()
+
+    batch_size = 128 if device.type == "cuda" else 32
+    num_slices = len(imgs)
+    preds, probs, class_preds_all = [], [], []
+    log.info(
+        "초안 마스크 생성 중... (classifier routing, batch=%d, device=%s, n=%d)",
+        batch_size, device, num_slices,
+    )
+    with torch.no_grad():
+        n_batches = (num_slices + batch_size - 1) // batch_size
+        log_every = max(1, n_batches // 10)
+        for start_idx in range(0, num_slices, batch_size):
+            end_idx = min(start_idx + batch_size, num_slices)
+            batch_imgs = imgs_25d[start_idx:end_idx]
+            if batch_imgs.ndim == 3:
+                batch_t = torch.from_numpy(batch_imgs).unsqueeze(1).to(device, non_blocking=True)
+            else:
+                batch_t = torch.from_numpy(batch_imgs).to(device, non_blocking=True)
+            rough_masks_t, class_preds = pipeline(batch_t)
+            batch_preds_prob = rough_masks_t.squeeze(1).float()
+            cls_t = class_preds.long()
+            thr_t = torch.tensor(stage2_thr, device=device, dtype=batch_preds_prob.dtype)[cls_t]
+            while thr_t.ndim < batch_preds_prob.ndim:
+                thr_t = thr_t.unsqueeze(-1)
+            batch_preds_bin = (batch_preds_prob > thr_t).to(dtype=torch.float32)
+            preds.append(batch_preds_bin.detach().cpu().numpy())
+            probs.append(batch_preds_prob.detach().cpu().numpy())
+            class_preds_all.extend(cls_t.detach().cpu().numpy().tolist())
+            step_i = start_idx // batch_size
+            if step_i % log_every == 0 or end_idx >= num_slices:
+                log.info("  rough GPU %d/%d", end_idx, num_slices)
+
+    actual_roughs = np.concatenate(preds, axis=0)
+    actual_probs = np.concatenate(probs, axis=0)
+    if actual_roughs.ndim == 4 and actual_roughs.shape[1] == 1:
+        actual_roughs = np.squeeze(actual_roughs, axis=1)
+    if actual_probs.ndim == 4 and actual_probs.shape[1] == 1:
+        actual_probs = np.squeeze(actual_probs, axis=1)
+    class_preds_all = np.asarray(class_preds_all, dtype=np.int64)
+    log.info("AdaptivePipeline 초안 마스크 생성 완료 (개수: %d)", len(actual_roughs))
+
+    out = {}
+    name_by_c = {0: "small", 1: "medium", 2: "large"}
+    for c, mode in name_by_c.items():
+        keep = class_preds_all == c
+        n_keep = int(keep.sum())
+        if n_keep == 0:
+            log.warning("classifier class %d (%s): 0 slices — skip", c, mode)
+            continue
+        imgs_c = imgs[keep]
+        gts_c = gts[keep]
+        rough_c = actual_roughs[keep].copy()
+        prob_c = actual_probs[keep]
+        cc_n = int(cc_min[c])
+        if cc_n > 0:
+            log.info("CC filter %s min_size=%d n=%d", mode, cc_n, n_keep)
+            rough_c = np.stack([filter_small_components(r, cc_n) for r in rough_c], axis=0)
+        if erode_px > 0 and c in erode_classes:
+            rough_c = _apply_stage2_erode_batch(rough_c, c, erode_classes, erode_px)
+        out[mode] = (imgs_c, gts_c, rough_c, prob_c)
+        log.info("Stage3 bundle '%s': %d slices", mode, n_keep)
+    if not out:
+        raise RuntimeError("Stage3 bundle: no class had any slices")
+    return out
+
+
 # ──────────────────────────────────────────────
 # 메인 학습 함수
 # ──────────────────────────────────────────────
@@ -459,6 +699,8 @@ def train_agent(
     max_steps:           int   = 30,          # 20 → 30
     target_dsc:          float = 0.88,        # 0.95 → 0.88: SegResNet rough DSC≈0.85 기준 현실적 목표
     step_penalty:        float = 0.005,       # 0.01 → 0.005: 탐색 억제 완화
+    local_action_band_px: int = 3,
+    local_action_uncert_floor: float = 0.25,
     # PPO 하이퍼파라미터
     total_timesteps:     int   = 300_000,      # 200K → 300K (5-class 행동 공간 확장 대응)
     n_envs:              int   = 4,
@@ -490,7 +732,7 @@ def train_agent(
     refinement_mode:     str   = "small",     # "small", "medium", "large"
     enable_stop:         bool  = False,       # 에피소드 STOP 행동 (best-of-N 대체용)
     patient_split:       Optional[str] = None,
-    stage2_thresholds:   str   = "0.80,0.80,0.50",
+    stage2_thresholds:   str   = DEFAULT_STAGE2_THRESHOLDS,
     # 재현성
     seed:                int   = 42,
     deterministic:       bool  = False,
@@ -566,7 +808,20 @@ def train_agent(
 
     # ── VecEnv 생성 ─────────────────────────────────────────
     # Monitor wrapper 적용 팩토리
-    def make_monitored_env_fn(images, gt_masks, rough_masks, uncertainty_maps, max_steps, target_dsc, step_penalty, model_type, refinement_mode, enable_stop=False):
+    def make_monitored_env_fn(
+        images,
+        gt_masks,
+        rough_masks,
+        uncertainty_maps,
+        max_steps,
+        target_dsc,
+        step_penalty,
+        model_type,
+        refinement_mode,
+        enable_stop=False,
+        local_action_band_px=3,
+        local_action_uncert_floor=0.25,
+    ):
         def _init():
             env = MaskRefinementEnv(
                 images=images,
@@ -579,13 +834,33 @@ def train_agent(
                 model_type=model_type,
                 refinement_mode=refinement_mode,
                 enable_stop=enable_stop,
+                local_action_band_px=local_action_band_px,
+                local_action_uncert_floor=local_action_uncert_floor,
             )
             return Monitor(env)
         return _init
 
-    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, tr_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode, enable_stop), n_envs=n_envs)
-    eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, val_uncert, max_steps, target_dsc, step_penalty, model_type, refinement_mode, enable_stop)])
+    train_env = make_vec_env(
+        make_monitored_env_fn(
+            tr_img, tr_gt, tr_rough, tr_uncert, max_steps, target_dsc, step_penalty,
+            model_type, refinement_mode, enable_stop,
+            local_action_band_px, local_action_uncert_floor,
+        ),
+        n_envs=n_envs,
+    )
+    eval_env = DummyVecEnv([
+        make_monitored_env_fn(
+            val_img, val_gt, val_rough, val_uncert, max_steps, target_dsc, step_penalty,
+            model_type, refinement_mode, enable_stop,
+            local_action_band_px, local_action_uncert_floor,
+        )
+    ])
     log.info(f"enable_stop={enable_stop} (action space STOP {'ON' if enable_stop else 'OFF'})")
+    log.info(
+        "local_action_band_px=%d uncert_floor=%.2f",
+        local_action_band_px,
+        local_action_uncert_floor,
+    )
 
     # ── PPO 에이전트 ─────────────────────────────────────────
     # TensorBoard 설치 여부 확인
@@ -756,6 +1031,18 @@ def main():
     parser.add_argument("--target_dsc",     type=float, default=0.95)
     parser.add_argument("--step_penalty",   type=float, default=0.01,
                         help="유지(Keep) 이외의 액션을 취할 때 보상에서 차감하는 미세 패널티")
+    parser.add_argument(
+        "--local_action_band_px",
+        type=int,
+        default=3,
+        help="예측 마스크 경계 밴드(px). SDF shift를 이 밴드 안에만 적용. 0=비활성",
+    )
+    parser.add_argument(
+        "--local_action_uncert_floor",
+        type=float,
+        default=0.25,
+        help="밴드 안 불확실성 soft-gate 하한 (1.0=불확실성 무시)",
+    )
     # PPO
     parser.add_argument("--total_timesteps",type=int,   default=300_000)
     parser.add_argument("--n_envs",         type=int,   default=4)
@@ -793,8 +1080,22 @@ def main():
     parser.add_argument("--enable_stop", action=argparse.BooleanOptionalAction, default=None,
                         help="에피소드 STOP 행동 추가 (--no-enable_stop 으로 끔). 미지정 시 yaml")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
-    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
+    parser.add_argument("--stage2_thresholds", type=str, default=DEFAULT_STAGE2_THRESHOLDS,
                         help="평가와 동일한 클래스별(Small,Medium,Large) Stage 2 이진화 임계값")
+    parser.add_argument("--cc_min_sizes", type=str, default=DEFAULT_CC_MIN_SIZES,
+                        help="클래스별 CC min size (Small,Medium,Large)")
+    parser.add_argument(
+        "--stage2_erode_classes",
+        type=str,
+        default=DEFAULT_STAGE2_ERODE_CLASSES,
+        help="Stage2 erode 적용 클래스 (배포 under-seg와 동일)",
+    )
+    parser.add_argument(
+        "--stage2_erode_px",
+        type=int,
+        default=DEFAULT_STAGE2_ERODE_PX,
+        help="Stage2 erode px (0=off)",
+    )
     parser.add_argument("--seed", type=int, default=42, help="전역 시드 (PPO 포함)")
     parser.add_argument("--deterministic", action="store_true", help="cuDNN 결정적 모드 (느려짐)")
 
@@ -818,6 +1119,8 @@ def main():
         "max_steps":           "max_steps",
         "target_dsc":          "target_dsc",
         "step_penalty":        "step_penalty",
+        "local_action_band_px": "local_action_band_px",
+        "local_action_uncert_floor": "local_action_uncert_floor",
         "total_timesteps":     "total_timesteps",
         "n_envs":              "n_envs",
         "n_steps":             "n_steps",

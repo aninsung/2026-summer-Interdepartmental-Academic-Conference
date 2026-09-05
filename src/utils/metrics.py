@@ -85,3 +85,28 @@ def filter_small_components(mask: np.ndarray, min_size: int) -> np.ndarray:
     if kept == 0:
         return binary.astype(np.float32)
     return out
+
+
+def filter_small_components_torch(mask, min_size: int):
+    """GPU 배치 CC 필터. mask: (B,H,W) float/bool tensor → 같은 shape float32."""
+    import torch
+    from src.envs.torch_ops import label_components
+
+    if min_size <= 0:
+        return (mask > 0.5).to(dtype=torch.float32)
+    out = torch.zeros_like(mask, dtype=torch.float32)
+    for bi in range(mask.shape[0]):
+        binary = mask[bi] > 0.5
+        labeled, n = label_components(binary)
+        if n == 0:
+            out[bi] = binary.to(dtype=torch.float32)
+            continue
+        kept_any = False
+        for i in range(1, n + 1):
+            comp = labeled == i
+            if int(comp.sum().item()) >= min_size:
+                out[bi][comp] = 1.0
+                kept_any = True
+        if not kept_any:
+            out[bi] = binary.to(dtype=torch.float32)
+    return out

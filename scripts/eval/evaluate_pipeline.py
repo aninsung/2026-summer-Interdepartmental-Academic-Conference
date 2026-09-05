@@ -47,12 +47,18 @@ def _tta_probability(pipeline, img_t, rough_mask_t, class_pred):
         return ((rough_mask_t + out_hf + out_vf) / 3.0).squeeze().cpu().numpy()
 
 
-def _gt_free_accept(rough: np.ndarray, refined: np.ndarray) -> bool:
+def _gt_free_accept(
+    rough: np.ndarray,
+    refined: np.ndarray,
+    lo: float = 0.85,
+    hi: float = 1.2,
+) -> bool:
+    """Area gate (GT-free). Reject empty or extreme area change vs rough."""
     if float(np.sum(refined)) < 1.0:
         return False
     r = max(1.0, float(np.sum(rough)))
     f = float(np.sum(refined))
-    return (0.2 * r) <= f <= (4.0 * r)
+    return (float(lo) * r) <= f <= (float(hi) * r)
 
 
 def _policy_expects_stop(agent) -> bool:
@@ -135,28 +141,40 @@ def main():
     parser = argparse.ArgumentParser(description="3-Stage Dynamic Routing Pipeline Evaluation")
     parser.add_argument("--train_root", type=str, default="src/data/archive", help="데이터셋 경로")
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
-    parser.add_argument("--max_patients", type=int, default=210, help="평가 풀 환자 수 (split 생성 기준)")
+    parser.add_argument("--max_patients", type=int, default=1251, help="평가 풀 환자 수 (split 생성 기준)")
     parser.add_argument("--max_samples_per_class", type=int, default=None, help="클래스당 최대 샘플 수 (None이면 제한 없음)")
     parser.add_argument("--patient_split", type=str, default=DEFAULT_SPLIT_PATH)
     parser.add_argument("--split_role", type=str, default="val", choices=["train", "val", "all"])
     parser.add_argument("--oracle_routing", action="store_true", help="GT 면적으로 Expert를 고르는 상한 평가")
     parser.add_argument("--confidence_threshold", type=float, default=None, help="이 값 이상 평균 확률이면 PPO 생략")
-    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
-                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. Large는 과소분할이라 0.50.")
+    parser.add_argument("--stage2_thresholds", type=str, default="0.85,0.92,0.70",
+                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값.")
     parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
     parser.add_argument(
         "--stage3_mode",
         type=str,
-        default="sl",
-        choices=["sl", "ppo", "skip"],
-        help="Stage3: sl=교대학습 SL refiner(기본), ppo=기존 PPO, skip=생략",
+        default="hybrid",
+        choices=["sl", "ppo", "hybrid", "skip"],
+        help="Stage3: sl | ppo | hybrid(SL then class-wise zoom-PPO) | skip",
     )
     parser.add_argument("--micro_area_floor", type=float, default=80.0,
                         help="Small 마스크 면적이 이 값 미만이면 임계값을 단계적으로 낮춘다.")
     parser.add_argument("--micro_thr_floor", type=float, default=0.15,
                         help="마이크로 조각 임계값 완화의 하한.")
-    parser.add_argument("--cc_min_sizes", type=str, default="0,15,25",
-                        help="클래스별(Small,Medium,Large) 연결요소 최소 픽셀. 0이면 비활성.")
+    parser.add_argument("--cc_min_sizes", type=str, default="0,35,50",
+                        help="클래스별(Small,Medium,Large) 연결요소 최소 픽셀.")
+    parser.add_argument(
+        "--stage2_erode_classes",
+        type=str,
+        default="1,2",
+        help="Stage2 이진화 후 erosion 적용 클래스. 기본 1,2=Medium+Large under-seg",
+    )
+    parser.add_argument(
+        "--stage2_erode_px",
+        type=int,
+        default=1,
+        help="stage2_erode_classes에 적용할 erosion 반복(px). 0이면 비활성.",
+    )
     parser.add_argument("--skip_plot", action="store_true", help="시각화 PNG 생략")
     parser.add_argument(
         "--metrics_out",
@@ -166,14 +184,14 @@ def main():
     )
     parser.add_argument(
         "--deploy_mode",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="배포형 평가(기본): 마지막(또는 STOP) 마스크 + 면적 게이트만",
+        help="배포형 평가(기본): 마지막(또는 STOP) 마스크 + 면적 게이트만. 끄기: --no-deploy_mode",
     )
     parser.add_argument(
         "--gt_upper_bound",
         action="store_true",
-        help="논문 금지용 상한: GT best-of-N + 단조 DSC 게이트 (배포 아님)",
+        help="논문 금지용 상한: GT best-of-N + 단조 DSC 게이트 (배포 아님·메인 수치 금지)",
     )
     parser.add_argument(
         "--last_mask",
@@ -184,6 +202,94 @@ def main():
         "--no_monotonic_gate",
         action="store_true",
         help="단조 DSC 게이트 비활성화",
+    )
+    parser.add_argument(
+        "--boundary_band_px",
+        type=int,
+        default=2,
+        help="SL refine를 rough 경계 band로 제한 (0=비활성). 배포 기본 2 (Medium 면적비 완화)",
+    )
+    parser.add_argument(
+        "--boundary_band_mode",
+        type=str,
+        default="expand",
+        choices=["replace", "expand", "shrink"],
+        help="boundary band 기본 모드 (과소분할 보정: expand)",
+    )
+    parser.add_argument(
+        "--boundary_band_mode_by_class",
+        type=str,
+        default="",
+        help="클래스별 모드 덮어쓰기. 예: 1:expand,2:expand",
+    )
+    parser.add_argument(
+        "--boundary_band_classes",
+        type=str,
+        default="1,2",
+        help="boundary band 적용 클래스 (배포 기본: Medium+Large)",
+    )
+    parser.add_argument("--sl_cand_thr", type=float, default=0.4, help="SL candidate 임계값 (Small 기본)")
+    parser.add_argument(
+        "--sl_cand_thr_boundary",
+        type=float,
+        default=0.40,
+        help="boundary/zoom 클래스 SL candidate 임계값",
+    )
+    parser.add_argument(
+        "--sl_zoom_patches",
+        type=int,
+        default=0,
+        help="shrink용 zoom 패치 수 (expand 보정 시 0). ",
+    )
+    parser.add_argument(
+        "--sl_zoom_patch",
+        type=int,
+        default=48,
+        help="zoom 패치 한 변 길이 (확대 전)",
+    )
+    parser.add_argument(
+        "--stage3_skip_classes",
+        type=str,
+        default="",
+        help="Stage3를 건너뛸 클래스 (0=Small,1=Medium,2=Large). 기본: 없음(Medium/Large expand 보정)",
+    )
+    parser.add_argument(
+        "--area_gate_lo",
+        type=float,
+        default=0.85,
+        help="면적 게이트 하한 (refined/rough). 배포 기본 0.85",
+    )
+    parser.add_argument(
+        "--area_gate_hi",
+        type=float,
+        default=1.2,
+        help="면적 게이트 상한 (refined/rough). 배포 기본 1.2",
+    )
+    parser.add_argument(
+        "--area_gate_hi_medium",
+        type=float,
+        default=1.5,
+        help="Medium(class=1) 전용 면적 게이트 상한. <=0 이면 --area_gate_hi 사용",
+    )
+    parser.add_argument(
+        "--area_gate_hi_large",
+        type=float,
+        default=1.35,
+        help="Large(class=2) 전용 면적 게이트 상한. <=0 이면 --area_gate_hi 사용",
+    )
+    parser.add_argument(
+        "--medium_active_max_area",
+        type=float,
+        default=0.0,
+        help="Medium(class=1): rough 성분 면적 < 이 값이면 적극 refine(band 없음). "
+        "0이면 비활성. 권장 450",
+    )
+    parser.add_argument(
+        "--medium_skip_min_area",
+        type=float,
+        default=0.0,
+        help="Medium: rough 성분 면적 ≥ 이 값이면 Stage3 스킵(Stage2 유지). "
+        "0이면 비활성. 권장 700 (active~skip 사이는 shrink)",
     )
     parser.add_argument(
         "--enable_stop",
@@ -200,33 +306,125 @@ def main():
         args.last_mask = False
         args.no_monotonic_gate = False
         args.enable_stop = False
-        print("[gt_upper_bound] best-of-N + 단조 게이트 ON (논문 메인 수치로 쓰지 말 것)")
+        print(
+            "[gt_upper_bound] best-of-N + 단조 DSC 게이트 ON — "
+            "오프라인 상한만. 논문/배포 메인 수치·'성능 보장'으로 쓰지 말 것"
+        )
     elif args.deploy_mode:
         args.last_mask = True
         args.no_monotonic_gate = True
         # PPO 모드일 때만 STOP 강제
-        if args.stage3_mode == "ppo" and (not args.enable_stop):
+        if args.stage3_mode in ("ppo", "hybrid") and (not args.enable_stop):
             args.enable_stop = True
-            print("[deploy_mode] --enable_stop 자동 활성화")
+            print("[deploy_mode] --enable_stop 자동 활성화 (ppo/hybrid)")
+        print(
+            "[deploy_mode] GT monotonic gate OFF — 면적 게이트만 사용 "
+            f"(lo={args.area_gate_lo}, hi={args.area_gate_hi}); "
+            "hybrid/ppo uses gt_free last-mask (no GT cherry-pick)"
+        )
 
     select_best = not args.last_mask
     apply_monotonic = not args.no_monotonic_gate
     enable_stop = bool(args.enable_stop)
+    area_lo = float(args.area_gate_lo)
+    area_hi = float(args.area_gate_hi)
+    if not (0.0 < area_lo <= area_hi):
+        parser.error("--area_gate_lo/--area_gate_hi 는 0 < lo <= hi 이어야 합니다.")
+    area_hi_by_class = {0: area_hi, 1: area_hi, 2: area_hi}
+    med_hi = float(args.area_gate_hi_medium)
+    large_hi = float(args.area_gate_hi_large)
+    if med_hi > 0:
+        if med_hi < area_lo:
+            parser.error("--area_gate_hi_medium 는 area_gate_lo 이상이어야 합니다.")
+        area_hi_by_class[1] = med_hi
+    if large_hi > 0:
+        if large_hi < area_lo:
+            parser.error("--area_gate_hi_large 는 area_gate_lo 이상이어야 합니다.")
+        area_hi_by_class[2] = large_hi
+    print(
+        f"Area gate: lo={area_lo:.2f}× | hi Small={area_hi_by_class[0]:.2f} "
+        f"Medium={area_hi_by_class[1]:.2f} Large={area_hi_by_class[2]:.2f}"
+    )
     stage2_thr = [float(t) for t in args.stage2_thresholds.split(",")]
     if len(stage2_thr) != 3:
         parser.error("--stage2_thresholds 는 쉼표로 구분된 3개 값이어야 합니다.")
     cc_min = [int(t) for t in args.cc_min_sizes.split(",")]
     if len(cc_min) != 3:
         parser.error("--cc_min_sizes 는 쉼표로 구분된 3개 정수여야 합니다.")
+    try:
+        erode_classes = {
+            int(x.strip())
+            for x in str(args.stage2_erode_classes).split(",")
+            if x.strip() != ""
+        }
+    except ValueError:
+        parser.error("--stage2_erode_classes 는 쉼표로 구분된 정수여야 합니다.")
+    stage2_erode_px = max(0, int(args.stage2_erode_px))
+    try:
+        skip_classes = {
+            int(x.strip())
+            for x in str(args.stage3_skip_classes).split(",")
+            if x.strip() != ""
+        }
+    except ValueError:
+        parser.error("--stage3_skip_classes 는 쉼표로 구분된 정수여야 합니다.")
+    band_classes = set()
+    band_mode_by_class = {}
+    if int(args.boundary_band_px) > 0:
+        try:
+            band_classes = {int(x.strip()) for x in str(args.boundary_band_classes).split(",") if x.strip() != ""}
+        except ValueError:
+            parser.error("--boundary_band_classes 는 쉼표로 구분된 정수여야 합니다.")
+        raw_by = str(args.boundary_band_mode_by_class or "").strip()
+        if raw_by:
+            for part in raw_by.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if ":" not in part:
+                    parser.error(
+                        "--boundary_band_mode_by_class 형식: 1:replace,2:shrink"
+                    )
+                k_s, m_s = part.split(":", 1)
+                try:
+                    k_i = int(k_s.strip())
+                except ValueError:
+                    parser.error("--boundary_band_mode_by_class 클래스 인덱스가 정수가 아닙니다.")
+                m_s = m_s.strip()
+                if m_s not in ("replace", "expand", "shrink"):
+                    parser.error(f"알 수 없는 boundary mode: {m_s}")
+                band_mode_by_class[k_i] = m_s
+        print(
+            f"[boundary-band] px={int(args.boundary_band_px)} "
+            f"default_mode={args.boundary_band_mode} "
+            f"by_class={band_mode_by_class or '-'} "
+            f"classes={sorted(band_classes)} cand_thr={args.sl_cand_thr_boundary}"
+        )
+    if int(args.sl_zoom_patches) > 0:
+        print(
+            f"[sl-zoom] patches={int(args.sl_zoom_patches)} "
+            f"patch={int(args.sl_zoom_patch)} (Medium/Large shrink only)"
+        )
+    if skip_classes:
+        print(f"[stage3-skip] classes={sorted(skip_classes)} (Stage2 mask 유지)")
+    if float(args.medium_active_max_area) > 0 or float(args.medium_skip_min_area) > 0:
+        print(
+            f"[medium-area] active_refine if rough_area < {float(args.medium_active_max_area):.0f} | "
+            f"shrink if mid | skip Stage3 if rough_area >= {float(args.medium_skip_min_area):.0f} "
+            f"(0=해당 구간 비활성)"
+        )
     print(f"Stage 2 이진화 임계값: Small={stage2_thr[0]}, Medium={stage2_thr[1]}, Large={stage2_thr[2]}")
     print(f"CC filter min_size: Small={cc_min[0]}, Medium={cc_min[1]}, Large={cc_min[2]}")
+    if stage2_erode_px > 0 and erode_classes:
+        print(f"Stage2 erode: {stage2_erode_px}px classes={sorted(erode_classes)} (under-seg bias)")
     print(
         f"Eval mode: select_best={select_best}, monotonic_gate={apply_monotonic}, "
         f"enable_stop={enable_stop}"
         + (" [deploy_mode]" if args.deploy_mode else "")
     )
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    from src.utils.device import require_cuda_device
+    device = require_cuda_device()
     print(f"Device: {device}")
     
     patient_ids = None
@@ -272,9 +470,11 @@ def main():
     for mode, class_idx in zip(["small", "medium", "large"], [0, 1, 2]):
         agents[class_idx] = None
         sl_nets[class_idx] = None
-        if args.stage3_mode == "skip":
+        if args.stage3_mode == "skip" or class_idx in skip_classes:
+            if class_idx in skip_classes:
+                print(f"Skipping Stage3 load for class {class_idx} ({mode})")
             continue
-        if args.stage3_mode == "sl":
+        if args.stage3_mode in ("sl", "hybrid"):
             sl_path = f"checkpoints/{sl_name_map[mode]}"
             if os.path.exists(sl_path):
                 print(f"Loading SL Refiner: {sl_path}")
@@ -292,7 +492,7 @@ def main():
                 sl_nets[class_idx] = net
             else:
                 missing_stage3.append(sl_path)
-        elif args.stage3_mode == "ppo":
+        if args.stage3_mode in ("ppo", "hybrid"):
             agent_path = f"checkpoints/{agent_name_map[mode]}"
             if os.path.exists(agent_path):
                 print(f"Loading PPO Agent: {agent_path}")
@@ -305,7 +505,7 @@ def main():
     if missing_stage3:
         raise FileNotFoundError(
             f"stage3_mode={args.stage3_mode} 인데 체크포인트가 없습니다: {missing_stage3}. "
-            "Stage3를 학습하거나 --stage3_mode skip 을 쓰세요."
+            "Stage3를 학습하거나 --stage3_mode skip / --stage3_skip_classes 로 해당 클래스를 빼세요."
         )
 
     final_dsc_list = []
@@ -377,6 +577,14 @@ def main():
                 if np.sum(cand_mask) >= args.micro_area_floor:
                     break
         rough_mask_np = filter_small_components(rough_mask_np, cc_min[c])
+        # Medium/Large: 1px erosion → 과소분할 편향 (외곽 FP 제거, Recall↓)
+        if stage2_erode_px > 0 and c in erode_classes and np.sum(rough_mask_np) > 0:
+            from scipy.ndimage import binary_erosion
+            eroded = rough_mask_np > 0.5
+            for _ in range(stage2_erode_px):
+                eroded = binary_erosion(eroded, iterations=1)
+            if np.any(eroded):
+                rough_mask_np = eroded.astype(np.float32)
 
         init_dsc = dice(rough_mask_np, gt_np)
         init_hd95 = hd95(rough_mask_np, gt_np)
@@ -404,72 +612,153 @@ def main():
         prob_tta_np = _tta_probability(pipeline, img_t, rough_mask_t, class_pred)
                 
         # 유효 컴포넌트들을 각각 독립적으로 보정하여 합산 (분리된 종양들의 독립 미세 조정 지원)
+        # Stage3 시작 마스크 = Stage2 컴포넌트(non-TTA). Init DSC와 동일한 기준이라
+        # Final−Init Δ에 TTA 이득이 섞이지 않는다. TTA는 soft probability 채널에만 사용.
         for k in valid_comp_indices:
             comp_mask_k = (lbl == k).astype(np.float32)
             comp_area = float(np.sum(comp_mask_k))
-            
-            # Stage3 라우팅: 슬라이스 분류기 클래스와 동일 (학습 GT-class / Expert와 정합)
-            # 컴포넌트는 독립 보정하되, Refiner는 슬라이스 클래스 ck=c 를 쓴다.
+
+            # Stage3 라우팅: 슬라이스 분류기 클래스 (학습 class_filter=classifier와 정합)
             ck = int(c)
             agent_k = agents[ck]
             sl_k = sl_nets[ck]
             ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
-            
-            if agent_k is None and sl_k is None:
+
+            if ck in skip_classes or (agent_k is None and sl_k is None):
+                final_mask_np = np.maximum(final_mask_np, comp_mask_k)
+                continue
+
+            # Medium: rough 성분 면적 기반 분기 (GT 미사용, deploy 가능)
+            med_active = float(args.medium_active_max_area)
+            med_skip = float(args.medium_skip_min_area)
+            if ck == 1 and med_skip > 0 and comp_area >= med_skip:
                 final_mask_np = np.maximum(final_mask_np, comp_mask_k)
                 continue
 
             struct_k = np.ones((3, 3))
             dilate_iter = 2 if ck == 0 else 3
             comp_dilated = binary_dilation(comp_mask_k, struct_k, iterations=dilate_iter)
-            is_micro = (ck == 0 and comp_area < 50)
-            # TTA 재이진화는 Stage 2와 같은 슬라이스 클래스 임계값을 쓴다.
-            tta_thr = 0.30 if is_micro else stage2_thr[c]
-            comp_from_tta = (prob_tta_np > tta_thr).astype(np.float32) * comp_dilated
-            if np.sum(comp_from_tta) == 0:
-                comp_from_tta = comp_mask_k.copy()
+            comp_init = comp_mask_k.copy()
+            soft_prob = (prob_tta_np * comp_dilated).astype(np.float32)
+            if float(np.sum(soft_prob)) == 0.0:
+                soft_prob = (rough_prob_np * comp_dilated).astype(np.float32)
 
             if args.confidence_threshold is not None:
-                nz = comp_from_tta > 0.5
+                nz = comp_init > 0.5
                 mean_p = float(np.mean(prob_tta_np[nz])) if np.any(nz) else 0.0
                 if mean_p >= args.confidence_threshold:
-                    final_mask_np = np.maximum(final_mask_np, comp_from_tta)
+                    final_mask_np = np.maximum(final_mask_np, comp_init)
                     continue
 
             if sl_k is not None:
                 img_2d = images[i]
+                use_band = ck in band_classes and int(args.boundary_band_px) > 0
+                band_mode = band_mode_by_class.get(ck, args.boundary_band_mode)
+                # 작은 Medium: band 해제 → 적극 SL. 큰 Medium: keep expand (shrink footgun 제거)
+                if ck == 1 and med_active > 0 and comp_area < med_active:
+                    use_band = False
+                    band_mode = "replace"
+                    active_cand = max(float(args.sl_cand_thr), 0.65)
+                elif ck == 1 and med_active > 0 and (med_skip <= 0 or comp_area < med_skip):
+                    use_band = True
+                    band_mode = band_mode_by_class.get(ck, args.boundary_band_mode)
+                    active_cand = None
+                    if 1 not in band_classes and int(args.boundary_band_px) > 0:
+                        use_band = int(args.boundary_band_px) > 0
+                else:
+                    active_cand = None
+                use_zoom = (
+                    use_band
+                    and band_mode == "shrink"
+                    and int(args.sl_zoom_patches) > 0
+                    and ck in (1, 2)
+                )
                 refined_k_mask = apply_sl_refiner(
                     sl_k,
                     img_2d,
-                    comp_from_tta,
-                    (prob_tta_np * comp_from_tta).astype(np.float32),
+                    comp_init,
+                    soft_prob,
                     device,
+                    cand_thr=(
+                        active_cand
+                        if active_cand is not None
+                        else (args.sl_cand_thr_boundary if use_band else args.sl_cand_thr)
+                    ),
                     morph_small=(ck == 0),
+                    boundary_band_px=(int(args.boundary_band_px) if use_band else 0),
+                    boundary_mode=(band_mode if use_band else "replace"),
+                    zoom_n_patches=(int(args.sl_zoom_patches) if use_zoom else 0),
+                    zoom_patch=int(args.sl_zoom_patch),
+                    zoom_seed=(i * 1009 + k),
                 )
-            else:
-                refined_k_mask = _refine_with_ppo(
+            elif agent_k is not None:
+                use_band = False
+                band_mode = args.boundary_band_mode
+                from src.envs.zoom_ppo_refine import refine_zoom_ppo
+                refined_k_mask = refine_zoom_ppo(
                     agent_k,
                     images[i],
                     gt_masks[i],
-                    comp_from_tta,
-                    prob_tta_np * comp_from_tta,
+                    comp_init,
+                    soft_prob,
                     ref_mode_k,
-                    n_steps=15,
-                    clip_shrink=(ck == 0),
-                    select_best=select_best,
-                    apply_monotonic=apply_monotonic,
+                    device=str(device),
                     enable_stop=enable_stop,
+                    seed=(i * 1009 + k),
+                    gt_free=bool(args.deploy_mode),
+                )
+            else:
+                use_band = False
+                band_mode = args.boundary_band_mode
+                refined_k_mask = comp_init.copy()
+
+            # hybrid: SL result → class-wise zoom-boundary PPO
+            if args.stage3_mode == "hybrid" and agent_k is not None and sl_k is not None:
+                from src.envs.zoom_ppo_refine import refine_zoom_ppo
+                refined_k_mask = refine_zoom_ppo(
+                    agent_k,
+                    images[i],
+                    gt_masks[i],
+                    refined_k_mask,
+                    soft_prob,
+                    ref_mode_k,
+                    device=str(device),
+                    enable_stop=enable_stop,
+                    seed=(i * 1009 + k + 17),
+                    gt_free=bool(args.deploy_mode),
                 )
             if np.sum(refined_k_mask) > 0:
-                refined_k_mask = binary_closing(refined_k_mask, struct_k).astype(np.float32)
-            if np.sum(refined_k_mask) == 0 or not _gt_free_accept(comp_from_tta, refined_k_mask):
-                refined_k_mask = comp_from_tta
+                # shrink: closing이 깎은 FP를 다시 메우지 않도록 closing 생략
+                if use_band and band_mode == "shrink":
+                    refined_k_mask = np.minimum(refined_k_mask, comp_init)
+                else:
+                    closed = binary_closing(refined_k_mask, struct_k).astype(np.float32)
+                    if use_band and band_mode == "expand":
+                        refined_k_mask = np.maximum(closed, comp_init)
+                    else:
+                        refined_k_mask = closed
+            if np.sum(refined_k_mask) == 0 or not _gt_free_accept(
+                comp_init, refined_k_mask, lo=area_lo, hi=area_hi_by_class[int(c)]
+            ):
+                refined_k_mask = comp_init
             if apply_monotonic:
-                refined_k_mask = apply_monotonic_dsc_gate(comp_from_tta, refined_k_mask, gt_np)
+                refined_k_mask = apply_monotonic_dsc_gate(comp_init, refined_k_mask, gt_np)
             final_mask_np = np.maximum(final_mask_np, refined_k_mask)
 
-        if not _gt_free_accept(rough_mask_np, final_mask_np):
-            final_mask_np = rough_mask_np
+        if not _gt_free_accept(
+            rough_mask_np, final_mask_np, lo=area_lo, hi=area_hi_by_class[int(c)]
+        ):
+            # Expand-only: if we only grew within a slightly looser hi, keep; else revert.
+            r_area = max(1.0, float(np.sum(rough_mask_np)))
+            f_area = float(np.sum(final_mask_np))
+            expand_hi = max(float(area_hi_by_class[int(c)]), 1.6 if int(c) == 1 else 1.45)
+            if not (
+                args.boundary_band_mode == "expand"
+                and int(c) in (1, 2)
+                and f_area >= area_lo * r_area
+                and f_area <= expand_hi * r_area
+            ):
+                final_mask_np = rough_mask_np
 
         if apply_monotonic:
             gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
@@ -519,20 +808,35 @@ def main():
     mode_tag = "deploy (last mask, area gate only)" if args.deploy_mode else (
         f"select_best={select_best}, monotonic={apply_monotonic}"
     )
-    print("\n--- Pipeline Evaluation ({routing}, PPO, {mode}) ---".format(
+    print("\n--- Pipeline Evaluation ({routing}, Stage3={s3}, {mode}) ---".format(
         routing="oracle routing" if args.oracle_routing else "classifier routing",
+        s3=args.stage3_mode,
         mode=mode_tag,
     ))
     print(f"Total Slices Evaluated: {len(final_dsc_list)}")
+    if skip_classes:
+        print(f"Stage3 skipped classes: {sorted(skip_classes)} → Final≡Init for those slices")
     if apply_monotonic:
         print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
     else:
-        print("Monotonic DSC gate: OFF")
+        print("Monotonic DSC gate: OFF (deploy — not a performance guarantee)")
     print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
     print(f"Average Initial DSC  (Stage 2):        {np.mean(initial_dsc_list):.4f}")
-    print(f"Average Final   DSC  (Stage 3 RL):     {np.mean(final_dsc_list):.4f}")
+    print(f"Average Final   DSC  (Stage 3*):       {np.mean(final_dsc_list):.4f}")
     print(f"Average Initial HD95 (px):             {np.mean(initial_hd95_list):.4f}")
     print(f"Average Final   HD95 (px):             {np.mean(final_hd95_list):.4f}")
+    # Stage3가 실제로 돌아가는 클래스만 (skip 시 Large Δ=0이 전체 평균을 왜곡하지 않게)
+    active_idx = [i for i, c in enumerate(slice_cls) if int(c) not in skip_classes]
+    if active_idx and skip_classes:
+        act_init = np.mean([initial_dsc_list[i] for i in active_idx])
+        act_fin = np.mean([final_dsc_list[i] for i in active_idx])
+        act_ih = np.mean([initial_hd95_list[i] for i in active_idx])
+        act_fh = np.mean([final_hd95_list[i] for i in active_idx])
+        print(
+            f"Stage3-active only (excl. skip {sorted(skip_classes)}): "
+            f"n={len(active_idx)} | DSC {act_init:.4f} → {act_fin:.4f} "
+            f"| HD95 {act_ih:.4f} → {act_fh:.4f}"
+        )
     
     print("\n--- Class-wise Performance Breakdown ---")
     names = {0: "Small (CaraNet)", 1: "Medium (UNet++)", 2: "Large (SegResNet)"}
@@ -542,13 +846,13 @@ def main():
             fin_dsc_avg  = np.mean(class_final_dsc[c])
             init_hd_avg  = np.mean(class_initial_hd95[c])
             fin_hd_avg   = np.mean(class_final_hd95[c])
-            print(f"[{names[c]}] count: {len(class_final_dsc[c])} "
+            skip_tag = " [Stage3 SKIP→Init]" if c in skip_classes else ""
+            print(f"[{names[c]}]{skip_tag} count: {len(class_final_dsc[c])} "
                   f"| DSC {init_dsc_avg:.4f} → {fin_dsc_avg:.4f} "
                   f"| HD95 {init_hd_avg:.4f} → {fin_hd_avg:.4f} (px)")
             print(
                 f"    └ Precision: {np.mean(class_initial_prec[c]):.4f} → {np.mean(class_final_prec[c]):.4f} "
-                f"| Recall: {np.mean(class_initial_rec[c]):.4f} → {np.mean(class_final_rec[c]):.4f} "
-                f"(P<R: 과분할 / P>R: 과소분할)"
+                f"| Recall: {np.mean(class_initial_rec[c]):.4f} → {np.mean(class_final_rec[c]):.4f}"
             )
 
     if small_active_init:
@@ -576,6 +880,11 @@ def main():
         deploy_mode=np.array([int(args.deploy_mode)]),
         select_best=np.array([int(select_best)]),
         monotonic_gate=np.array([int(apply_monotonic)]),
+        stage3_skip_classes=np.array(sorted(skip_classes), dtype=np.int8),
+        area_gate_lo=np.array([area_lo]),
+        area_gate_hi=np.array([area_hi]),
+        boundary_band_px=np.array([int(args.boundary_band_px)]),
+        sl_zoom_patches=np.array([int(args.sl_zoom_patches)]),
     )
     print(f"Saved slice metrics: {args.metrics_out}")
     try:

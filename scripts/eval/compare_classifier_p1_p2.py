@@ -38,7 +38,7 @@ def main():
         "# Stage1 classifier: baseline vs P1 vs P2",
         "",
         "- **baseline**: ResNet18, no aug, CE, lr=1e-3, 15 ep, select=acc",
-        "- **p1**: aug + class weight + lr=3e-4 + 30 ep + early stop + select=macro_recall",
+        "- **p1**: H/V flip + ±15° + bright/contrast, inverse-freq CE, lr=3e-4, 30 ep, early stop, select=macro_recall",
         "- **p2**: p1 + boundary soft labels (±20px) + ordinal aux (0.3)",
         "",
         "| Recipe | Val Acc | MacroR | Rec S/M/L | Best Ep | select | Checkpoint |",
