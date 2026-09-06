@@ -143,6 +143,21 @@ def gaussian_blur2d(img: torch.Tensor, sigma: float = 2.0) -> torch.Tensor:
 
 
 @torch.no_grad()
+def perimeter(mask: torch.Tensor) -> float:
+    """Calculate the perimeter of a binary mask by counting boundary pixels."""
+    m = mask.bool()
+    if not bool(m.any()):
+        return 0.0
+    # Boundary is defined as pixels in dilated mask not in original mask
+    # OR pixels in original mask not in eroded mask.
+    dilated = binary_dilation(m, kernel=3, iterations=1)
+    eroded = binary_erosion(m, kernel=3, iterations=1)
+    boundary = dilated ^ eroded
+    return float(boundary.float().sum().item())
+
+
+
+@torch.no_grad()
 def dice(a: torch.Tensor, b: torch.Tensor, smooth: float = 1e-5) -> float:
     a = a.float().reshape(-1)
     b = b.float().reshape(-1)
