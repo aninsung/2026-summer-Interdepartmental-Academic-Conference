@@ -234,8 +234,10 @@ class MaskRefinementEnv(gym.Env):
         self._prev_dsc = 0.0
         self._prev_boundary_dsc = 0.0
         self._prev_hd95 = 0.0
+        self._prev_perimeter = 0.0
         self._initial_dsc = 0.0
         self._initial_boundary_dsc = 0.0
+        self._initial_perimeter = 0.0
         self._zoom_cy = H // 2
         self._zoom_cx = W // 2
         self._lock_zoom_center = False
@@ -488,6 +490,9 @@ class MaskRefinementEnv(gym.Env):
         self._initial_boundary_dsc = self._prev_boundary_dsc
         self._gt_dist_map = tops.distance_transform_edt(~gt_bool)
         self._prev_hd95 = tops.hd95(self._mask, self._gt, dist_b=self._gt_dist_map)
+        
+        self._prev_perimeter = tops.perimeter(self._mask)
+        self._initial_perimeter = self._prev_perimeter
 
         return self._obs(), {
             "zoom_center": (int(self._zoom_cy), int(self._zoom_cx)),
@@ -615,6 +620,9 @@ class MaskRefinementEnv(gym.Env):
         curr_hd95 = tops.hd95(new_mask, self._gt, dist_b=self._gt_dist_map)
         delta_hd95 = prev_hd95 - curr_hd95
         self._prev_hd95 = curr_hd95
+        
+        curr_perimeter = tops.perimeter(new_mask)
+        delta_perimeter = curr_perimeter - self._prev_perimeter
 
         tumor_area = max(1.0, float(self._gt.sum().item()))
         size_scale = max(0.5, min(3.0, 300.0 / tumor_area))
@@ -657,6 +665,13 @@ class MaskRefinementEnv(gym.Env):
 
         # --- (2) Edit-cost: 과도한 수정 / stopping 유도 ---
         edit_cost = num_non_keep * (self.step_penalty / 8.0)
+        
+        # 3단계 로드맵: Active Contour 곡률(Curvature) 페널티 결합
+        # Perimeter가 늘어날수록 (경계선이 삐죽거릴수록) 페널티 부여
+        if delta_perimeter > 0:
+            # size_scale을 반영하여 큰 종양일수록 둘레 증가에 대한 페널티 비중을 적절히 조절
+            edit_cost += (delta_perimeter / max(100.0, tumor_area**0.5)) * 0.5 * self.edit_cost_scale
+
         # 초기보다 나빠지면 강한 페널티 (over-correction)
         if new_dsc < self._initial_dsc:
             edit_cost += 5.0 * self.edit_cost_scale
@@ -682,6 +697,7 @@ class MaskRefinementEnv(gym.Env):
         self._mask = new_mask
         self._prev_dsc = new_dsc
         self._prev_boundary_dsc = new_boundary_dsc
+        self._prev_perimeter = curr_perimeter
         self._step_count += 1
 
         terminated = bool(new_dsc >= self.target_dsc)

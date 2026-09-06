@@ -62,6 +62,27 @@ def _normalize_volume(vol: np.ndarray) -> np.ndarray:
     return normed.astype(np.float32)
 
 
+def _apply_clahe_2d(img_2d: np.ndarray, clip_limit: float = 0.02) -> np.ndarray:
+    """skimage 기반 2D CLAHE 적용 (float32 [0, 1] 입력)."""
+    from skimage.exposure import equalize_adapthist
+    if img_2d.max() <= 1e-6:
+        return img_2d
+    return equalize_adapthist(np.clip(img_2d, 0, 1), clip_limit=clip_limit).astype(np.float32)
+
+
+def _apply_bilateral_2d(img_2d: np.ndarray, sigma_color: float = 0.05, sigma_spatial: float = 2.0) -> np.ndarray:
+    """skimage 기반 Bilateral Filter (Anisotropic Diffusion 근사) 적용."""
+    from skimage.restoration import denoise_bilateral
+    if img_2d.max() <= 1e-6:
+        return img_2d
+    return denoise_bilateral(
+        np.clip(img_2d, 0, 1), 
+        sigma_color=sigma_color, 
+        sigma_spatial=sigma_spatial, 
+        channel_axis=None
+    ).astype(np.float32)
+
+
 def _load_volume(path: str) -> np.ndarray:
     """NIfTI 파일(.nii / .nii.gz)을 (H, W, D) float32 배열로 반환."""
     img = nib.load(path)
@@ -293,12 +314,20 @@ def _resize_slice(arr: np.ndarray, target_size: int, is_mask: bool = False) -> n
 
 
 def _modal_slice_from_vols(
-    mod_vols: List[np.ndarray], z: int, target_size: int
+    mod_vols: List[np.ndarray], z: int, target_size: int, modality_list: List[str]
 ) -> np.ndarray:
     z = _clip_z(z, int(mod_vols[0].shape[2]))
     channels = []
-    for m_vol in mod_vols:
+    for i, m_vol in enumerate(mod_vols):
         sl = m_vol[:, :, z]
+        
+        # 적용: 단계 2. 기존 2채널 전처리 품질 극대화
+        mod_name = modality_list[i].lower()
+        if mod_name == "t1ce":
+            sl = _apply_clahe_2d(sl)
+        elif mod_name == "flair":
+            sl = _apply_bilateral_2d(sl)
+            
         if target_size > 0:
             sl = _resize_slice(sl, target_size, is_mask=False)
         channels.append(sl)
@@ -371,12 +400,12 @@ def _load_one_patient(
 
         samples = []
         for z in valid_zs:
-            img_sl = _modal_slice_from_vols(mod_vols, z, target_size)
+            img_sl = _modal_slice_from_vols(mod_vols, z, target_size, modality_list)
             img_25d = np.concatenate(
                 [
-                    _modal_slice_from_vols(mod_vols, z - 1, target_size),
+                    _modal_slice_from_vols(mod_vols, z - 1, target_size, modality_list),
                     img_sl,
-                    _modal_slice_from_vols(mod_vols, z + 1, target_size),
+                    _modal_slice_from_vols(mod_vols, z + 1, target_size, modality_list),
                 ],
                 axis=0,
             )
@@ -571,7 +600,7 @@ class BraTS2020Dataset(Dataset):
         print(f"[BraTS Dataset] 완료: 총 {total_slices}개 유효 슬라이스 로드. (건너뜀: {skipped}명)")
 
     def _modal_slice(self, mod_vols: List[np.ndarray], z: int) -> np.ndarray:
-        return _modal_slice_from_vols(mod_vols, z, self.target_size)
+        return _modal_slice_from_vols(mod_vols, z, self.target_size, self.modality_list)
 
     def _resize(self, arr: np.ndarray, is_mask: bool = False) -> np.ndarray:
         return _resize_slice(arr, self.target_size, is_mask=is_mask)
