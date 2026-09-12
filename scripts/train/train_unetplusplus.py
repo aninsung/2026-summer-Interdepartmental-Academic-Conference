@@ -211,6 +211,8 @@ def train_unetplusplus(
             train_loss += loss.item()
             if USE_TQDM:
                 pbar.set_postfix({"loss": f"{train_loss / step:.4f}"})
+            elif step == 1 or step % 50 == 0 or step == len(train_loader):
+                log.info(f"  [Epoch {epoch:02d}/{epochs}] Step {step}/{len(train_loader)} Loss: {train_loss / step:.4f}")
 
         if USE_TQDM:
             pbar.close()

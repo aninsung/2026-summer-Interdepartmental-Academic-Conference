@@ -1,0 +1,136 @@
+{
+  "dsc": {
+    "metric": "DSC",
+    "n_slices": 14561,
+    "n_patients": 250,
+    "slice_mean_init": 0.8212283084612781,
+    "slice_mean_final": 0.8242450459175752,
+    "slice_delta": 0.0030167374562970473,
+    "cluster_bootstrap_95ci": {
+      "low": 0.0026540681243914566,
+      "high": 0.0033686777377477076,
+      "on": "signed_improvement"
+    },
+    "patient_mean_init": 0.8201916721069802,
+    "patient_mean_final": 0.8230529976758023,
+    "patient_delta": 0.0028613255688222966,
+    "wilcoxon_patient": {
+      "n": 250,
+      "p": 1.3742051313138597e-34,
+      "alternative": "greater (improvement)"
+    },
+    "wilcoxon_slice_anticonservative": {
+      "n": 14561,
+      "p": 0.0,
+      "note": "slices are not independent; do not use as primary p"
+    },
+    "by_class": {
+      "Small": {
+        "n_slices": 5552,
+        "n_patients": 250,
+        "slice_mean_init": 0.7810900557308091,
+        "slice_mean_final": 0.7809079461771754,
+        "slice_delta": -0.00018210955363373582,
+        "cluster_bootstrap_95ci": {
+          "low": -0.0007122628640045592,
+          "high": 0.00035767252923831475
+        },
+        "patient_delta": -0.0002829130231349316,
+        "wilcoxon_patient_p": 0.781218146367645
+      },
+      "Medium": {
+        "n_slices": 6083,
+        "n_patients": 233,
+        "slice_mean_init": 0.8270523911735709,
+        "slice_mean_final": 0.832702533740596,
+        "slice_delta": 0.005650142567025118,
+        "cluster_bootstrap_95ci": {
+          "low": 0.005142611798772581,
+          "high": 0.006168197186387522
+        },
+        "patient_delta": 0.00554714985032442,
+        "wilcoxon_patient_p": 1.8521140765244293e-38
+      },
+      "Large": {
+        "n_slices": 2926,
+        "n_patients": 115,
+        "slice_mean_init": 0.885281515577029,
+        "slice_mean_final": 0.8888932616835583,
+        "slice_delta": 0.0036117461065292567,
+        "cluster_bootstrap_95ci": {
+          "low": 0.0031616439762541166,
+          "high": 0.00406404572971073
+        },
+        "patient_delta": 0.003546912760798221,
+        "wilcoxon_patient_p": 1.5967894884991824e-18
+      }
+    }
+  },
+  "hd95": {
+    "metric": "HD95",
+    "n_slices": 14561,
+    "n_patients": 250,
+    "slice_mean_init": 2.9849623804585756,
+    "slice_mean_final": 2.9994008389112454,
+    "slice_delta": 0.014438458452669778,
+    "cluster_bootstrap_95ci": {
+      "low": -0.018739481461045947,
+      "high": -0.010215842995574953,
+      "on": "signed_improvement"
+    },
+    "patient_mean_init": 3.0185204583684215,
+    "patient_mean_final": 3.0321279411019897,
+    "patient_delta": -0.013607482733567707,
+    "wilcoxon_patient": {
+      "n": 250,
+      "p": 0.9999999997958456,
+      "alternative": "greater (improvement)"
+    },
+    "wilcoxon_slice_anticonservative": {
+      "n": 14561,
+      "p": 0.999676140989061,
+      "note": "slices are not independent; do not use as primary p"
+    },
+    "by_class": {
+      "Small": {
+        "n_slices": 5552,
+        "n_patients": 250,
+        "slice_mean_init": 4.602691708467788,
+        "slice_mean_final": 4.620885731312507,
+        "slice_delta": 0.01819402284471927,
+        "cluster_bootstrap_95ci": {
+          "low": -0.02627352548302182,
+          "high": -0.01062375043977255
+        },
+        "patient_delta": -0.019707257000034076,
+        "wilcoxon_patient_p": 0.9999994949537977
+      },
+      "Medium": {
+        "n_slices": 6083,
+        "n_patients": 233,
+        "slice_mean_init": 2.235197110441962,
+        "slice_mean_final": 2.2539745939859763,
+        "slice_delta": 0.018777483544014206,
+        "cluster_bootstrap_95ci": {
+          "low": -0.02565548500381375,
+          "high": -0.012408537823256141
+        },
+        "patient_delta": -0.020018678638627958,
+        "wilcoxon_patient_p": 0.9999999790316118
+      },
+      "Large": {
+        "n_slices": 2926,
+        "n_patients": 115,
+        "slice_mean_init": 1.474090510466747,
+        "slice_mean_final": 1.4723822897891,
+        "slice_delta": -0.0017082206776470876,
+        "cluster_bootstrap_95ci": {
+          "low": -0.005527005285058206,
+          "high": 0.011964482294204158
+        },
+        "patient_delta": 0.012021157171895287,
+        "wilcoxon_patient_p": 0.4305767157890674
+      }
+    }
+  }
+}

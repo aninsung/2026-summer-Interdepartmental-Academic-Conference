@@ -203,12 +203,10 @@ def train_caranet(
         out_channels=1,
     ).to(device)
 
-    init_path = pretrained_path if pretrained_path and os.path.exists(pretrained_path) else (
-        save_path if os.path.exists(save_path) else ""
-    )
+    init_path = pretrained_path if pretrained_path and os.path.exists(pretrained_path) else ""
     if init_path:
         from src.utils.weight_adapt import load_adapted_state_dict
-        log.info(f"기존 가중치에서 초기화: {init_path}")
+        log.info(f"명시된 pretrained_path에서 초기화: {init_path}")
         load_adapted_state_dict(model, init_path, device, logger=log)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)

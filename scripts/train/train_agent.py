@@ -285,11 +285,11 @@ def load_synthetic_data(*args, **kwargs):
     raise ValueError("합성 데이터 생성기(synthetic_brats.py)가 삭제되어 더 이상 합성 데이터를 사용할 수 없습니다. --use_real_data 옵션을 사용해 주세요.")
 
 
-# Deploy-aligned Stage2 postprocess defaults (evaluate_pipeline under-seg recipe)
-DEFAULT_STAGE2_THRESHOLDS = "0.85,0.92,0.70"
-DEFAULT_CC_MIN_SIZES = "0,35,50"
-DEFAULT_STAGE2_ERODE_CLASSES = "1,2"
-DEFAULT_STAGE2_ERODE_PX = 1
+# Deploy-aligned Stage2 postprocess defaults (balanced Precision-Recall recipe)
+DEFAULT_STAGE2_THRESHOLDS = "0.70,0.75,0.50"
+DEFAULT_CC_MIN_SIZES = "0,15,25"
+DEFAULT_STAGE2_ERODE_CLASSES = ""
+DEFAULT_STAGE2_ERODE_PX = 0
 
 
 def _parse_int_set(csv: str) -> set:

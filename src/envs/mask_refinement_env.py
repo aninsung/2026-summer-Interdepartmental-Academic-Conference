@@ -521,7 +521,7 @@ class MaskRefinementEnv(gym.Env):
                 # Modest stop reward; bonus only for *improving* vs init (no absolute DSC jackpot).
                 # Old +50 at DSC>=0.85 made "STOP immediately" dominate when init already ~0.86.
                 delta = cur_dsc - float(self._initial_dsc)
-                reward = 0.5
+                reward = -float(self.step_penalty)
                 if delta > 1e-4:
                     reward += float(min(5.0, 50.0 * delta))
             self._step_count += 1
@@ -575,6 +575,9 @@ class MaskRefinementEnv(gym.Env):
             edit_region = edit_region & self._zoom_window
         shift_gate = self._local_shift_gate(edit_region)
         shift_map = shift_map * shift_gate
+        # Preserve uncertainty for edit location, but avoid sub-pixel SDF no-ops.
+        nonzero_shift = shift_map.abs() > 1e-6
+        shift_map = torch.where(nonzero_shift, torch.sign(shift_map) * shift_map.abs().clamp_min(1.01), shift_map)
         band_frac = float(edit_region.float().mean().item())
 
         prev_bin = self._mask > 0.5
@@ -680,8 +683,6 @@ class MaskRefinementEnv(gym.Env):
             edit_cost += 0.02 * num_non_keep * self.edit_cost_scale
         # 이미 충분히 좋으면 keep 유도
         keep_bonus = 0.0
-        if num_non_keep == 0 and self._prev_dsc >= 0.85:
-            keep_bonus = 0.05
 
         target_bonus = 0.0
         if not self.enable_stop:
