@@ -560,7 +560,7 @@ class BraTS2020Dataset(Dataset):
             pbar = None
 
         n_patients = len(patient_dirs)
-        log_every = max(1, n_patients // 10)
+        log_every = max(1, min(25, n_patients // 10))
         done_pts = 0
 
         with ThreadPoolExecutor(max_workers=self.num_workers) as pool:

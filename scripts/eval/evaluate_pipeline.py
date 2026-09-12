@@ -1,6 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 import os
+import json
 import torch
 import numpy as np
 from src.data.brats2020_dataset import BraTS2020Dataset
@@ -9,7 +10,7 @@ from src.models.dynamic_router import AdaptivePipeline
 from src.utils.metrics import apply_monotonic_dsc_gate, dice, filter_small_components, hd95, precision, recall
 from src.envs.mask_refinement_env import MaskRefinementEnv
 from stable_baselines3 import PPO
-from scipy.ndimage import sobel, binary_dilation, binary_erosion, binary_closing, binary_opening
+from scipy.ndimage import sobel, binary_dilation, binary_erosion, binary_closing, binary_opening, distance_transform_edt
 
 def _compute_edge_map(img: np.ndarray) -> np.ndarray:
     if img.ndim == 3:
@@ -38,13 +39,14 @@ def _average_edge_intensity(boundary_mask: np.ndarray, edge_map: np.ndarray) -> 
 
 def _tta_probability(pipeline, img_t, rough_mask_t, class_pred):
     with torch.no_grad():
-        img_hf = torch.flip(img_t, dims=[3])
+        img_hf = torch.flip(img_t, dims=[-1])
         out_hf, _ = pipeline(img_hf, true_class_preds=class_pred)
-        out_hf = torch.flip(out_hf, dims=[3])
-        img_vf = torch.flip(img_t, dims=[2])
+        out_hf = torch.flip(out_hf, dims=[-1])
+        img_vf = torch.flip(img_t, dims=[-2])
         out_vf, _ = pipeline(img_vf, true_class_preds=class_pred)
-        out_vf = torch.flip(out_vf, dims=[2])
-        return ((rough_mask_t + out_hf + out_vf) / 3.0).squeeze().cpu().numpy()
+        out_vf = torch.flip(out_vf, dims=[-2])
+        return (rough_mask_t + out_hf + out_vf) / 3.0
+
 
 
 def _gt_free_accept(
@@ -147,7 +149,7 @@ def main():
     parser.add_argument("--split_role", type=str, default="val", choices=["train", "val", "all"])
     parser.add_argument("--oracle_routing", action="store_true", help="GT 면적으로 Expert를 고르는 상한 평가")
     parser.add_argument("--confidence_threshold", type=float, default=None, help="이 값 이상 평균 확률이면 PPO 생략")
-    parser.add_argument("--stage2_thresholds", type=str, default="0.85,0.92,0.70",
+    parser.add_argument("--stage2_thresholds", type=str, default="0.70,0.75,0.50",
                         help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값.")
     parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
     parser.add_argument(
@@ -155,24 +157,24 @@ def main():
         type=str,
         default="hybrid",
         choices=["sl", "ppo", "hybrid", "skip"],
-        help="Stage3: sl | ppo | hybrid(SL then class-wise zoom-PPO) | skip",
+        help="Stage3: sl | ppo(single PPO mask refiner) | hybrid(SL then PPO mask refiner) | skip",
     )
     parser.add_argument("--micro_area_floor", type=float, default=80.0,
                         help="Small 마스크 면적이 이 값 미만이면 임계값을 단계적으로 낮춘다.")
     parser.add_argument("--micro_thr_floor", type=float, default=0.15,
                         help="마이크로 조각 임계값 완화의 하한.")
-    parser.add_argument("--cc_min_sizes", type=str, default="0,35,50",
+    parser.add_argument("--cc_min_sizes", type=str, default="0,15,25",
                         help="클래스별(Small,Medium,Large) 연결요소 최소 픽셀.")
     parser.add_argument(
         "--stage2_erode_classes",
         type=str,
-        default="1,2",
-        help="Stage2 이진화 후 erosion 적용 클래스. 기본 1,2=Medium+Large under-seg",
+        default="",
+        help="Stage2 이진화 후 erosion 적용 클래스. 기본 '' (과소분할 방지)",
     )
     parser.add_argument(
         "--stage2_erode_px",
         type=int,
-        default=1,
+        default=0,
         help="stage2_erode_classes에 적용할 erosion 반복(px). 0이면 비활성.",
     )
     parser.add_argument("--skip_plot", action="store_true", help="시각화 PNG 생략")
@@ -292,6 +294,12 @@ def main():
         "0이면 비활성. 권장 700 (active~skip 사이는 shrink)",
     )
     parser.add_argument(
+        "--eval_batch_size",
+        type=int,
+        default=64,
+        help="Stage 1/2 GPU 배치 추론 크기 (기본값: 64, 고속 평가)",
+    )
+    parser.add_argument(
         "--enable_stop",
         action="store_true",
         help="STOP 행동으로 학습된 PPO 체크포인트 평가",
@@ -314,13 +322,13 @@ def main():
         args.last_mask = True
         args.no_monotonic_gate = True
         # PPO 모드일 때만 STOP 강제
-        if args.stage3_mode in ("ppo", "hybrid") and (not args.enable_stop):
+        if False:
             args.enable_stop = True
             print("[deploy_mode] --enable_stop 자동 활성화 (ppo/hybrid)")
         print(
             "[deploy_mode] GT monotonic gate OFF — 면적 게이트만 사용 "
             f"(lo={args.area_gate_lo}, hi={args.area_gate_hi}); "
-            "hybrid/ppo uses gt_free last-mask (no GT cherry-pick)"
+            "hybrid/ppo uses gt_free PPO mask refiner last-mask (no GT cherry-pick)"
         )
 
     select_best = not args.last_mask
@@ -450,15 +458,10 @@ def main():
     img_in_ch = images.shape[1] if images.ndim == 4 else 1
     pipeline = AdaptivePipeline(device, in_channels=img_in_ch)
     
-    # 3. Stage 3: SL Refiner and/or PPO
+    # 3. Stage 3: SL Refiner and/or single PPO mask refiner
     print(f"Loading Stage3 refiners (mode={args.stage3_mode})...")
     agents = {}
     sl_nets = {}
-    agent_name_map = {
-        "small": "ppo_small.zip",
-        "medium": "ppo_medium.zip",
-        "large": "ppo_large.zip",
-    }
     sl_name_map = {
         "small": "sl_refiner_small.pt",
         "medium": "sl_refiner_medium.pt",
@@ -467,6 +470,7 @@ def main():
     from src.models.sl_refiner import DualHeadRefiner, apply_sl_refiner
 
     missing_stage3 = []
+    shared_ppo_agent = None
     for mode, class_idx in zip(["small", "medium", "large"], [0, 1, 2]):
         agents[class_idx] = None
         sl_nets[class_idx] = None
@@ -493,14 +497,32 @@ def main():
             else:
                 missing_stage3.append(sl_path)
         if args.stage3_mode in ("ppo", "hybrid"):
-            agent_path = f"checkpoints/{agent_name_map[mode]}"
+            preferred_agent_path = "checkpoints/ppo_mask_refiner.zip"
+            legacy_agent_path = "checkpoints/ppo_unified.zip"
+            agent_path = preferred_agent_path if os.path.exists(preferred_agent_path) else legacy_agent_path
             if os.path.exists(agent_path):
                 print(f"Loading PPO Agent: {agent_path}")
-                agent = PPO.load(agent_path, device=device)
-                _assert_agent_stop_compat(agent, enable_stop, agent_path)
-                agents[class_idx] = agent
+                if shared_ppo_agent is None:
+                    shared_ppo_agent = PPO.load(agent_path, device=device)
+                    meta_path = os.path.splitext(agent_path)[0] + ".json"
+                    if os.path.exists(meta_path):
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            metadata = json.load(f)
+                    else:
+                        metadata = {
+                            "policy_type": "single_ppo_mask_refiner",
+                            "action_dim": 8,
+                            "action_bins": 5,
+                            "mode_ids": {"small": 0, "medium": 1, "large": 2},
+                            "enable_stop": False,
+                        }
+                    shared_ppo_agent.ppo_mask_refiner_metadata = metadata
+                    shared_ppo_agent.unified_metadata = metadata
+                    _assert_agent_stop_compat(shared_ppo_agent, enable_stop, agent_path)
+                agents[class_idx] = shared_ppo_agent
             else:
-                missing_stage3.append(agent_path)
+                if agent_path not in missing_stage3:
+                    missing_stage3.append(agent_path)
 
     if missing_stage3:
         raise FileNotFoundError(
@@ -531,279 +553,283 @@ def main():
     small_active_init, small_active_fin, small_active_init_hd, small_active_hd = [], [], [], []
     small_micro_init, small_micro_fin, small_micro_init_hd, small_micro_hd = [], [], [], []
     
-    print("\nStarting Evaluation...")
-    for i in range(len(images)):
-        img_np = images_25d[i]
-        gt_np = gt_masks[i]
-        center_np = images[i]
+    eval_bs = max(1, int(getattr(args, "eval_batch_size", 64)))
+    n_total = len(images)
+    print(f"\nStarting Evaluation (Total Slices: {n_total}, Batch Size: {eval_bs})...")
+    
+    for batch_start in range(0, n_total, eval_bs):
+        batch_end = min(batch_start + eval_bs, n_total)
+        batch_slice_imgs = images_25d[batch_start:batch_end]
         
-        if img_np.ndim == 2:
-            img_t = torch.from_numpy(img_np).unsqueeze(0).unsqueeze(0).to(device)
-        else:
-            img_t = torch.from_numpy(img_np).unsqueeze(0).to(device)
-        
-        # Stage 1: 분류기 라우팅 (기본). --oracle_routing 이면 GT 면적.
-        if args.oracle_routing:
-            area = np.sum(gt_np)
-            if area < 300:
-                true_c = 0
-            elif area < 700:
-                true_c = 1
-            else:
-                true_c = 2
-            route_cls = torch.tensor([true_c], dtype=torch.long, device=device)
-        else:
-            route_cls = None
-        
-        # Stage 2
-        with torch.no_grad():
-            rough_mask_t, class_pred = pipeline(img_t, true_class_preds=route_cls)
+        # GPU Batch Forward for Stage 1 + Stage 2 + TTA
+        b_img_t = torch.from_numpy(batch_slice_imgs).to(device)
+        if b_img_t.ndim == 3:
+            b_img_t = b_img_t.unsqueeze(1)
             
-        c = class_pred.item()
-        if args.max_samples_per_class and class_counts[c] >= args.max_samples_per_class:
-            continue
-        class_counts[c] += 1
+        b_route_cls = None
+        if args.oracle_routing:
+            b_areas = [np.sum(gt_masks[batch_start + bi]) for bi in range(batch_end - batch_start)]
+            b_route_cls = torch.tensor(
+                [0 if a < 300 else (1 if a < 700 else 2) for a in b_areas],
+                dtype=torch.long,
+                device=device,
+            )
+            
+        with torch.no_grad():
+            b_rough_t, b_class_preds = pipeline(b_img_t, true_class_preds=b_route_cls)
+            b_prob_tta_t = _tta_probability(pipeline, b_img_t, b_rough_t, b_class_preds)
+            
+        b_rough_np = b_rough_t.squeeze(1).cpu().numpy()
+        b_prob_tta_np = b_prob_tta_t.squeeze(1).cpu().numpy()
+        b_class_np = b_class_preds.cpu().numpy()
         
-        rough_prob_np = rough_mask_t.squeeze().cpu().numpy()
-        
-        # ── Micro Fragment 임계값 완화 (Small 전용) ──
-        # 클래스 임계값에서 조각이 지나치게 작아지면 소실을 막기 위해 임계값을
-        # 단계적으로 낮춘다. 면적 하한(상수)만 보며 GT는 참조하지 않는다.
-        rough_mask_np = (rough_prob_np > stage2_thr[c]).astype(np.float32)
-        if c == 0 and np.sum(rough_mask_np) < args.micro_area_floor:
-            for thr in np.arange(stage2_thr[c] - 0.05, args.micro_thr_floor - 1e-9, -0.05):
-                cand_mask = (rough_prob_np > thr).astype(np.float32)
-                rough_mask_np = cand_mask
-                if np.sum(cand_mask) >= args.micro_area_floor:
-                    break
-        rough_mask_np = filter_small_components(rough_mask_np, cc_min[c])
-        # Medium/Large: 1px erosion → 과소분할 편향 (외곽 FP 제거, Recall↓)
-        if stage2_erode_px > 0 and c in erode_classes and np.sum(rough_mask_np) > 0:
-            from scipy.ndimage import binary_erosion
-            eroded = rough_mask_np > 0.5
-            for _ in range(stage2_erode_px):
-                eroded = binary_erosion(eroded, iterations=1)
-            if np.any(eroded):
-                rough_mask_np = eroded.astype(np.float32)
-
-        init_dsc = dice(rough_mask_np, gt_np)
-        init_hd95 = hd95(rough_mask_np, gt_np)
-        initial_dsc_list.append(init_dsc)
-        initial_hd95_list.append(init_hd95)
-        class_initial_dsc[c].append(init_dsc)
-        class_initial_hd95[c].append(init_hd95)
-        class_initial_prec[c].append(precision(rough_mask_np, gt_np))
-        class_initial_rec[c].append(recall(rough_mask_np, gt_np))
-
-        slice_pids.append(dataset._sample_pids[i])
-        slice_cls.append(c)
-        
-        # Stage 3: Component-wise Independent Refinement
-        from scipy.ndimage import label as sp_label
-        lbl, num_feats = sp_label(rough_mask_np > 0.2)
-        
-        valid_comp_indices = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 5]
-        
-        final_mask_np = np.zeros_like(rough_mask_np)
-        for k in range(1, num_feats + 1):
-            if k not in valid_comp_indices:
-                final_mask_np = np.maximum(final_mask_np, (lbl == k).astype(np.float32))
-
-        prob_tta_np = _tta_probability(pipeline, img_t, rough_mask_t, class_pred)
-                
-        # 유효 컴포넌트들을 각각 독립적으로 보정하여 합산 (분리된 종양들의 독립 미세 조정 지원)
-        # Stage3 시작 마스크 = Stage2 컴포넌트(non-TTA). Init DSC와 동일한 기준이라
-        # Final−Init Δ에 TTA 이득이 섞이지 않는다. TTA는 soft probability 채널에만 사용.
-        for k in valid_comp_indices:
-            comp_mask_k = (lbl == k).astype(np.float32)
-            comp_area = float(np.sum(comp_mask_k))
-
-            # Stage3 라우팅: 슬라이스 분류기 클래스 (학습 class_filter=classifier와 정합)
-            ck = int(c)
-            agent_k = agents[ck]
-            sl_k = sl_nets[ck]
-            ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
-
-            if ck in skip_classes or (agent_k is None and sl_k is None):
-                final_mask_np = np.maximum(final_mask_np, comp_mask_k)
+        for bi in range(batch_end - batch_start):
+            i = batch_start + bi
+            gt_np = gt_masks[i]
+            center_np = images[i]
+            c = int(b_class_np[bi])
+            rough_prob_np = b_rough_np[bi]
+            prob_tta_np = b_prob_tta_np[bi]
+            
+            if args.max_samples_per_class and class_counts[c] >= args.max_samples_per_class:
                 continue
+            class_counts[c] += 1
+            
+            # ── Micro Fragment 임계값 완화 (Small 전용) ──
+            rough_mask_np = (rough_prob_np > stage2_thr[c]).astype(np.float32)
+            if c == 0 and np.sum(rough_mask_np) < args.micro_area_floor:
+                for thr in np.arange(stage2_thr[c] - 0.05, args.micro_thr_floor - 1e-9, -0.05):
+                    cand_mask = (rough_prob_np > thr).astype(np.float32)
+                    rough_mask_np = cand_mask
+                    if np.sum(cand_mask) >= args.micro_area_floor:
+                        break
+            rough_mask_np = filter_small_components(rough_mask_np, cc_min[c])
+            # Medium/Large: 1px erosion → 과소분할 편향 (외곽 FP 제거, Recall↓)
+            if stage2_erode_px > 0 and c in erode_classes and np.sum(rough_mask_np) > 0:
+                from scipy.ndimage import binary_erosion
+                eroded = rough_mask_np > 0.5
+                for _ in range(stage2_erode_px):
+                    eroded = binary_erosion(eroded, iterations=1)
+                if np.any(eroded):
+                    rough_mask_np = eroded.astype(np.float32)
 
-            # Medium: rough 성분 면적 기반 분기 (GT 미사용, deploy 가능)
-            med_active = float(args.medium_active_max_area)
-            med_skip = float(args.medium_skip_min_area)
-            if ck == 1 and med_skip > 0 and comp_area >= med_skip:
-                final_mask_np = np.maximum(final_mask_np, comp_mask_k)
-                continue
+            # Precompute GT distance transform once per slice to reuse for initial & final HD95
+            dist_gt = None
+            if np.any(gt_np > 0.5):
+                dist_gt = distance_transform_edt(~(gt_np > 0.5))
 
-            struct_k = np.ones((3, 3))
-            dilate_iter = 2 if ck == 0 else 3
-            comp_dilated = binary_dilation(comp_mask_k, struct_k, iterations=dilate_iter)
-            comp_init = comp_mask_k.copy()
-            soft_prob = (prob_tta_np * comp_dilated).astype(np.float32)
-            if float(np.sum(soft_prob)) == 0.0:
-                soft_prob = (rough_prob_np * comp_dilated).astype(np.float32)
+            init_dsc = dice(rough_mask_np, gt_np)
+            init_hd95 = hd95(rough_mask_np, gt_np, dist_b=dist_gt)
+            initial_dsc_list.append(init_dsc)
+            initial_hd95_list.append(init_hd95)
+            class_initial_dsc[c].append(init_dsc)
+            class_initial_hd95[c].append(init_hd95)
+            class_initial_prec[c].append(precision(rough_mask_np, gt_np))
+            class_initial_rec[c].append(recall(rough_mask_np, gt_np))
 
-            if args.confidence_threshold is not None:
-                nz = comp_init > 0.5
-                mean_p = float(np.mean(prob_tta_np[nz])) if np.any(nz) else 0.0
-                if mean_p >= args.confidence_threshold:
-                    final_mask_np = np.maximum(final_mask_np, comp_init)
+            slice_pids.append(dataset._sample_pids[i])
+            slice_cls.append(c)
+            
+            # Stage 3: Component-wise Independent Refinement
+            from scipy.ndimage import label as sp_label
+            lbl, num_feats = sp_label(rough_mask_np > 0.2)
+            
+            valid_comp_indices = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 5]
+            
+            final_mask_np = np.zeros_like(rough_mask_np)
+            for k in range(1, num_feats + 1):
+                if k not in valid_comp_indices:
+                    final_mask_np = np.maximum(final_mask_np, (lbl == k).astype(np.float32))
+                    
+            for k in valid_comp_indices:
+                comp_mask_k = (lbl == k).astype(np.float32)
+                comp_area = float(np.sum(comp_mask_k))
+
+                ck = int(c)
+                agent_k = agents[ck]
+                sl_k = sl_nets[ck]
+                ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
+
+                if ck in skip_classes or (agent_k is None and sl_k is None):
+                    final_mask_np = np.maximum(final_mask_np, comp_mask_k)
                     continue
 
-            if sl_k is not None:
-                img_2d = images[i]
-                use_band = ck in band_classes and int(args.boundary_band_px) > 0
-                band_mode = band_mode_by_class.get(ck, args.boundary_band_mode)
-                # 작은 Medium: band 해제 → 적극 SL. 큰 Medium: keep expand (shrink footgun 제거)
-                if ck == 1 and med_active > 0 and comp_area < med_active:
-                    use_band = False
-                    band_mode = "replace"
-                    active_cand = max(float(args.sl_cand_thr), 0.65)
-                elif ck == 1 and med_active > 0 and (med_skip <= 0 or comp_area < med_skip):
-                    use_band = True
+                med_active = float(args.medium_active_max_area)
+                med_skip = float(args.medium_skip_min_area)
+                if ck == 1 and med_skip > 0 and comp_area >= med_skip:
+                    final_mask_np = np.maximum(final_mask_np, comp_mask_k)
+                    continue
+
+                struct_k = np.ones((3, 3))
+                dilate_iter = 2 if ck == 0 else 3
+                comp_dilated = binary_dilation(comp_mask_k, struct_k, iterations=dilate_iter)
+                comp_init = comp_mask_k.copy()
+                soft_prob = (prob_tta_np * comp_dilated).astype(np.float32)
+                if float(np.sum(soft_prob)) == 0.0:
+                    soft_prob = (rough_prob_np * comp_dilated).astype(np.float32)
+
+                if args.confidence_threshold is not None:
+                    nz = comp_init > 0.5
+                    mean_p = float(np.mean(prob_tta_np[nz])) if np.any(nz) else 0.0
+                    if mean_p >= args.confidence_threshold:
+                        final_mask_np = np.maximum(final_mask_np, comp_init)
+                        continue
+
+                if sl_k is not None:
+                    img_2d = images[i]
+                    use_band = ck in band_classes and int(args.boundary_band_px) > 0
                     band_mode = band_mode_by_class.get(ck, args.boundary_band_mode)
-                    active_cand = None
-                    if 1 not in band_classes and int(args.boundary_band_px) > 0:
-                        use_band = int(args.boundary_band_px) > 0
-                else:
-                    active_cand = None
-                use_zoom = (
-                    use_band
-                    and band_mode == "shrink"
-                    and int(args.sl_zoom_patches) > 0
-                    and ck in (1, 2)
-                )
-                refined_k_mask = apply_sl_refiner(
-                    sl_k,
-                    img_2d,
-                    comp_init,
-                    soft_prob,
-                    device,
-                    cand_thr=(
-                        active_cand
-                        if active_cand is not None
-                        else (args.sl_cand_thr_boundary if use_band else args.sl_cand_thr)
-                    ),
-                    morph_small=(ck == 0),
-                    boundary_band_px=(int(args.boundary_band_px) if use_band else 0),
-                    boundary_mode=(band_mode if use_band else "replace"),
-                    zoom_n_patches=(int(args.sl_zoom_patches) if use_zoom else 0),
-                    zoom_patch=int(args.sl_zoom_patch),
-                    zoom_seed=(i * 1009 + k),
-                )
-            elif agent_k is not None:
-                use_band = False
-                band_mode = args.boundary_band_mode
-                from src.envs.zoom_ppo_refine import refine_zoom_ppo
-                refined_k_mask = refine_zoom_ppo(
-                    agent_k,
-                    images[i],
-                    gt_masks[i],
-                    comp_init,
-                    soft_prob,
-                    ref_mode_k,
-                    device=str(device),
-                    enable_stop=enable_stop,
-                    seed=(i * 1009 + k),
-                    gt_free=bool(args.deploy_mode),
-                )
-            else:
-                use_band = False
-                band_mode = args.boundary_band_mode
-                refined_k_mask = comp_init.copy()
-
-            # hybrid: SL result → class-wise zoom-boundary PPO
-            if args.stage3_mode == "hybrid" and agent_k is not None and sl_k is not None:
-                from src.envs.zoom_ppo_refine import refine_zoom_ppo
-                refined_k_mask = refine_zoom_ppo(
-                    agent_k,
-                    images[i],
-                    gt_masks[i],
-                    refined_k_mask,
-                    soft_prob,
-                    ref_mode_k,
-                    device=str(device),
-                    enable_stop=enable_stop,
-                    seed=(i * 1009 + k + 17),
-                    gt_free=bool(args.deploy_mode),
-                )
-            if np.sum(refined_k_mask) > 0:
-                # shrink: closing이 깎은 FP를 다시 메우지 않도록 closing 생략
-                if use_band and band_mode == "shrink":
-                    refined_k_mask = np.minimum(refined_k_mask, comp_init)
-                else:
-                    closed = binary_closing(refined_k_mask, struct_k).astype(np.float32)
-                    if use_band and band_mode == "expand":
-                        refined_k_mask = np.maximum(closed, comp_init)
+                    if ck == 1 and med_active > 0 and comp_area < med_active:
+                        use_band = False
+                        band_mode = "replace"
+                        active_cand = max(float(args.sl_cand_thr), 0.65)
+                    elif ck == 1 and med_active > 0 and (med_skip <= 0 or comp_area < med_skip):
+                        use_band = True
+                        band_mode = band_mode_by_class.get(ck, args.boundary_band_mode)
+                        active_cand = None
+                        if 1 not in band_classes and int(args.boundary_band_px) > 0:
+                            use_band = int(args.boundary_band_px) > 0
                     else:
-                        refined_k_mask = closed
-            if np.sum(refined_k_mask) == 0 or not _gt_free_accept(
-                comp_init, refined_k_mask, lo=area_lo, hi=area_hi_by_class[int(c)]
+                        active_cand = None
+                    use_zoom = (
+                        use_band
+                        and band_mode == "shrink"
+                        and int(args.sl_zoom_patches) > 0
+                        and ck in (1, 2)
+                    )
+                    refined_k_mask = apply_sl_refiner(
+                        sl_k,
+                        img_2d,
+                        comp_init,
+                        soft_prob,
+                        device,
+                        cand_thr=(
+                            active_cand
+                            if active_cand is not None
+                            else (args.sl_cand_thr_boundary if use_band else args.sl_cand_thr)
+                        ),
+                        morph_small=(ck == 0),
+                        boundary_band_px=(int(args.boundary_band_px) if use_band else 0),
+                        boundary_mode=(band_mode if use_band else "replace"),
+                        zoom_n_patches=(int(args.sl_zoom_patches) if use_zoom else 0),
+                        zoom_patch=int(args.sl_zoom_patch),
+                        zoom_seed=(i * 1009 + k),
+                    )
+                elif agent_k is not None:
+                    use_band = False
+                    band_mode = args.boundary_band_mode
+                    from src.envs.zoom_ppo_refine import refine_zoom_ppo
+                    refined_k_mask = refine_zoom_ppo(
+                        agent_k,
+                        images[i],
+                        gt_masks[i],
+                        comp_init,
+                        soft_prob,
+                        ref_mode_k,
+                        device=str(device),
+                        enable_stop=enable_stop,
+                        seed=(i * 1009 + k),
+                        gt_free=bool(args.deploy_mode),
+                    )
+                else:
+                    use_band = False
+                    band_mode = args.boundary_band_mode
+                    refined_k_mask = comp_init.copy()
+
+                if args.stage3_mode == "hybrid" and agent_k is not None and sl_k is not None:
+                    from src.envs.zoom_ppo_refine import refine_zoom_ppo
+                    refined_k_mask = refine_zoom_ppo(
+                        agent_k,
+                        images[i],
+                        gt_masks[i],
+                        refined_k_mask,
+                        soft_prob,
+                        ref_mode_k,
+                        device=str(device),
+                        enable_stop=enable_stop,
+                        seed=(i * 1009 + k + 17),
+                        gt_free=bool(args.deploy_mode),
+                    )
+                if np.sum(refined_k_mask) > 0:
+                    if use_band and band_mode == "shrink":
+                        refined_k_mask = np.minimum(refined_k_mask, comp_init)
+                    else:
+                        closed = binary_closing(refined_k_mask, struct_k).astype(np.float32)
+                        if use_band and band_mode == "expand":
+                            refined_k_mask = np.maximum(closed, comp_init)
+                        else:
+                            refined_k_mask = closed
+                if np.sum(refined_k_mask) == 0 or not _gt_free_accept(
+                    comp_init, refined_k_mask, lo=area_lo, hi=area_hi_by_class[int(c)]
+                ):
+                    refined_k_mask = comp_init
+                if apply_monotonic:
+                    refined_k_mask = apply_monotonic_dsc_gate(comp_init, refined_k_mask, gt_np)
+                final_mask_np = np.maximum(final_mask_np, refined_k_mask)
+
+            if not _gt_free_accept(
+                rough_mask_np, final_mask_np, lo=area_lo, hi=area_hi_by_class[int(c)]
             ):
-                refined_k_mask = comp_init
+                r_area = max(1.0, float(np.sum(rough_mask_np)))
+                f_area = float(np.sum(final_mask_np))
+                expand_hi = max(float(area_hi_by_class[int(c)]), 1.6 if int(c) == 1 else 1.45)
+                if not (
+                    args.boundary_band_mode == "expand"
+                    and int(c) in (1, 2)
+                    and f_area >= area_lo * r_area
+                    and f_area <= expand_hi * r_area
+                ):
+                    final_mask_np = rough_mask_np
+
             if apply_monotonic:
-                refined_k_mask = apply_monotonic_dsc_gate(comp_init, refined_k_mask, gt_np)
-            final_mask_np = np.maximum(final_mask_np, refined_k_mask)
+                gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
+                if not np.array_equal(gated_mask, final_mask_np):
+                    monotonic_reverts += 1
+                final_mask_np = gated_mask
 
-        if not _gt_free_accept(
-            rough_mask_np, final_mask_np, lo=area_lo, hi=area_hi_by_class[int(c)]
-        ):
-            # Expand-only: if we only grew within a slightly looser hi, keep; else revert.
-            r_area = max(1.0, float(np.sum(rough_mask_np)))
-            f_area = float(np.sum(final_mask_np))
-            expand_hi = max(float(area_hi_by_class[int(c)]), 1.6 if int(c) == 1 else 1.45)
-            if not (
-                args.boundary_band_mode == "expand"
-                and int(c) in (1, 2)
-                and f_area >= area_lo * r_area
-                and f_area <= expand_hi * r_area
-            ):
-                final_mask_np = rough_mask_np
-
-        if apply_monotonic:
-            gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
-            if not np.array_equal(gated_mask, final_mask_np):
-                monotonic_reverts += 1
-            final_mask_np = gated_mask
-
-        fin_dsc = dice(final_mask_np, gt_np)
-        fin_hd95 = hd95(final_mask_np, gt_np)
-
-        final_dsc_list.append(fin_dsc)
-        final_hd95_list.append(fin_hd95)
-        
-        class_final_dsc[c].append(fin_dsc)
-        class_final_hd95[c].append(fin_hd95)
-        class_final_prec[c].append(precision(final_mask_np, gt_np))
-        class_final_rec[c].append(recall(final_mask_np, gt_np))
-        
-        # Save representative samples per class for visualization later
-        all_candidates.append({
-            "class": c,
-            "img": center_np[0] if center_np.ndim == 3 else center_np,
-            "gt": gt_np,
-            "rough": rough_mask_np,
-            "final": final_mask_np,
-            "init_dsc": init_dsc,
-            "fin_dsc": fin_dsc,
-            "delta_dsc": fin_dsc - init_dsc,
-        })
-
-        if c == 0:
-            gt_area = np.sum(gt_np)
-            if gt_area >= 50:
-                small_active_init.append(init_dsc)
-                small_active_fin.append(fin_dsc)
-                small_active_init_hd.append(init_hd95)
-                small_active_hd.append(fin_hd95)
+            # Fast metric computation: reuse init values if mask was unchanged
+            if np.array_equal(final_mask_np, rough_mask_np):
+                fin_dsc = init_dsc
+                fin_hd95 = init_hd95
+                class_final_prec[c].append(class_initial_prec[c][-1])
+                class_final_rec[c].append(class_initial_rec[c][-1])
             else:
-                small_micro_init.append(init_dsc)
-                small_micro_fin.append(fin_dsc)
-                small_micro_init_hd.append(init_hd95)
-                small_micro_hd.append(fin_hd95)
+                fin_dsc = dice(final_mask_np, gt_np)
+                fin_hd95 = hd95(final_mask_np, gt_np, dist_b=dist_gt)
+                class_final_prec[c].append(precision(final_mask_np, gt_np))
+                class_final_rec[c].append(recall(final_mask_np, gt_np))
 
-        if (i+1) % 100 == 0:
-            print(f"Processed {i+1}/{len(images)} slices...")
+            final_dsc_list.append(fin_dsc)
+            final_hd95_list.append(fin_hd95)
+            class_final_dsc[c].append(fin_dsc)
+            class_final_hd95[c].append(fin_hd95)
+            
+            all_candidates.append({
+                "class": c,
+                "img": center_np[0] if center_np.ndim == 3 else center_np,
+                "gt": gt_np,
+                "rough": rough_mask_np,
+                "final": final_mask_np,
+                "init_dsc": init_dsc,
+                "fin_dsc": fin_dsc,
+                "delta_dsc": fin_dsc - init_dsc,
+            })
+
+            if c == 0:
+                gt_area = np.sum(gt_np)
+                if gt_area >= 50:
+                    small_active_init.append(init_dsc)
+                    small_active_fin.append(fin_dsc)
+                    small_active_init_hd.append(init_hd95)
+                    small_active_hd.append(fin_hd95)
+                else:
+                    small_micro_init.append(init_dsc)
+                    small_micro_fin.append(fin_dsc)
+                    small_micro_init_hd.append(init_hd95)
+                    small_micro_hd.append(fin_hd95)
+
+        if (batch_end // 1000 != batch_start // 1000) or (batch_end == n_total):
+            print(f"Processed {batch_end}/{n_total} slices ({batch_end/n_total*100:.1f}%)...", flush=True)
             
     mode_tag = "deploy (last mask, area gate only)" if args.deploy_mode else (
         f"select_best={select_best}, monotonic={apply_monotonic}"

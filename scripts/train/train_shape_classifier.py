@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from src.data.shape_dataset import ShapeDataset
+from src.data.shape_dataset import ShapeDataset, size_class_from_area
 from src.models.shape_classifier import SUPPORTED_BACKBONES, build_shape_classifier
 from src.utils.dataloader import loader_kwargs
 
@@ -48,10 +48,16 @@ def _eval_detailed(model, loader, device):
 
 def _class_weights_from_loader(dataset, device):
     counts = np.zeros(3, dtype=np.float64)
-    for i in range(len(dataset)):
-        item = dataset[i]
-        y = int(item[1].item())
-        counts[y] += 1
+    brats = getattr(dataset, "brats_dataset", dataset)
+    if hasattr(brats, "_samples") and brats._samples:
+        for s in brats._samples:
+            area = float(np.sum(s[1]))
+            counts[size_class_from_area(area)] += 1
+    else:
+        for i in range(len(dataset)):
+            item = dataset[i]
+            y = int(item[1].item())
+            counts[y] += 1
     counts = np.maximum(counts, 1.0)
     inv = counts.sum() / counts
     w = inv / inv.mean()
@@ -125,6 +131,14 @@ def main():
     if args.no_class_weight:
         args.class_weight = False
 
+    user_epochs = None
+    for i, a in enumerate(sys.argv):
+        if a == "--epochs" and i + 1 < len(sys.argv):
+            try:
+                user_epochs = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
     if args.recipe == "baseline":
         args.aug = False
         args.class_weight = False
@@ -132,7 +146,7 @@ def main():
         args.ordinal_weight = 0.0
         args.select_metric = "acc"
         args.lr = 1e-3
-        args.epochs = 15
+        args.epochs = user_epochs if user_epochs is not None else 15
         args.patience = 0
     elif args.recipe == "p1":
         args.aug = True
@@ -141,7 +155,7 @@ def main():
         args.ordinal_weight = 0.0
         args.select_metric = "macro_recall"
         args.lr = 3e-4
-        args.epochs = 30
+        args.epochs = user_epochs if user_epochs is not None else 30
         args.patience = 8
     elif args.recipe == "p2":
         args.aug = True
@@ -150,7 +164,7 @@ def main():
         args.ordinal_weight = 0.3
         args.select_metric = "macro_recall"
         args.lr = 3e-4
-        args.epochs = 30
+        args.epochs = user_epochs if user_epochs is not None else 30
         args.patience = 8
 
     from src.utils.seed import set_seed
@@ -232,7 +246,7 @@ def main():
         model.train()
         train_loss = 0.0
         train_correct = 0
-        for batch in train_loader:
+        for step, batch in enumerate(train_loader, 1):
             inputs = batch[0].to(device)
             labels = batch[1].to(device)
             soft = batch[2].to(device) if (args.boundary_soft and len(batch) > 2) else None
@@ -246,6 +260,12 @@ def main():
             optimizer.step()
             train_loss += loss.item() * inputs.size(0)
             train_correct += (outputs.argmax(1) == labels).sum().item()
+            if step == 1 or step % 50 == 0 or step == len(train_loader):
+                print(
+                    f"  [Epoch {epoch+1}/{num_epochs}] Step {step}/{len(train_loader)} "
+                    f"Loss: {train_loss / (step * inputs.size(0)):.4f}",
+                    flush=True,
+                )
 
         epoch_train_loss = train_loss / train_size
         epoch_train_acc = train_correct / train_size

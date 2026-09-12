@@ -158,9 +158,13 @@ def train_sl(
 
     Medium/Large: 경계 밴드 FP/FN 균형 가중 + replace band 추론과 정렬.
     """
+    if epochs <= 0:
+        return net
     images, gts, roughs, probs = expand_to_components(
         images, gts, roughs, probs, refinement_mode=refinement_mode
     )
+    if epochs <= 0:
+        return net
     if len(images) == 0:
         log.warning("SL: no components to train on")
         return net
@@ -284,11 +288,15 @@ def distill_sl_from_teacher(
     batch_size=128,
 ):
     """Distill PPO teacher on component-level inputs (same as deploy)."""
+    if epochs <= 0:
+        return net
     if len(images) == 0:
         return net
     images, teacher_masks, roughs, probs = expand_to_components(
         images, teacher_masks, roughs, probs, refinement_mode=refinement_mode
     )
+    if epochs <= 0:
+        return net
     if len(images) == 0:
         log.warning("Distill: no components")
         return net
@@ -482,7 +490,7 @@ def train_ppo_teacher(
             uncertainty_maps=probs,
             target_dsc=1.0,
             refinement_mode=mode,
-            enable_stop=True,
+            enable_stop=False,
             device=device_str,
             **kw,
         )
@@ -576,7 +584,7 @@ def harvest_successes(
             prob_i,
             mode,
             device=env_device,
-            enable_stop=True,
+            enable_stop=False,
             strategy=strat,
             seed=i * 1009,
             gt_free=False,
@@ -820,19 +828,7 @@ def main():
 
     if args.refinement_mode == "all":
         modes = ["small", "medium", "large"]
-        log.info("Stage3 ALL: BraTS/rough 1회 로드 후 클래스별 학습 (%s)", modes)
-        bundle = load_stage3_all_classes(
-            train_root=args.train_root,
-            modality=args.modality,
-            target_size=128,
-            max_patients=args.max_train_patients,
-            patient_ids=train_ids,
-            noise_seed=args.seed,
-            stage2_thresholds=args.stage2_thresholds,
-            cc_min_sizes=args.cc_min_sizes,
-            stage2_erode_classes=args.stage2_erode_classes,
-            stage2_erode_px=args.stage2_erode_px,
-        )
+        bundle = None
     else:
         modes = [args.refinement_mode]
         bundle = None

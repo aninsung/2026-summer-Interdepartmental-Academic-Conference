@@ -30,6 +30,40 @@ def band_mean_uncertainty(prob: np.ndarray, band: np.ndarray) -> float:
     return float(u[band].mean())
 
 
+def _proxy_error_score(mask: np.ndarray, prob: np.ndarray, band: np.ndarray, mode: str) -> tuple[float, float, float]:
+    m = np.asarray(mask, dtype=np.float32) > 0.5
+    p = np.asarray(prob, dtype=np.float32)
+    b = np.asarray(band, dtype=bool)
+    if not np.any(b):
+        b = np.ones_like(m, dtype=bool)
+    fp_proxy = float((m.astype(np.float32) * (1.0 - p))[b].mean())
+    fn_proxy = float(((~m).astype(np.float32) * p)[b].mean())
+    fp_w = 2.5 if mode in ("small", "medium") else 1.8
+    fn_w = 1.2
+    return fp_w * fp_proxy + fn_w * fn_proxy, fp_proxy, fn_proxy
+
+
+def _proxy_accept(init: np.ndarray, cand: np.ndarray, prob: np.ndarray, band: np.ndarray, mode: str) -> bool:
+    init_b = np.asarray(init, dtype=np.float32) > 0.5
+    cand_b = np.asarray(cand, dtype=np.float32) > 0.5
+    if np.array_equal(init_b, cand_b):
+        return True
+    init_area = max(1.0, float(init_b.sum()))
+    cand_area = float(cand_b.sum())
+    hi = 1.12 if mode == "small" else (1.18 if mode == "medium" else 1.25)
+    lo = 0.85 if mode == "small" else 0.80
+    if cand_area < lo * init_area or cand_area > hi * init_area:
+        return False
+    init_score, init_fp, _ = _proxy_error_score(init_b, prob, band, mode)
+    cand_score, cand_fp, _ = _proxy_error_score(cand_b, prob, band, mode)
+    if cand_score > init_score - 1e-4:
+        return False
+    fp_slack = 0.002 if mode == "small" else 0.004
+    if cand_fp > init_fp * 1.03 + fp_slack:
+        return False
+    return True
+
+
 def sample_band_centers(
     mask: np.ndarray,
     prob: np.ndarray,
@@ -108,6 +142,11 @@ def refine_zoom_ppo(
 
     k = int(strat.zoom_patches_infer if n_patches is None else n_patches)
     n_steps = int(strat.steps_per_patch if steps_per_patch is None else steps_per_patch)
+    is_single_ppo_refiner = hasattr(agent, "ppo_mask_refiner_metadata") or hasattr(agent, "unified_metadata")
+    if is_single_ppo_refiner:
+        n_steps = min(n_steps, 3)
+        if n_patches is None:
+            k = min(k, 1 if refinement_mode == "small" else (3 if refinement_mode == "medium" else 2))
     rng = np.random.default_rng(seed)
     centers = sample_band_centers(
         init,
@@ -120,7 +159,9 @@ def refine_zoom_ppo(
 
     img = np.asarray(image, dtype=np.float32)
     out = init.copy()
-    env = MaskRefinementEnv(
+    from src.envs.ppo_mask_refinement_env import PPOMaskRefinementEnv
+    env_type = PPOMaskRefinementEnv if is_single_ppo_refiner else MaskRefinementEnv
+    env = env_type(
         images=img[None] if img.ndim == 2 else img[None],
         gt_masks=gt_np[None],
         rough_masks=out[None],
@@ -129,7 +170,7 @@ def refine_zoom_ppo(
         target_dsc=1.0,
         step_penalty=strat.step_penalty,
         refinement_mode=refinement_mode,
-        enable_stop=enable_stop,
+        enable_stop=False,
         device=device,
         seg_bias=strat.seg_bias,
         local_action_band_px=strat.band_px,
@@ -163,10 +204,13 @@ def refine_zoom_ppo(
                 best = cur
             if term or trunc:
                 break
+        prev = out.copy()
         changed = (best > 0.5) != (out > 0.5)
         apply = changed & band
         out = out.copy()
         out[apply] = best[apply]
+        if gt_free and not _proxy_accept(prev, out, prob, band, refinement_mode):
+            out = prev
 
     return out.astype(np.float32)
 
