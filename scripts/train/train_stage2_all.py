@@ -41,7 +41,6 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--no_augment", action="store_true")
-    parser.add_argument("--no_multi_region", action="store_true", help="SegResNet: disable ED/TC heads")
     args = parser.parse_args()
     set_seed(args.seed, args.deterministic)
     augment = not args.no_augment
@@ -84,6 +83,7 @@ def main():
         save_path="checkpoints/caranet_best.pt",
         train_ds=tr,
         val_ds=va,
+        task1_regions=True,
     )
 
     # Medium — UNet++
@@ -96,6 +96,7 @@ def main():
         save_path="checkpoints/unetplusplus_best.pt",
         train_ds=tr,
         val_ds=va,
+        task1_regions=True,
     )
 
     # Large — SegResNet
@@ -106,7 +107,7 @@ def main():
         **common,
         refinement_mode="large",
         save_path="checkpoints/segresnet_best.pt",
-        multi_region=not args.no_multi_region,
+        multi_region=True,
         loss_type="bce_dice",
         train_ds=tr,
         val_ds=va,

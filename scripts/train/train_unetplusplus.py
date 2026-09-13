@@ -32,12 +32,13 @@ log = logging.getLogger(__name__)
 class _SegCollate:
     """Picklable collate; do_augment=False for validation."""
 
-    def __init__(self, do_augment: bool = True):
+    def __init__(self, do_augment: bool = True, task1_regions: bool = False):
         self.do_augment = do_augment
+        self.task1_regions = task1_regions
 
     def __call__(self, batch):
         images = torch.stack([b["image"] for b in batch])
-        gt_masks = torch.stack([b["gt_mask"] for b in batch])
+        gt_masks = torch.stack([b["gt_regions"] if self.task1_regions else b["gt_mask"] for b in batch])
         rough_masks = torch.stack([b["rough_mask"] for b in batch])
 
         if self.do_augment:
@@ -78,6 +79,7 @@ def train_unetplusplus(
     patient_split: str = None,
     seed: int = 42,
     deterministic: bool = False,
+    task1_regions: bool = False,
     train_ds=None,
     val_ds=None,
 ) -> None:
@@ -125,12 +127,12 @@ def train_unetplusplus(
     dl_kw = loader_kwargs()
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        collate_fn=_SegCollate(do_augment=augment),
+        collate_fn=_SegCollate(do_augment=augment, task1_regions=task1_regions),
         **dl_kw,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        collate_fn=_SegCollate(do_augment=False),
+        collate_fn=_SegCollate(do_augment=False, task1_regions=task1_regions),
         **dl_kw,
     )
     log.info(f"DataLoader: num_workers={dl_kw['num_workers']}, batch_size={batch_size}")
@@ -141,7 +143,7 @@ def train_unetplusplus(
     in_ch = sample_img.shape[0] if sample_img.ndim == 3 else 1
     model = build_unetplusplus(
         in_channels=in_ch,
-        out_channels=1,
+        out_channels=3 if task1_regions else 1,
     ).to(device)
 
     if pretrained_path and os.path.exists(pretrained_path):

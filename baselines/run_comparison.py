@@ -40,15 +40,16 @@ def run(cmd: list[str], desc: str) -> None:
 
 def build_markdown(rows: dict[str, dict]) -> str:
     lines = [
-        "| 방법 | DSC | HD95 | Precision | Recall |",
+        "| Method | Region | DSC | HD95 | Precision | Recall |",
         "|---|---|---|---|---|",
     ]
     for label, res in rows.items():
-        o = res["Overall"]
-        lines.append(
-            f"| {label} | {o['dsc']:.4f} | {o['hd95']:.3f} | "
-            f"{o['precision']:.4f} | {o['recall']:.4f} |"
-        )
+        for region in ("ET", "TC", "WT"):
+            o = res[region]
+            lines.append(
+                f"| {label} | {region} | {o['dsc']:.4f} | {o['hd95']:.3f} | "
+                f"{o['precision']:.4f} | {o['recall']:.4f} |"
+            )
     return "\n".join(lines)
 
 

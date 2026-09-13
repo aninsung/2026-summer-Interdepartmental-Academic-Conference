@@ -15,7 +15,7 @@ class AdaptivePipeline(nn.Module):
     """
     3-Stage Adaptive Pipeline - Stage 1 & 2
     Small Expert는 2.5D(prev/center/next) 입력을 쓰고,
-    Large Expert는 ED/TC 2채널 출력을 WT로 합친다.
+    All Stage-2 experts emit BraTS Task 1 regions in ET/TC/WT order.
     """
     def __init__(self, device, in_channels=1):
         super().__init__()
@@ -50,13 +50,13 @@ class AdaptivePipeline(nn.Module):
             fallback_fn=build_caranet,
             device=device,
             in_channels=in_channels * 3,
-            out_channels=1,
+            out_channels=3,
             desc_primary="Expert 0 (Small): CaraNet",
             desc_secondary="Expert 0 (Small): Attention U-Net (Fallback)",
             desc_fallback="Expert 0 (Small): Default CaraNet",
         )
         self.expert_small.eval()
-        self.small_zoom = True
+        self.small_zoom = False
         self.small_zoom_patch = 64
         
         self.expert_medium = self._load_expert(
@@ -67,7 +67,7 @@ class AdaptivePipeline(nn.Module):
             fallback_fn=build_unetplusplus,
             device=device,
             in_channels=in_channels,
-            out_channels=1,
+            out_channels=3,
             desc_primary="Expert 1 (Medium): UNet++",
             desc_secondary="Expert 1 (Medium): UNet 3+",
             desc_fallback="Expert 1 (Medium): Default UNet++",
@@ -82,7 +82,7 @@ class AdaptivePipeline(nn.Module):
             fallback_fn=build_segresnet,
             device=device,
             in_channels=in_channels,
-            out_channels=2,
+            out_channels=3,
             desc_primary="Expert 2 (Large): SegResNet",
             desc_secondary="",
             desc_fallback="Expert 2 (Large): Default SegResNet",
@@ -157,7 +157,20 @@ class AdaptivePipeline(nn.Module):
             return prob
         return region_logits_to_wt(prob, from_logits=False)
 
-    def forward(self, x, true_class_preds=None):
+    @staticmethod
+    def _to_task1_probs(logits):
+        if logits.shape[1] != 3:
+            raise RuntimeError(
+                "BraTS Task 1 evaluation requires 3-channel ET/TC/WT checkpoints. "
+                "Run Stage 2 again; WT-only and ED/TC checkpoints are incompatible."
+            )
+        probs = torch.sigmoid(logits)
+        et = torch.minimum(probs[:, 0:1], probs[:, 1:2])
+        tc = torch.maximum(probs[:, 1:2], et)
+        wt = torch.maximum(probs[:, 2:3], tc)
+        return torch.cat([et, tc, wt], dim=1)
+
+    def forward(self, x, true_class_preds=None, return_regions=False):
         """
         x: (B, C, H, W) — C는 중심 모달리티이거나 2.5D(3C).
         """
@@ -170,6 +183,7 @@ class AdaptivePipeline(nn.Module):
         
         B, C, H, W = x.shape
         rough_masks = torch.zeros((B, 1, H, W), device=x.device, dtype=x.dtype)
+        region_probs = torch.zeros((B, 3, H, W), device=x.device, dtype=x.dtype)
         
         experts = [self.expert_small, self.expert_medium, self.expert_large]
         for c, expert in enumerate(experts):
@@ -177,8 +191,9 @@ class AdaptivePipeline(nn.Module):
             if idx.numel() == 0:
                 continue
             logits = self._forward_expert(expert, x[idx])
-            out = self._to_wt_prob(logits)
-            if c == 0 and self.small_zoom:
+            regions = self._to_task1_probs(logits)
+            out = regions[:, 2:3]
+            if c == 0 and self.small_zoom and not return_regions:
                 from src.utils.zoom_crop import refine_with_zoom
                 out = refine_with_zoom(
                     lambda z: self._forward_expert(expert, z),
@@ -189,5 +204,8 @@ class AdaptivePipeline(nn.Module):
                 if out.shape[1] != 1:
                     out = self._to_wt_prob(out)
             rough_masks[idx] = out
+            region_probs[idx] = regions
                 
+        if return_regions:
+            return rough_masks, class_preds, region_probs
         return rough_masks, class_preds

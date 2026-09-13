@@ -27,12 +27,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from baselines.common import check_split_compatibility, simple_collate
 from baselines.losses import confidence_ensemble
 from baselines.models import build_kaist_nnunet, build_nvauto_segresnet
-from src.utils.metrics import dice, gt_size_class, hd95, precision, recall
+from src.utils.metrics import dice, hd95, precision, recall
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-CLASS_NAMES = {0: "Small", 1: "Medium", 2: "Large"}
+TASK1_REGIONS = ("ET", "TC", "WT")
 
 
 def load_baseline(checkpoint: str, device: torch.device):
@@ -40,13 +40,15 @@ def load_baseline(checkpoint: str, device: torch.device):
     method = ckpt["method"]
     in_channels = ckpt.get("in_channels", 2)
     target_size = ckpt.get("target_size", 128)
+    if tuple(ckpt.get("regions", ())) != TASK1_REGIONS:
+        raise RuntimeError("Checkpoint is not a BraTS Task 1 ET/TC/WT model; retrain the baseline.")
 
     if method == "kaist":
         model = build_kaist_nnunet(
-            in_channels=in_channels, out_channels=1, input_size=target_size
+            in_channels=in_channels, out_channels=3, input_size=target_size
         )
     else:
-        model = build_nvauto_segresnet(in_channels=in_channels, out_channels=1)
+        model = build_nvauto_segresnet(in_channels=in_channels, out_channels=3)
 
     model.load_state_dict(ckpt["state_dict"])
     model.to(device).eval()
@@ -65,6 +67,10 @@ def collect_probabilities(
         gt = batch["gt_mask"]
         per_model = [torch.sigmoid(m(img).float()) for m in models]
         prob = confidence_ensemble(per_model) if len(per_model) > 1 else per_model[0]
+        et = torch.minimum(prob[:, 0:1], prob[:, 1:2])
+        tc = torch.maximum(prob[:, 1:2], et)
+        wt = torch.maximum(prob[:, 2:3], tc)
+        prob = torch.cat([et, tc, wt], dim=1)
         probs_all.append(prob.cpu().numpy())
         gts_all.append(gt.numpy())
     return np.concatenate(probs_all, axis=0), np.concatenate(gts_all, axis=0)
@@ -73,21 +79,14 @@ def collect_probabilities(
 def evaluate_at_threshold(
     probs: np.ndarray, gts: np.ndarray, threshold: float
 ) -> Dict[str, Dict[str, float]]:
-    """전체 및 크기 구간별 DSC / HD95 / Precision / Recall 을 계산한다."""
-    buckets: Dict[str, List[List[float]]] = {
-        name: [[], [], [], []] for name in ["Overall", "Small", "Medium", "Large"]
-    }
+    """BraTS Task 1 ET/TC/WT metrics."""
+    buckets: Dict[str, List[List[float]]] = {name: [[], [], [], []] for name in TASK1_REGIONS}
 
     for i in range(probs.shape[0]):
-        gt = gts[i, 0]
-        pred = (probs[i, 0] > threshold).astype(np.float32)
-        scores = [
-            dice(pred, gt),
-            hd95(pred, gt),
-            precision(pred, gt),
-            recall(pred, gt),
-        ]
-        for key in ("Overall", CLASS_NAMES[gt_size_class(gt)]):
+        for r, key in enumerate(TASK1_REGIONS):
+            gt = gts[i, r]
+            pred = (probs[i, r] > threshold).astype(np.float32)
+            scores = [dice(pred, gt), hd95(pred, gt), precision(pred, gt), recall(pred, gt)]
             for slot, value in zip(buckets[key], scores):
                 slot.append(value)
 
@@ -108,7 +107,7 @@ def evaluate_at_threshold(
 def print_table(title: str, results: Dict[str, Dict[str, float]]) -> None:
     log.info(f"\n── {title} ──")
     log.info(f"{'구간':<8}{'n':>6}{'DSC':>9}{'HD95':>9}{'Prec':>9}{'Recall':>9}")
-    for name in ("Overall", "Small", "Medium", "Large"):
+    for name in TASK1_REGIONS:
         if name not in results:
             continue
         r = results[name]
@@ -179,9 +178,10 @@ def main():
         sweep = {}
         for thr in np.arange(0.3, 0.91, 0.05):
             thr = round(float(thr), 2)
-            sweep[str(thr)] = evaluate_at_threshold(probs, gts, thr)["Overall"]
+            values = evaluate_at_threshold(probs, gts, thr)
+            sweep[str(thr)] = {"dsc": float(np.mean([values[r]["dsc"] for r in TASK1_REGIONS]))}
         best_thr = max(sweep, key=lambda t: sweep[t]["dsc"])
-        log.info("\n── 임계값 스윕 (Overall DSC) ──")
+        log.info("\n── Threshold sweep (mean ET/TC/WT DSC) ──")
         for thr, r in sweep.items():
             mark = " ←최적" if thr == best_thr else ""
             log.info(f"  thr={thr}: DSC={r['dsc']:.4f} Prec={r['precision']:.4f} "

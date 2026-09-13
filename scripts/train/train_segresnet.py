@@ -154,7 +154,7 @@ def train_segresnet(
 
     log.info(f"학습 슬라이스: {len(train_ds)}  |  검증 슬라이스: {len(val_ds)}")
     if multi_region:
-        log.info("Large 영역 헤드: ED + TC(NCR∪ET) → 추론 WT = ED ∪ TC")
+        log.info("Large Task 1 heads: ET + TC + WT")
 
     dl_kw = loader_kwargs()
     train_loader = DataLoader(
@@ -173,7 +173,7 @@ def train_segresnet(
     sample_item = train_ds[0]
     sample_img = sample_item["image"]
     in_ch = sample_img.shape[0] if sample_img.ndim == 3 else 1
-    out_ch = 2 if multi_region else 1
+    out_ch = 3 if multi_region else 1
     model = build_segresnet(
         in_channels=in_ch,
         out_channels=out_ch,
@@ -193,7 +193,7 @@ def train_segresnet(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     if multi_region:
         criterion = MultiChannelBCEDiceLoss(bce_weight=0.5).to(device)
-        log.info("손실 함수: MultiChannelBCEDiceLoss (ED + TC)")
+        log.info("손실 함수: MultiChannelBCEDiceLoss (ET + TC + WT)")
     elif loss_type == "boundary":
         criterion = BoundaryLoss().to(device)
         log.info("손실 함수: BoundaryLoss")

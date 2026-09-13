@@ -395,10 +395,12 @@ class MultiChannelBCEDiceLoss(nn.Module):
 
 
 def region_logits_to_wt(prob_or_logits: torch.Tensor, from_logits: bool = False) -> torch.Tensor:
-    """(B, 2, H, W) ED/TC → (B, 1, H, W) WT 확률."""
+    """Return WT from a 1-channel mask, legacy ED/TC, or ET/TC/WT regions."""
     p = torch.sigmoid(prob_or_logits) if from_logits else prob_or_logits
     if p.shape[1] == 1:
         return p
+    if p.shape[1] == 3:
+        return p[:, 2:3]
     return 1.0 - (1.0 - p[:, :1]) * (1.0 - p[:, 1:2])
 
 from src.envs.mask_refinement_env import _hd95

@@ -15,6 +15,9 @@ def run_command(cmd, desc):
     log.info(f"명령어: {' '.join(cmd)}")
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
+    if os.environ.get("TQDM_DISABLE", "") != "1":
+        env["TQDM_ENABLE"] = "1"
+        env.pop("TQDM_DISABLE", None)
     result = subprocess.run(cmd, env=env)
     if result.returncode != 0:
         log.error(f"❌ [{desc}] 실행 중 오류가 발생했습니다. (Return code: {result.returncode})")
@@ -60,38 +63,44 @@ def main():
     
     # 공통 설정
     parser.add_argument("--config", type=str, default="configs/ppo_brats.yaml", help="Agent 학습용 YAML 설정 파일 경로")
-    parser.add_argument("--batch_size", type=int, default=None, help="배치 크기 (기본값: 각 스크립트 기본값 사용)")
+    parser.add_argument("--batch_size", type=int, default=128, help="배치 크기 (기본값: 128)")
     parser.add_argument("--max_train_patients", type=int, default=1251, help="Stage 1–4 공통 환자 수")
     parser.add_argument("--epochs", type=int, default=None, help="학습 에폭 수")
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair', 't1ce+t2' 등)")
     parser.add_argument("--seed", type=int, default=42, help="전역 시드 (Stage 1–4 공통)")
     parser.add_argument("--deterministic", action="store_true",
-                        help="cuDNN 결정적 모드 (기본 활성화, 이 플래그는 하위 호환용)")
-    parser.add_argument("--no_deterministic", action="store_true",
-                        help="결정적 모드 해제 (재현성을 포기하고 속도를 높임)")
+                        help="cuDNN 결정적 모드 활성화 (기본값: OFF — 속도 최적화를 위해 cuDNN benchmark 모드 사용)")
+    parser.add_argument("--no_deterministic", action="store_true", default=True,
+                        help="cuDNN 결정적 모드 해제 및 고속 모드 (기본값: ON)")
     parser.add_argument(
         "--verbose-progress",
         action="store_true",
-        help="tqdm 진행바 활성화 (기본 OFF — tee/에이전트 로그 비대화 방지)",
+        default=True,
+        help="tqdm 진행바 활성화 (기본값: ON)",
+    )
+    parser.add_argument(
+        "--quiet-progress",
+        "--no-verbose-progress",
+        dest="verbose_progress",
+        action="store_false",
+        help="tqdm 진행바 비활성화",
     )
 
     parser.add_argument("--fast", action="store_true", help="Speed profile: fewer rounds/epochs, larger batches, nondeterministic CUDA")
     parser.add_argument("--under_1h", action="store_true", help="Sub-hour profile for the full patient pool")
     args = parser.parse_args()
     if args.fast:
-        args.no_deterministic = True
         args.batch_size = args.batch_size or 128
         args.epochs = args.epochs or 3
         args.skip_plot = True
     if args.under_1h:
-        args.no_deterministic = True
         args.batch_size = args.batch_size or 128
         args.epochs = min(args.epochs or 3, 3)
         args.skip_plot = True
         args.alt_ppo_timesteps = min(args.alt_ppo_timesteps, 10000)
 
-    # 재현성을 기본값으로 둔다. 해제는 --no_deterministic 으로만 가능하다.
-    deterministic = not args.no_deterministic
+    # 속도 최적화를 기본값으로 둔다. 결정적 모드는 --deterministic 으로만 설정 가능.
+    deterministic = bool(args.deterministic)
 
     from src.utils.progress import configure_quiet_logs
     configure_quiet_logs(verbose_progress=bool(args.verbose_progress))
@@ -100,8 +109,10 @@ def main():
 
     n_patients = args.max_train_patients if args.max_train_patients is not None else 1251
     log.info("🚀 RL-Refiner 4-Stage Dynamic Routing 파이프라인 전체 실행을 시작합니다.")
-    if not args.verbose_progress:
-        log.info("진행바 OFF (TQDM_DISABLE=1). 켜려면 --verbose-progress")
+    if args.verbose_progress:
+        log.info("진행바 ON (기본 활성화). 끄려면 --quiet-progress")
+    else:
+        log.info("진행바 OFF.")
 
     # GPU 전용: CUDA 없으면 즉시 종료 (CPU fallback 금지)
     from src.utils.device import require_cuda_device
