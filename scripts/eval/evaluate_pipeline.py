@@ -37,15 +37,20 @@ def _average_edge_intensity(boundary_mask: np.ndarray, edge_map: np.ndarray) -> 
     return float(np.mean(edge_map[boundary_mask]))
 
 
-def _tta_probability(pipeline, img_t, rough_mask_t, class_pred):
+def _tta_probability(pipeline, img_t, rough_mask_t, region_t, class_pred):
     with torch.no_grad():
         img_hf = torch.flip(img_t, dims=[-1])
-        out_hf, _ = pipeline(img_hf, true_class_preds=class_pred)
+        out_hf, _, regions_hf = pipeline(img_hf, true_class_preds=class_pred, return_regions=True)
         out_hf = torch.flip(out_hf, dims=[-1])
+        regions_hf = torch.flip(regions_hf, dims=[-1])
         img_vf = torch.flip(img_t, dims=[-2])
-        out_vf, _ = pipeline(img_vf, true_class_preds=class_pred)
+        out_vf, _, regions_vf = pipeline(img_vf, true_class_preds=class_pred, return_regions=True)
         out_vf = torch.flip(out_vf, dims=[-2])
-        return (rough_mask_t + out_hf + out_vf) / 3.0
+        regions_vf = torch.flip(regions_vf, dims=[-2])
+        return (
+            (rough_mask_t + out_hf + out_vf) / 3.0,
+            (region_t + regions_hf + regions_vf) / 3.0,
+        )
 
 
 
@@ -148,9 +153,15 @@ def main():
     parser.add_argument("--patient_split", type=str, default=DEFAULT_SPLIT_PATH)
     parser.add_argument("--split_role", type=str, default="val", choices=["train", "val", "all"])
     parser.add_argument("--oracle_routing", action="store_true", help="GT 면적으로 Expert를 고르는 상한 평가")
+    parser.add_argument("--fixed_route_class", type=int, default=-1, choices=[-1, 0, 1, 2],
+                        help="Ablation: route every slice to one expert; -1 uses the classifier.")
+    parser.add_argument("--no_tta", action="store_true", help="Ablation: disable horizontal/vertical-flip TTA.")
+    parser.add_argument("--skip_stats", action="store_true", help="Skip paired bootstrap statistics.")
     parser.add_argument("--confidence_threshold", type=float, default=None, help="이 값 이상 평균 확률이면 PPO 생략")
     parser.add_argument("--stage2_thresholds", type=str, default="0.70,0.75,0.50",
                         help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값.")
+    parser.add_argument("--task1_thresholds", type=str, default="0.50,0.50,0.50",
+                        help="BraTS Task 1 ET,TC,WT thresholds.")
     parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
     parser.add_argument(
         "--stage3_mode",
@@ -452,6 +463,7 @@ def main():
     
     # Extract arrays
     images, gt_masks, _ = dataset.get_numpy_arrays()
+    gt_task1_regions = dataset.get_numpy_task1_regions()
     images_25d = dataset.get_numpy_25d_arrays()
     
     print("Loading 3-Stage Pipeline Models...")
@@ -534,6 +546,19 @@ def main():
     final_hd95_list = []
     initial_dsc_list = []
     initial_hd95_list = []
+
+    task1_names = ("ET", "TC", "WT")
+    task1_init_dsc = {name: [] for name in task1_names}
+    task1_init_hd95 = {name: [] for name in task1_names}
+    task1_final_dsc = {name: [] for name in task1_names}
+    task1_final_hd95 = {name: [] for name in task1_names}
+    task1_init_prec = {name: [] for name in task1_names}
+    task1_init_rec = {name: [] for name in task1_names}
+    task1_final_prec = {name: [] for name in task1_names}
+    task1_final_rec = {name: [] for name in task1_names}
+    task1_thr = np.asarray([float(x) for x in args.task1_thresholds.split(",")], dtype=np.float32)
+    if task1_thr.shape != (3,):
+        raise ValueError("--task1_thresholds must contain ET,TC,WT")
     
     class_initial_dsc = {0: [], 1: [], 2: []}
     class_initial_hd95 = {0: [], 1: [], 2: []}
@@ -567,7 +592,12 @@ def main():
             b_img_t = b_img_t.unsqueeze(1)
             
         b_route_cls = None
-        if args.oracle_routing:
+        if args.fixed_route_class >= 0:
+            b_route_cls = torch.full(
+                (batch_end - batch_start,), args.fixed_route_class,
+                dtype=torch.long, device=device,
+            )
+        elif args.oracle_routing:
             b_areas = [np.sum(gt_masks[batch_start + bi]) for bi in range(batch_end - batch_start)]
             b_route_cls = torch.tensor(
                 [0 if a < 300 else (1 if a < 700 else 2) for a in b_areas],
@@ -576,11 +606,19 @@ def main():
             )
             
         with torch.no_grad():
-            b_rough_t, b_class_preds = pipeline(b_img_t, true_class_preds=b_route_cls)
-            b_prob_tta_t = _tta_probability(pipeline, b_img_t, b_rough_t, b_class_preds)
+            b_rough_t, b_class_preds, b_regions_t = pipeline(
+                b_img_t, true_class_preds=b_route_cls, return_regions=True
+            )
+            if args.no_tta:
+                b_prob_tta_t, b_regions_tta_t = b_rough_t, b_regions_t
+            else:
+                b_prob_tta_t, b_regions_tta_t = _tta_probability(
+                    pipeline, b_img_t, b_rough_t, b_regions_t, b_class_preds
+                )
             
         b_rough_np = b_rough_t.squeeze(1).cpu().numpy()
         b_prob_tta_np = b_prob_tta_t.squeeze(1).cpu().numpy()
+        b_regions_tta_np = b_regions_tta_t.cpu().numpy()
         b_class_np = b_class_preds.cpu().numpy()
         
         for bi in range(batch_end - batch_start):
@@ -590,6 +628,7 @@ def main():
             c = int(b_class_np[bi])
             rough_prob_np = b_rough_np[bi]
             prob_tta_np = b_prob_tta_np[bi]
+            region_prob_tta_np = b_regions_tta_np[bi]
             
             if args.max_samples_per_class and class_counts[c] >= args.max_samples_per_class:
                 continue
@@ -612,6 +651,11 @@ def main():
                     eroded = binary_erosion(eroded, iterations=1)
                 if np.any(eroded):
                     rough_mask_np = eroded.astype(np.float32)
+
+            init_regions_np = (region_prob_tta_np >= task1_thr[:, None, None]).astype(np.float32)
+            init_regions_np[2] = rough_mask_np
+            init_regions_np[1] *= init_regions_np[2]
+            init_regions_np[0] *= init_regions_np[1]
 
             # Precompute GT distance transform once per slice to reuse for initial & final HD95
             dist_gt = None
@@ -803,6 +847,27 @@ def main():
             final_hd95_list.append(fin_hd95)
             class_final_dsc[c].append(fin_dsc)
             class_final_hd95[c].append(fin_hd95)
+
+            final_regions_np = init_regions_np.copy()
+            final_regions_np[2] = final_mask_np
+            final_regions_np[1] *= final_regions_np[2]
+            final_regions_np[0] *= final_regions_np[1]
+            for region_idx, region_name in enumerate(task1_names):
+                gt_region = gt_task1_regions[i, region_idx]
+                init_region = init_regions_np[region_idx]
+                final_region = final_regions_np[region_idx]
+                dist_region = (
+                    distance_transform_edt(~(gt_region > 0.5))
+                    if np.any(gt_region > 0.5) else None
+                )
+                task1_init_dsc[region_name].append(dice(init_region, gt_region))
+                task1_final_dsc[region_name].append(dice(final_region, gt_region))
+                task1_init_hd95[region_name].append(hd95(init_region, gt_region, dist_b=dist_region))
+                task1_final_hd95[region_name].append(hd95(final_region, gt_region, dist_b=dist_region))
+                task1_init_prec[region_name].append(precision(init_region, gt_region))
+                task1_final_prec[region_name].append(precision(final_region, gt_region))
+                task1_init_rec[region_name].append(recall(init_region, gt_region))
+                task1_final_rec[region_name].append(recall(final_region, gt_region))
             
             all_candidates.append({
                 "class": c,
@@ -846,54 +911,16 @@ def main():
         print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
     else:
         print("Monotonic DSC gate: OFF (deploy — not a performance guarantee)")
-    print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
-    print(f"Average Initial DSC  (Stage 2):        {np.mean(initial_dsc_list):.4f}")
-    print(f"Average Final   DSC  (Stage 3*):       {np.mean(final_dsc_list):.4f}")
-    print(f"Average Initial HD95 (px):             {np.mean(initial_hd95_list):.4f}")
-    print(f"Average Final   HD95 (px):             {np.mean(final_hd95_list):.4f}")
-    # Stage3가 실제로 돌아가는 클래스만 (skip 시 Large Δ=0이 전체 평균을 왜곡하지 않게)
-    active_idx = [i for i, c in enumerate(slice_cls) if int(c) not in skip_classes]
-    if active_idx and skip_classes:
-        act_init = np.mean([initial_dsc_list[i] for i in active_idx])
-        act_fin = np.mean([final_dsc_list[i] for i in active_idx])
-        act_ih = np.mean([initial_hd95_list[i] for i in active_idx])
-        act_fh = np.mean([final_hd95_list[i] for i in active_idx])
+    print("\n--- BraTS 2021 Task 1 regions (ET / TC / WT) ---")
+    print("Region | DSC Stage2 -> Final | HD95(px) Stage2 -> Final | Precision -> Final | Recall -> Final")
+    for region_name in task1_names:
         print(
-            f"Stage3-active only (excl. skip {sorted(skip_classes)}): "
-            f"n={len(active_idx)} | DSC {act_init:.4f} → {act_fin:.4f} "
-            f"| HD95 {act_ih:.4f} → {act_fh:.4f}"
+            f"{region_name:>4} | "
+            f"{np.mean(task1_init_dsc[region_name]):.4f} -> {np.mean(task1_final_dsc[region_name]):.4f} | "
+            f"{np.mean(task1_init_hd95[region_name]):.4f} -> {np.mean(task1_final_hd95[region_name]):.4f} | "
+            f"{np.mean(task1_init_prec[region_name]):.4f} -> {np.mean(task1_final_prec[region_name]):.4f} | "
+            f"{np.mean(task1_init_rec[region_name]):.4f} -> {np.mean(task1_final_rec[region_name]):.4f}"
         )
-    
-    print("\n--- Class-wise Performance Breakdown ---")
-    names = {0: "Small (CaraNet)", 1: "Medium (UNet++)", 2: "Large (SegResNet)"}
-    for c in [0, 1, 2]:
-        if len(class_final_dsc[c]) > 0:
-            init_dsc_avg = np.mean(class_initial_dsc[c])
-            fin_dsc_avg  = np.mean(class_final_dsc[c])
-            init_hd_avg  = np.mean(class_initial_hd95[c])
-            fin_hd_avg   = np.mean(class_final_hd95[c])
-            skip_tag = " [Stage3 SKIP→Init]" if c in skip_classes else ""
-            print(f"[{names[c]}]{skip_tag} count: {len(class_final_dsc[c])} "
-                  f"| DSC {init_dsc_avg:.4f} → {fin_dsc_avg:.4f} "
-                  f"| HD95 {init_hd_avg:.4f} → {fin_hd_avg:.4f} (px)")
-            print(
-                f"    └ Precision: {np.mean(class_initial_prec[c]):.4f} → {np.mean(class_final_prec[c]):.4f} "
-                f"| Recall: {np.mean(class_initial_rec[c]):.4f} → {np.mean(class_final_rec[c]):.4f}"
-            )
-
-    if small_active_init:
-        print(
-            f"[Small Active ≥50px] n={len(small_active_init)} "
-            f"| DSC {np.mean(small_active_init):.4f} → {np.mean(small_active_fin):.4f} "
-            f"| HD95 {np.mean(small_active_init_hd):.4f} → {np.mean(small_active_hd):.4f}"
-        )
-    if small_micro_init:
-        print(
-            f"[Small Micro <50px] n={len(small_micro_init)} "
-            f"| DSC {np.mean(small_micro_init):.4f} → {np.mean(small_micro_fin):.4f} "
-            f"| HD95 {np.mean(small_micro_init_hd):.4f} → {np.mean(small_micro_hd):.4f}"
-        )
-
     os.makedirs(os.path.dirname(args.metrics_out) or ".", exist_ok=True)
     np.savez_compressed(
         args.metrics_out,
@@ -903,6 +930,15 @@ def main():
         final_dsc=np.array(final_dsc_list, dtype=np.float64),
         init_hd95=np.array(initial_hd95_list, dtype=np.float64),
         final_hd95=np.array(final_hd95_list, dtype=np.float64),
+        task1_regions=np.array(task1_names),
+        task1_init_dsc=np.stack([task1_init_dsc[name] for name in task1_names]).astype(np.float64),
+        task1_final_dsc=np.stack([task1_final_dsc[name] for name in task1_names]).astype(np.float64),
+        task1_init_hd95=np.stack([task1_init_hd95[name] for name in task1_names]).astype(np.float64),
+        task1_final_hd95=np.stack([task1_final_hd95[name] for name in task1_names]).astype(np.float64),
+        task1_init_precision=np.stack([task1_init_prec[name] for name in task1_names]).astype(np.float64),
+        task1_final_precision=np.stack([task1_final_prec[name] for name in task1_names]).astype(np.float64),
+        task1_init_recall=np.stack([task1_init_rec[name] for name in task1_names]).astype(np.float64),
+        task1_final_recall=np.stack([task1_final_rec[name] for name in task1_names]).astype(np.float64),
         deploy_mode=np.array([int(args.deploy_mode)]),
         select_best=np.array([int(select_best)]),
         monotonic_gate=np.array([int(apply_monotonic)]),
@@ -914,6 +950,8 @@ def main():
     )
     print(f"Saved slice metrics: {args.metrics_out}")
     try:
+        if args.skip_stats:
+            raise RuntimeError("disabled by --skip_stats")
         import importlib.util
         stats_path = os.path.join(os.path.dirname(__file__), "paired_stats.py")
         spec = importlib.util.spec_from_file_location("paired_stats", stats_path)

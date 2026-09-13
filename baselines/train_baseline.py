@@ -49,7 +49,7 @@ def make_collate(augment: bool):
 
     def collate(batch):
         images = torch.stack([b["image"] for b in batch])
-        gts = torch.stack([b["gt_mask"] for b in batch])
+        gts = torch.stack([b["gt_regions"] for b in batch])
 
         if augment:
             for i in range(images.size(0)):
@@ -99,10 +99,10 @@ def perturb_view(
 def build_model(method: str, in_channels: int, input_size: int, device: torch.device):
     if method == "kaist":
         model = build_kaist_nnunet(
-            in_channels=in_channels, out_channels=1, input_size=input_size
+            in_channels=in_channels, out_channels=3, input_size=input_size
         )
     elif method == "nvauto":
-        model = build_nvauto_segresnet(in_channels=in_channels, out_channels=1)
+        model = build_nvauto_segresnet(in_channels=in_channels, out_channels=3)
     else:
         raise ValueError(f"알 수 없는 method: {method} (가능한 값: {METHODS})")
     return model.to(device)
@@ -247,7 +247,7 @@ def train(
                 pred = (prob > 0.5).float().cpu().numpy()
                 gt_np = gt.cpu().numpy()
                 for i in range(pred.shape[0]):
-                    dsc_sum += np_dice(pred[i, 0], gt_np[i, 0])
+                    dsc_sum += sum(np_dice(pred[i, r], gt_np[i, r]) for r in range(3)) / 3.0
                     n += 1
         val_dsc = dsc_sum / max(1, n)
 
@@ -265,6 +265,7 @@ def train(
                     "state_dict": model.state_dict(),
                     "in_channels": in_channels,
                     "target_size": target_size,
+                    "regions": ["ET", "TC", "WT"],
                     "val_dsc": best_val_dsc,
                 },
                 save_path,

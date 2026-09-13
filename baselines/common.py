@@ -76,5 +76,5 @@ def simple_collate(batch):
     """이미지와 정답 마스크만 묶는다(증강 없음)."""
     return {
         "image": torch.stack([b["image"] for b in batch]),
-        "gt_mask": torch.stack([b["gt_mask"] for b in batch]),
+        "gt_mask": torch.stack([b["gt_regions"] for b in batch]),
     }

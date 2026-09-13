@@ -11,25 +11,19 @@ import sys
 
 
 def want_tqdm() -> bool:
-    """Whether to show tqdm bars (default: no)."""
+    """Whether to show tqdm bars (default: yes)."""
     disable = os.environ.get("TQDM_DISABLE", "").strip().lower()
     if disable in ("1", "true", "yes", "on"):
         return False
-    enable = os.environ.get("TQDM_ENABLE", "").strip().lower()
-    if enable in ("1", "true", "yes", "on"):
-        return True
-    return False
+    return True
 
 
-def configure_quiet_logs(*, verbose_progress: bool = False) -> None:
+def configure_quiet_logs(*, verbose_progress: bool = True) -> None:
     """Apply process-wide quiet defaults (call early from run_pipeline / entrypoints)."""
-    if verbose_progress:
-        os.environ.pop("TQDM_DISABLE", None)
-        os.environ["TQDM_ENABLE"] = "1"
+    if not verbose_progress and os.environ.get("TQDM_DISABLE", "").strip().lower() in ("1", "true", "yes", "on"):
         return
-    enable = os.environ.get("TQDM_ENABLE", "").strip().lower()
-    if enable in ("1", "true", "yes", "on"):
-        return
-    os.environ.setdefault("TQDM_DISABLE", "1")
+    os.environ.pop("TQDM_DISABLE", None)
+    os.environ["TQDM_ENABLE"] = "1"
     # Stable-Baselines3 / gym noise
     os.environ.setdefault("SB3_LOG_LEVEL", "ERROR")
+

@@ -33,11 +33,12 @@ log = logging.getLogger(__name__)
 class _CaraNetCollate:
     """Picklable collate for Windows DataLoader workers."""
 
-    def __init__(self, do_augment: bool, do_zoom: bool, zoom_prob: float = 0.5, zoom_patch: int = 64):
+    def __init__(self, do_augment: bool, do_zoom: bool, zoom_prob: float = 0.5, zoom_patch: int = 64, task1_regions: bool = False):
         self.do_augment = do_augment
         self.do_zoom = do_zoom
         self.zoom_prob = zoom_prob
         self.zoom_patch = zoom_patch
+        self.task1_regions = task1_regions
 
     def __call__(self, batch):
         def _img(item):
@@ -45,7 +46,7 @@ class _CaraNetCollate:
             return t if t is not None else item["image"]
 
         images = torch.stack([_img(b) for b in batch])
-        gt_masks = torch.stack([b["gt_mask"] for b in batch])
+        gt_masks = torch.stack([b["gt_regions"] if self.task1_regions else b["gt_mask"] for b in batch])
         rough_masks = torch.stack([b["rough_mask"] for b in batch])
 
         if self.do_augment:
@@ -122,6 +123,7 @@ def train_caranet(
     focal_tversky: bool = False,
     fragment_repeats: int = 4,
     fragment_area: float = 50.0,
+    task1_regions: bool = False,
     train_ds=None,
     val_ds=None,
 ) -> None:
@@ -183,12 +185,13 @@ def train_caranet(
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         collate_fn=_CaraNetCollate(do_augment=augment, do_zoom=use_zoom,
-                                   zoom_prob=zoom_prob, zoom_patch=zoom_patch),
+                                   zoom_prob=zoom_prob, zoom_patch=zoom_patch,
+                                   task1_regions=task1_regions),
         **dl_kw,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        collate_fn=_CaraNetCollate(do_augment=False, do_zoom=False),
+        collate_fn=_CaraNetCollate(do_augment=False, do_zoom=False, task1_regions=task1_regions),
         **dl_kw,
     )
     log.info(f"DataLoader: num_workers={dl_kw['num_workers']}, batch_size={batch_size}")
@@ -200,7 +203,7 @@ def train_caranet(
     log.info(f"CaraNet in_channels={in_ch} (2.5D stacked)" if in_ch > 2 else f"CaraNet in_channels={in_ch}")
     model = build_caranet(
         in_channels=in_ch,
-        out_channels=1,
+        out_channels=3 if task1_regions else 1,
     ).to(device)
 
     init_path = pretrained_path if pretrained_path and os.path.exists(pretrained_path) else ""

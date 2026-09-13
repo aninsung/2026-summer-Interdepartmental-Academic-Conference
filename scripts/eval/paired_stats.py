@@ -177,6 +177,21 @@ def report_from_npz(path: str, n_boot: int = 10000, seed: int = 42, json_out: st
     data = np.load(path, allow_pickle=True)
     pid = data["pid"]
     cls = data["cls"]
+    if "task1_regions" in data:
+        payload = {"regions": {}}
+        for r, name in enumerate(data["task1_regions"]):
+            dsc = summarize_metric(pid, cls, data["task1_init_dsc"][r], data["task1_final_dsc"][r], f"{name} DSC", True, n_boot, seed)
+            hd = summarize_metric(pid, cls, data["task1_init_hd95"][r], data["task1_final_hd95"][r], f"{name} HD95", False, n_boot, seed)
+            dsc["by_class"] = {}
+            hd["by_class"] = {}
+            payload["regions"][str(name)] = {"dsc": dsc, "hd95": hd}
+            print(f"=== {name} ===")
+            print(format_report(dsc, hd))
+        out = json_out or path.replace(".npz", "_stats.json")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"Saved {out}")
+        return payload
     dsc = summarize_metric(pid, cls, data["init_dsc"], data["final_dsc"], "DSC", True, n_boot, seed)
     hd = summarize_metric(pid, cls, data["init_hd95"], data["final_hd95"], "HD95", False, n_boot, seed)
     payload = {"dsc": dsc, "hd95": hd}

@@ -142,10 +142,11 @@ def _clip_z(z: int, depth: int) -> int:
 
 
 def regions_from_seg(seg: np.ndarray) -> np.ndarray:
-    """BraTS 레이블 → (2, H, W) = ED(label 2), TC(NCR 1 ∪ ET 4)."""
-    ed = (seg == 2).astype(np.float32)
+    """BraTS Task 1 nested regions: ET, TC, WT."""
+    et = (seg == 4).astype(np.float32)
     tc = np.isin(seg, (1, 4)).astype(np.float32)
-    return np.stack([ed, tc], axis=0)
+    wt = (seg > 0).astype(np.float32)
+    return np.stack([et, tc, wt], axis=0)
 
 
 def _select_slices(
@@ -628,7 +629,7 @@ class BraTS2020Dataset(Dataset):
             gt_regions = torch.from_numpy(regions_from_seg(seg_sl))
         else:
             wt = torch.from_numpy(gt).unsqueeze(0)
-            gt_regions = torch.cat([wt, wt], dim=0)
+            gt_regions = torch.cat([torch.zeros_like(wt), wt, wt], dim=0)
 
         return {
             "image":      img_tensor,
@@ -648,6 +649,18 @@ class BraTS2020Dataset(Dataset):
         gts    = np.stack([s[1] for s in self._samples], axis=0)
         roughs = np.stack([s[2] for s in self._samples], axis=0)
         return imgs, gts, roughs
+
+    def get_numpy_task1_regions(self) -> np.ndarray:
+        """Return BraTS Task 1 targets in ET, TC, WT order: (N, 3, H, W)."""
+        regions = []
+        for sample in self._samples:
+            seg_sl = sample[5] if len(sample) > 5 else None
+            if seg_sl is None:
+                wt = sample[1].astype(np.float32)
+                regions.append(np.stack([np.zeros_like(wt), wt, wt], axis=0))
+            else:
+                regions.append(regions_from_seg(seg_sl))
+        return np.stack(regions, axis=0)
 
     def get_numpy_25d_arrays(self) -> np.ndarray:
         """(N, 3C, H, W) prev/center/next. 없으면 center를 세 번 복제."""
