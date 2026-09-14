@@ -4,37 +4,37 @@ import numpy as np
 
 
 def size_class_from_area(area: float) -> int:
-    if area < 300:
+    if area < 200:
         return 0
-    if area < 700:
+    if area < 500:
         return 1
     return 2
 
 
 def soft_label_from_area(area: float, margin: float = 20.0) -> np.ndarray:
-    """Hard one-hot, with linear blend near 300 / 700 boundaries."""
+    """Hard one-hot, with linear blend near 200 / 500 boundaries."""
     y = np.zeros(3, dtype=np.float32)
     c = size_class_from_area(area)
     y[c] = 1.0
-    # near 300: blend Small↔Medium
-    if 300.0 - margin <= area < 300.0:
-        t = (area - (300.0 - margin)) / margin  # 0 at far small → 1 at 300
+    # near 200: blend Small↔Medium
+    if 200.0 - margin <= area < 200.0:
+        t = (area - (200.0 - margin)) / margin  # 0 at far small → 1 at 200
         y[:] = 0
         y[0] = 1.0 - t
         y[1] = t
-    elif 300.0 <= area < 300.0 + margin:
-        t = (area - 300.0) / margin
+    elif 200.0 <= area < 200.0 + margin:
+        t = (area - 200.0) / margin
         y[:] = 0
         y[0] = 1.0 - t
         y[1] = t
-    # near 700: blend Medium↔Large
-    elif 700.0 - margin <= area < 700.0:
-        t = (area - (700.0 - margin)) / margin
+    # near 500: blend Medium↔Large
+    elif 500.0 - margin <= area < 500.0:
+        t = (area - (500.0 - margin)) / margin
         y[:] = 0
         y[1] = 1.0 - t
         y[2] = t
-    elif 700.0 <= area < 700.0 + margin:
-        t = (area - 700.0) / margin
+    elif 500.0 <= area < 500.0 + margin:
+        t = (area - 500.0) / margin
         y[:] = 0
         y[1] = 1.0 - t
         y[2] = t

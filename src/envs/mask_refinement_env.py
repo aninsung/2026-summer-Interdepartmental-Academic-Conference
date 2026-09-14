@@ -628,7 +628,7 @@ class MaskRefinementEnv(gym.Env):
         delta_perimeter = curr_perimeter - self._prev_perimeter
 
         tumor_area = max(1.0, float(self._gt.sum().item()))
-        size_scale = max(0.5, min(3.0, 300.0 / tumor_area))
+        size_scale = max(0.5, min(3.0, 200.0 / tumor_area))
 
         # --- (1) Fidelity: 마스크 개선도 ---
         dsc_term = delta_dsc if delta_dsc >= 0 else delta_dsc * 2.0

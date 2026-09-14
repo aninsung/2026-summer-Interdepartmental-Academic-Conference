@@ -58,9 +58,9 @@ def apply_monotonic_dsc_gate(
 
 def gt_size_class(gt: np.ndarray) -> int:
     area = float(np.sum(gt))
-    if area < 300:
+    if area < 200:
         return 0
-    if area < 700:
+    if area < 500:
         return 1
     return 2
 

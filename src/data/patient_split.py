@@ -115,9 +115,9 @@ def filter_dataset_by_size(ds: BraTS2020Dataset, refinement_mode: str) -> None:
     for sample, pid in zip(ds._samples, pids):
         area = float(np.sum(sample[1]))
         ok = (
-            (ref_m == "small" and 0 < area < 300)
-            or (ref_m == "medium" and 300 <= area < 700)
-            or (ref_m == "large" and area >= 700)
+            (ref_m == "small" and 0 < area < 200)
+            or (ref_m == "medium" and 200 <= area < 500)
+            or (ref_m == "large" and area >= 500)
         )
         if ok:
             keep_s.append(sample)
