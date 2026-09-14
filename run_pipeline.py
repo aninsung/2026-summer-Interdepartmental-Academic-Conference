@@ -26,15 +26,20 @@ def run_command(cmd, desc):
 
 def archive_existing_checkpoints(paths, reason):
     existing = [p for p in paths if os.path.exists(p)]
-    if not existing:
-        return
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    archive_dir = os.path.join("checkpoints", "archived_before_fresh_train", stamp)
-    os.makedirs(archive_dir, exist_ok=True)
     for path in existing:
-        dst = os.path.join(archive_dir, os.path.basename(path))
-        os.replace(path, dst)
-        log.info("기존 checkpoint 미사용(%s): %s → %s", reason, path, dst)
+        if os.path.isdir(path):
+            import shutil
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        log.info("기존 checkpoint 삭제 완료(%s): %s", reason, path)
+    
+    # 또한 이전 아카이브 디렉토리가 남아있다면 완전 삭제
+    archived_dir = os.path.join("checkpoints", "archived_before_fresh_train")
+    if os.path.exists(archived_dir):
+        import shutil
+        shutil.rmtree(archived_dir, ignore_errors=True)
+        log.info("이전 checkpoint 아카이브 디렉토리 삭제 완료: %s", archived_dir)
 
 def main():
     # CLI 인자의 '=' 형태 자동 유연 보정 (예: batch_size=64 -> --batch_size 64)
@@ -60,6 +65,9 @@ def main():
         help="PPO mask refiner 학습 step 수 (0이면 Stage3 학습만 스킵하려면 --skip_agents 권장)",
     )
     parser.add_argument("--skip_plot", action="store_true", help="Stage4 시각화 PNG 생략")
+    parser.add_argument("--no_tta", action="store_true", help="Stage 4: TTA(4x 앙상블) 비활성화하여 추론 속도 4배 향상")
+    parser.add_argument("--confidence_threshold", type=float, default=0.85, help="Stage 4: 확신도(기본 0.85) 이상이면 PPO 루프 생략하여 롤아웃 연산 절감")
+    parser.add_argument("--fast_eval", action="store_true", help="Stage 4: 샘플링 평가 (클래스당 100장, 5초 초고속 평가)")
     
     # 공통 설정
     parser.add_argument("--config", type=str, default="configs/ppo_brats.yaml", help="Agent 학습용 YAML 설정 파일 경로")
@@ -210,13 +218,13 @@ def main():
             "--deploy_mode",
             "--stage3_mode", "ppo",
             "--stage3_skip_classes", "",
-            "--boundary_band_px", "2",
+            "--boundary_band_px", "0",
             "--boundary_band_mode", "expand",
             "--boundary_band_classes", "1,2",
             "--medium_active_max_area", "0",
             "--medium_skip_min_area", "0",
             "--sl_zoom_patches", "0",
-            "--stage2_thresholds", "0.70,0.75,0.50",
+            "--stage2_thresholds", "0.50,0.50,0.50",
             "--cc_min_sizes", "0,15,25",
             "--stage2_erode_classes", "",
             "--stage2_erode_px", "0",
@@ -224,11 +232,19 @@ def main():
             "--area_gate_hi", "1.2",
             "--area_gate_hi_medium", "1.5",
             "--area_gate_hi_large", "1.35",
+            "--soft_routing",
+            "--enable_kaist_postproc",
             "--metrics_out", "results/pipeline_slice_metrics_deploy.npz",
             "--eval_batch_size", str(args.batch_size or 64),
         ]
         if args.skip_plot:
             cmd_deploy += ["--skip_plot"]
+        if args.no_tta or args.fast or args.under_1h:
+            cmd_deploy += ["--no_tta"]
+        if args.confidence_threshold is not None:
+            cmd_deploy += ["--confidence_threshold", str(args.confidence_threshold)]
+        if args.fast_eval:
+            cmd_deploy += ["--max_samples_per_class", "100"]
         if args.modality is not None:
             cmd_deploy += ["--modality", str(args.modality)]
         run_command(

@@ -479,7 +479,7 @@ class BraTS2020Dataset(Dataset):
         self.rng = np.random.default_rng(noise_seed)
         if num_workers is None:
             num_workers = int(os.environ.get("BRATS_NUM_WORKERS", "0")) or min(
-                32, (os.cpu_count() or 4)
+                96, (os.cpu_count() or 4)
             )
         self.num_workers = max(1, int(num_workers))
         self.use_cache = bool(use_cache) and os.environ.get("BRATS_NO_CACHE", "") != "1"

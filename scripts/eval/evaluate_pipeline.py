@@ -305,6 +305,17 @@ def main():
         "0이면 비활성. 권장 700 (active~skip 사이는 shrink)",
     )
     parser.add_argument(
+        "--soft_routing",
+        action="store_true",
+        help="Stage 2: 소프트맥스 가중 합산 Soft Expert Mixture 활성화",
+    )
+    parser.add_argument(
+        "--enable_kaist_postproc",
+        action="store_true",
+        default=True,
+        help="KAIST 1위 대회 기법: 미세 ET 노이즈 파편(<15px) 후처리 제거 활성화",
+    )
+    parser.add_argument(
         "--eval_batch_size",
         type=int,
         default=64,
@@ -600,14 +611,14 @@ def main():
         elif args.oracle_routing:
             b_areas = [np.sum(gt_masks[batch_start + bi]) for bi in range(batch_end - batch_start)]
             b_route_cls = torch.tensor(
-                [0 if a < 300 else (1 if a < 700 else 2) for a in b_areas],
+                [0 if a < 200 else (1 if a < 500 else 2) for a in b_areas],
                 dtype=torch.long,
                 device=device,
             )
             
         with torch.no_grad():
             b_rough_t, b_class_preds, b_regions_t = pipeline(
-                b_img_t, true_class_preds=b_route_cls, return_regions=True
+                b_img_t, true_class_preds=b_route_cls, return_regions=True, soft_routing=args.soft_routing
             )
             if args.no_tta:
                 b_prob_tta_t, b_regions_tta_t = b_rough_t, b_regions_t
@@ -850,8 +861,12 @@ def main():
 
             final_regions_np = init_regions_np.copy()
             final_regions_np[2] = final_mask_np
-            final_regions_np[1] *= final_regions_np[2]
-            final_regions_np[0] *= final_regions_np[1]
+            final_regions_np[1] = np.minimum(final_regions_np[1], final_regions_np[2])
+            final_regions_np[0] = np.minimum(final_regions_np[0], final_regions_np[1])
+            if getattr(args, "enable_kaist_postproc", True):
+                final_regions_np[0] = filter_small_components(final_regions_np[0], min_size=15)
+                final_regions_np[1] = np.maximum(final_regions_np[1], final_regions_np[0])
+                final_regions_np[2] = np.maximum(final_regions_np[2], final_regions_np[1])
             for region_idx, region_name in enumerate(task1_names):
                 gt_region = gt_task1_regions[i, region_idx]
                 init_region = init_regions_np[region_idx]

@@ -170,22 +170,38 @@ class AdaptivePipeline(nn.Module):
         wt = torch.maximum(probs[:, 2:3], tc)
         return torch.cat([et, tc, wt], dim=1)
 
-    def forward(self, x, true_class_preds=None, return_regions=False):
+    def forward(self, x, true_class_preds=None, return_regions=False, soft_routing=False):
         """
         x: (B, C, H, W) — C는 중심 모달리티이거나 2.5D(3C).
+        soft_routing: True일 경우 3가지 Expert의 예측값을 분류기 Softmax 확률로 가중합산합니다.
         """
+        x_cls = self._match_in_channels(x, self.cls_in_channels)
+        class_logits = self.classifier(x_cls)
+        
         if true_class_preds is not None:
             class_preds = true_class_preds
         else:
-            x_cls = self._match_in_channels(x, self.cls_in_channels)
-            class_logits = self.classifier(x_cls)
             _, class_preds = torch.max(class_logits, 1)
         
         B, C, H, W = x.shape
+        experts = [self.expert_small, self.expert_medium, self.expert_large]
+        
+        if soft_routing:
+            weights = torch.softmax(class_logits, dim=1) # (B, 3)
+            region_probs = torch.zeros((B, 3, H, W), device=x.device, dtype=x.dtype)
+            for c, expert in enumerate(experts):
+                logits = self._forward_expert(expert, x)
+                regions = self._to_task1_probs(logits)
+                w_c = weights[:, c:c+1, None, None] # (B, 1, 1, 1)
+                region_probs += w_c * regions
+            rough_masks = region_probs[:, 2:3]
+            if return_regions:
+                return rough_masks, class_preds, region_probs
+            return rough_masks, class_preds
+
         rough_masks = torch.zeros((B, 1, H, W), device=x.device, dtype=x.dtype)
         region_probs = torch.zeros((B, 3, H, W), device=x.device, dtype=x.dtype)
         
-        experts = [self.expert_small, self.expert_medium, self.expert_large]
         for c, expert in enumerate(experts):
             idx = (class_preds == c).nonzero(as_tuple=True)[0]
             if idx.numel() == 0:
@@ -209,3 +225,4 @@ class AdaptivePipeline(nn.Module):
         if return_regions:
             return rough_masks, class_preds, region_probs
         return rough_masks, class_preds
+

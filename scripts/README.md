@@ -1,33 +1,16 @@
-Active pipeline entrypoints
+Active Pipeline Entrypoints
 ==========================
 
-Use `run_pipeline.py` from the repository root.
+Use `run_pipeline.py` from the repository root to launch the full 4-stage pipeline.
 
-Current 4-stage flow:
+Current 4-Stage Flow:
+1. `scripts/train/train_shape_classifier.py` (Stage 1: Shape Classifier, ResNet-18 P2)
+2. `scripts/train/train_stage2_all.py` (Stage 2: Experts - CaraNet 2.5D, UNet++, SegResNet)
+3. `scripts/train/train_ppo_mask_refiner.py` (Stage 3: Alternating SL / PPO Refiner)
+4. `scripts/eval/evaluate_pipeline.py` (Stage 4: Evaluation - BraTS Multi-Region ET/TC/WT)
 
-1. `scripts/train/train_shape_classifier.py`
-2. `scripts/train/train_stage2_all.py`
-3. `scripts/train/train_ppo_mask_refiner.py`
-4. `scripts/eval/evaluate_pipeline.py`
-
-Required helper scripts:
-
+Required Helper Scripts:
 - `scripts/train/train_caranet.py`
 - `scripts/train/train_unetplusplus.py`
 - `scripts/train/train_segresnet.py`
-- `scripts/train/train_agent.py`
 - `scripts/eval/paired_stats.py`
-
-Stage 3 is a single PPO mask refiner:
-
-- checkpoint: `checkpoints/ppo_mask_refiner.zip`
-- metadata: `checkpoints/ppo_mask_refiner.json`
-- no `ppo_small.zip`, `ppo_medium.zip`, or `ppo_large.zip` in the active pipeline
-
-Legacy / experiment-only files
-==============================
-
-Files under `scripts/legacy/` may reference older class-wise PPO checkpoints,
-paper-generation utilities, standalone simulations, or obsolete comparison
-experiments. They are kept for reproducibility, but `run_pipeline.py` does not
-call them.

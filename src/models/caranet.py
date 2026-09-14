@@ -57,6 +57,8 @@ class ReverseAttention(nn.Module):
         x = self.conv1(x)
         # prior_map: 이전 단계의 전역 예측 (Global Prediction)
         prior_map = F.interpolate(prior_map, size=x.size()[2:], mode='bilinear', align_corners=False)
+        if prior_map.size(1) > 1:
+            prior_map = prior_map.mean(dim=1, keepdim=True)
         # 역어텐션: 확실한 부분을 지우고 경계선 및 놓친 픽셀에 집중
         reverse_map = -1 * (torch.sigmoid(prior_map)) + 1
         x = x * reverse_map

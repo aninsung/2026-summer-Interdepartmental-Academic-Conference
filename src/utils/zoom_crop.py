@@ -19,21 +19,34 @@ def crop_box(h: int, w: int, cy: int, cx: int, patch: int) -> Tuple[int, int, in
 
 
 def _com_from_mask(mask: np.ndarray) -> Tuple[int, int]:
-    h, w = mask.shape
-    if float(mask.sum()) <= 0:
+    mask2d = np.squeeze(mask)
+    while mask2d.ndim > 2:
+        mask2d = mask2d[0]
+    if mask2d.ndim < 2:
+        return 64, 64
+    h, w = mask2d.shape
+    binary = mask2d > 0.5
+    if not np.any(binary):
         return h // 2, w // 2
-    cy, cx = center_of_mass(mask > 0.5)
-    return int(cy), int(cx)
+    res = center_of_mass(binary)
+    if np.isnan(res[0]) or np.isnan(res[1]):
+        return h // 2, w // 2
+    return int(res[0]), int(res[1])
 
 
 def largest_component_com(mask: np.ndarray) -> Tuple[int, int]:
-    binary = mask > 0.5
+    mask2d = np.squeeze(mask)
+    while mask2d.ndim > 2:
+        mask2d = mask2d[0]
+    if mask2d.ndim < 2:
+        return 64, 64
+    binary = mask2d > 0.5
     if not np.any(binary):
-        h, w = mask.shape
+        h, w = mask2d.shape
         return h // 2, w // 2
     labeled, n = label(binary)
     if n == 0:
-        return _com_from_mask(mask)
+        return _com_from_mask(mask2d)
     sizes = [(labeled == i).sum() for i in range(1, n + 1)]
     k = 1 + int(np.argmax(sizes))
     return _com_from_mask((labeled == k).astype(np.float32))
@@ -46,12 +59,18 @@ def zoom_tensors(
     out_size: int = 128,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """GT 중심으로 patch를 잘라 out_size로 확대. image (C,H,W), gt (1,H,W)."""
-    _, h, w = image.shape
-    gt2d = gt.squeeze(0).cpu().numpy() if gt.ndim == 3 else gt.cpu().numpy()
+    _, h, w = image.shape[-3], image.shape[-2], image.shape[-1]
+    gt2d = np.squeeze(gt.cpu().numpy())
+    while gt2d.ndim > 2:
+        gt2d = gt2d[0]
     cy, cx = _com_from_mask(gt2d)
     y1, x1, y2, x2 = crop_box(h, w, cy, cx, patch_size)
-    img_c = image[:, y1:y2, x1:x2].unsqueeze(0)
-    gt_c = gt[:, y1:y2, x1:x2].unsqueeze(0)
+    img_c = image[..., y1:y2, x1:x2]
+    if img_c.ndim == 3:
+        img_c = img_c.unsqueeze(0)
+    gt_c = gt[..., y1:y2, x1:x2]
+    if gt_c.ndim == 3:
+        gt_c = gt_c.unsqueeze(0)
     img_z = F.interpolate(img_c, size=(out_size, out_size), mode="bilinear", align_corners=False)
     gt_z = F.interpolate(gt_c, size=(out_size, out_size), mode="nearest")
     return img_z.squeeze(0), gt_z.squeeze(0)

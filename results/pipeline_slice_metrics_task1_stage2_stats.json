@@ -5,25 +5,25 @@
         "metric": "ET DSC",
         "n_slices": 14561,
         "n_patients": 250,
-        "slice_mean_init": 0.7840931414022125,
-        "slice_mean_final": 0.7821365489697937,
-        "slice_delta": -0.0019565924324188577,
+        "slice_mean_init": 0.7872728825139669,
+        "slice_mean_final": 0.7872728825139669,
+        "slice_delta": 0.0,
         "cluster_bootstrap_95ci": {
-          "low": -0.002874724257652325,
-          "high": -0.0011574248845904916,
+          "low": 0.0,
+          "high": 0.0,
           "on": "signed_improvement"
         },
-        "patient_mean_init": 0.7820531246900838,
-        "patient_mean_final": 0.7802652063223285,
-        "patient_delta": -0.001787918367755178,
+        "patient_mean_init": 0.7841326734302044,
+        "patient_mean_final": 0.7841326734302044,
+        "patient_delta": 0.0,
         "wilcoxon_patient": {
           "n": 250,
-          "p": 0.9999999996304032,
+          "p": NaN,
           "alternative": "greater (improvement)"
         },
         "wilcoxon_slice_anticonservative": {
           "n": 14561,
-          "p": 1.0,
+          "p": NaN,
           "note": "slices are not independent; do not use as primary p"
         },
         "by_class": {}
@@ -32,25 +32,25 @@
         "metric": "ET HD95",
         "n_slices": 14561,
         "n_patients": 250,
-        "slice_mean_init": 12.241659912135496,
-        "slice_mean_final": 12.348738644795482,
-        "slice_delta": 0.10707873265998558,
+        "slice_mean_init": 12.347010015330888,
+        "slice_mean_final": 12.347010015330888,
+        "slice_delta": 0.0,
         "cluster_bootstrap_95ci": {
-          "low": -0.16629767411905422,
-          "high": -0.052478954518009366,
+          "low": -0.0,
+          "high": 0.0,
           "on": "signed_improvement"
         },
-        "patient_mean_init": 12.21736979636908,
-        "patient_mean_final": 12.319659498387088,
-        "patient_delta": -0.10228970201800316,
+        "patient_mean_init": 12.356686791862211,
+        "patient_mean_final": 12.356686791862211,
+        "patient_delta": 0.0,
         "wilcoxon_patient": {
           "n": 250,
-          "p": 0.9999999854816394,
+          "p": NaN,
           "alternative": "greater (improvement)"
         },
         "wilcoxon_slice_anticonservative": {
           "n": 14561,
-          "p": 1.0,
+          "p": NaN,
           "note": "slices are not independent; do not use as primary p"
         },
         "by_class": {}
@@ -61,25 +61,25 @@
         "metric": "TC DSC",
         "n_slices": 14561,
         "n_patients": 250,
-        "slice_mean_init": 0.8034838795373669,
-        "slice_mean_final": 0.803480440300041,
-        "slice_delta": -3.4392373259306552e-06,
+        "slice_mean_init": 0.812003807371706,
+        "slice_mean_final": 0.812003807371706,
+        "slice_delta": 0.0,
         "cluster_bootstrap_95ci": {
-          "low": -8.39016769005052e-06,
-          "high": 4.5378908320181534e-07,
+          "low": 0.0,
+          "high": 0.0,
           "on": "signed_improvement"
         },
-        "patient_mean_init": 0.7972909065438709,
-        "patient_mean_final": 0.7972877358435637,
-        "patient_delta": -3.1707003071141935e-06,
+        "patient_mean_init": 0.8034782105961215,
+        "patient_mean_final": 0.8034782105961215,
+        "patient_delta": 0.0,
         "wilcoxon_patient": {
           "n": 250,
-          "p": 0.9319513094428031,
+          "p": NaN,
           "alternative": "greater (improvement)"
         },
         "wilcoxon_slice_anticonservative": {
           "n": 14561,
-          "p": 0.9135225410057897,
+          "p": NaN,
           "note": "slices are not independent; do not use as primary p"
         },
         "by_class": {}
@@ -88,25 +88,25 @@
         "metric": "TC HD95",
         "n_slices": 14561,
         "n_patients": 250,
-        "slice_mean_init": 11.425502489452796,
-        "slice_mean_final": 11.425522276457686,
-        "slice_delta": 1.9787004889693094e-05,
+        "slice_mean_init": 11.53202803425313,
+        "slice_mean_final": 11.53202803425313,
+        "slice_delta": 0.0,
         "cluster_bootstrap_95ci": {
-          "low": -0.00010414244289265184,
-          "high": 4.383539308037143e-05,
+          "low": -0.0,
+          "high": 0.0,
           "on": "signed_improvement"
         },
-        "patient_mean_init": 11.394342829189048,
-        "patient_mean_final": 11.394367080054316,
-        "patient_delta": -2.4250865269088706e-05,
+        "patient_mean_init": 11.52193574421673,
+        "patient_mean_final": 11.52193574421673,
+        "patient_delta": 0.0,
         "wilcoxon_patient": {
           "n": 250,
-          "p": 0.7035099509912867,
+          "p": NaN,
           "alternative": "greater (improvement)"
         },
         "wilcoxon_slice_anticonservative": {
           "n": 14561,
-          "p": 0.7673955907739292,
+          "p": NaN,
           "note": "slices are not independent; do not use as primary p"
         },
         "by_class": {}
@@ -117,25 +117,25 @@
         "metric": "WT DSC",
         "n_slices": 14561,
         "n_patients": 250,
-        "slice_mean_init": 0.8726022569237227,
-        "slice_mean_final": 0.8725448552059012,
-        "slice_delta": -5.740171782153691e-05,
+        "slice_mean_init": 0.875758053984489,
+        "slice_mean_final": 0.875758053984489,
+        "slice_delta": 0.0,
         "cluster_bootstrap_95ci": {
-          "low": -0.00012383135885271347,
-          "high": 7.077723894888187e-06,
+          "low": 0.0,
+          "high": 0.0,
           "on": "signed_improvement"
         },
-        "patient_mean_init": 0.8668918252542729,
-        "patient_mean_final": 0.8668338201951798,
-        "patient_delta": -5.800505909315956e-05,
+        "patient_mean_init": 0.8710910415325126,
+        "patient_mean_final": 0.8710910415325126,
+        "patient_delta": 0.0,
         "wilcoxon_patient": {
           "n": 250,
-          "p": 0.9250573307733747,
+          "p": NaN,
           "alternative": "greater (improvement)"
         },
         "wilcoxon_slice_anticonservative": {
           "n": 14561,
-          "p": 0.996395858916522,
+          "p": NaN,
           "note": "slices are not independent; do not use as primary p"
         },
         "by_class": {}
@@ -144,25 +144,25 @@
         "metric": "WT HD95",
         "n_slices": 14561,
         "n_patients": 250,
-        "slice_mean_init": 2.247300711912031,
-        "slice_mean_final": 2.2481815023589715,
-        "slice_delta": 0.0008807904469403383,
+        "slice_mean_init": 2.1083533054740005,
+        "slice_mean_final": 2.1083533054740005,
+        "slice_delta": 0.0,
         "cluster_bootstrap_95ci": {
-          "low": -0.0021749023678294343,
-          "high": 0.0004268037172298621,
+          "low": -0.0,
+          "high": 0.0,
           "on": "signed_improvement"
         },
-        "patient_mean_init": 2.382511716738265,
-        "patient_mean_final": 2.3838452887979487,
-        "patient_delta": -0.0013335720596843405,
+        "patient_mean_init": 2.184052588735119,
+        "patient_mean_final": 2.184052588735119,
+        "patient_delta": 0.0,
         "wilcoxon_patient": {
           "n": 250,
-          "p": 0.976539775701392,
+          "p": NaN,
           "alternative": "greater (improvement)"
         },
         "wilcoxon_slice_anticonservative": {
           "n": 14561,
-          "p": 0.985608205398618,
+          "p": NaN,
           "note": "slices are not independent; do not use as primary p"
         },
         "by_class": {}
