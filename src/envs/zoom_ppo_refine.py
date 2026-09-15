@@ -106,6 +106,7 @@ def refine_zoom_ppo(
     prob_map: np.ndarray,
     refinement_mode: str,
     *,
+    target_region: int = 0,
     device: str = "cuda",
     enable_stop: bool = True,
     strategy: Optional[ClassRefineStrategy] = None,
@@ -132,11 +133,18 @@ def refine_zoom_ppo(
 
     init = np.asarray(init_mask, dtype=np.float32)
     prob = np.asarray(prob_map, dtype=np.float32)
-    # Env still needs a GT tensor for internal reward channels; deploy must not
-    # use it for mask selection (gt_free=True).
     gt_np = np.asarray(gt, dtype=np.float32) if gt is not None else np.zeros_like(init)
-    band = predicted_boundary_band(init, strat.band_px)
-    mean_u = band_mean_uncertainty(prob, band)
+    
+    # 3-channel 지원 (C, H, W). 만약 2D(H, W)라면 target_region을 무시하고 그대로 사용합니다.
+    if init.ndim == 3:
+        target_init = init[target_region]
+        target_prob = prob[target_region]
+    else:
+        target_init = init
+        target_prob = prob
+        
+    band = predicted_boundary_band(target_init, strat.band_px)
+    mean_u = band_mean_uncertainty(target_prob, band)
     if strat.ppo_gate_uncert > 0.0 and mean_u < strat.ppo_gate_uncert:
         return init.copy()
 
@@ -149,8 +157,8 @@ def refine_zoom_ppo(
             k = min(k, 1 if refinement_mode == "small" else (3 if refinement_mode == "medium" else 2))
     rng = np.random.default_rng(seed)
     centers = sample_band_centers(
-        init,
-        prob,
+        target_init,
+        target_prob,
         strat.band_px,
         k,
         rng,
@@ -182,20 +190,34 @@ def refine_zoom_ppo(
     for pi, (cy, cx) in enumerate(centers):
         env.rough_masks = out[None].astype(np.float32)
         env._rough_t = torch.as_tensor(out[None], device=env.device, dtype=torch.float32)
-        obs, _ = env.reset(seed=seed + pi, options={"zoom_center": (cy, cx)})
-        cur = env._current_mask.copy()
-        best = cur.copy()
+        obs, _ = env.reset(seed=seed + pi, options={"zoom_center": (cy, cx), "target_region": target_region})
+        
+        # 3채널이면 target_region 채널을 추적
+        if out.ndim == 3:
+            cur = env._current_mask[target_region].copy()
+            best = cur.copy()
+            c_gt = gt_np[target_region]
+            c_out = out[target_region]
+        else:
+            cur = env._current_mask.copy()
+            best = cur.copy()
+            c_gt = gt_np
+            c_out = out
+            
         if not gt_free:
-            best_d = float(dice(best, gt_np))
+            best_d = float(dice(best, c_gt))
             best_b = float(
-                dice(best * band.astype(np.float32), gt_np * band.astype(np.float32))
+                dice(best * band.astype(np.float32), c_gt * band.astype(np.float32))
             )
+            
         for _ in range(n_steps):
             action, _ = agent.predict(obs, deterministic=True)
             obs, _, term, trunc, info = env.step(action)
-            cur = env._current_mask.copy()
+            
+            cur = env._current_mask[target_region].copy() if out.ndim == 3 else env._current_mask.copy()
+            
             if not gt_free:
-                cur_d = float(info.get("dsc", dice(cur, gt_np)))
+                cur_d = float(info.get("dsc", dice(cur, c_gt)))
                 cur_b = float(info.get("boundary_dsc", best_b))
                 if (cur_d > best_d + 1e-4) or (cur_b > best_b + 1e-4):
                     best_d, best_b, best = cur_d, cur_b, cur
@@ -204,13 +226,21 @@ def refine_zoom_ppo(
                 best = cur
             if term or trunc:
                 break
-        prev = out.copy()
-        changed = (best > 0.5) != (out > 0.5)
+                
+        prev = c_out.copy()
+        changed = (best > 0.5) != (c_out > 0.5)
         apply = changed & band
-        out = out.copy()
-        out[apply] = best[apply]
-        if gt_free and not _proxy_accept(prev, out, prob, band, refinement_mode):
-            out = prev
+        
+        new_c_out = c_out.copy()
+        new_c_out[apply] = best[apply]
+        
+        if gt_free and not _proxy_accept(prev, new_c_out, target_prob, band, refinement_mode):
+            new_c_out = prev
+            
+        if out.ndim == 3:
+            out[target_region] = new_c_out
+        else:
+            out = new_c_out
 
     return out.astype(np.float32)
 

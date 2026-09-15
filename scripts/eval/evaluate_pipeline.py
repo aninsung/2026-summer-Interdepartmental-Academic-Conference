@@ -691,10 +691,12 @@ def main():
             
             valid_comp_indices = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 5]
             
-            final_mask_np = np.zeros_like(rough_mask_np)
+            final_regions_merged = np.zeros_like(init_regions_np)
             for k in range(1, num_feats + 1):
                 if k not in valid_comp_indices:
-                    final_mask_np = np.maximum(final_mask_np, (lbl == k).astype(np.float32))
+                    # 유효하지 않은 컴포넌트는 초기 마스크(3채널)를 그대로 병합
+                    comp_mask = (lbl == k).astype(np.float32)
+                    final_regions_merged = np.maximum(final_regions_merged, init_regions_np * comp_mask)
                     
             for k in valid_comp_indices:
                 comp_mask_k = (lbl == k).astype(np.float32)
@@ -705,142 +707,59 @@ def main():
                 sl_k = sl_nets[ck]
                 ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
 
-                if ck in skip_classes or (agent_k is None and sl_k is None):
-                    final_mask_np = np.maximum(final_mask_np, comp_mask_k)
-                    continue
-
-                med_active = float(args.medium_active_max_area)
-                med_skip = float(args.medium_skip_min_area)
-                if ck == 1 and med_skip > 0 and comp_area >= med_skip:
-                    final_mask_np = np.maximum(final_mask_np, comp_mask_k)
-                    continue
-
                 struct_k = np.ones((3, 3))
                 dilate_iter = 2 if ck == 0 else 3
                 comp_dilated = binary_dilation(comp_mask_k, struct_k, iterations=dilate_iter)
-                comp_init = comp_mask_k.copy()
-                soft_prob = (prob_tta_np * comp_dilated).astype(np.float32)
-                if float(np.sum(soft_prob)) == 0.0:
-                    soft_prob = (rough_prob_np * comp_dilated).astype(np.float32)
+                
+                # 3채널 확률과 초기 마스크를 해당 컴포넌트 구역(dilated)으로 제한
+                soft_prob_3d = (region_prob_tta_np * comp_dilated).astype(np.float32)
+                comp_init_3d = (init_regions_np * comp_dilated).astype(np.float32)
+
+                if ck in skip_classes or (agent_k is None and sl_k is None):
+                    final_regions_merged = np.maximum(final_regions_merged, comp_init_3d)
+                    continue
+
+                med_skip = float(args.medium_skip_min_area)
+                if ck == 1 and med_skip > 0 and comp_area >= med_skip:
+                    final_regions_merged = np.maximum(final_regions_merged, comp_init_3d)
+                    continue
 
                 if args.confidence_threshold is not None:
-                    nz = comp_init > 0.5
+                    nz = comp_mask_k > 0.5
                     mean_p = float(np.mean(prob_tta_np[nz])) if np.any(nz) else 0.0
                     if mean_p >= args.confidence_threshold:
-                        final_mask_np = np.maximum(final_mask_np, comp_init)
+                        final_regions_merged = np.maximum(final_regions_merged, comp_init_3d)
                         continue
 
-                if sl_k is not None:
-                    img_2d = images[i]
-                    use_band = ck in band_classes and int(args.boundary_band_px) > 0
-                    band_mode = band_mode_by_class.get(ck, args.boundary_band_mode)
-                    if ck == 1 and med_active > 0 and comp_area < med_active:
-                        use_band = False
-                        band_mode = "replace"
-                        active_cand = max(float(args.sl_cand_thr), 0.65)
-                    elif ck == 1 and med_active > 0 and (med_skip <= 0 or comp_area < med_skip):
-                        use_band = True
-                        band_mode = band_mode_by_class.get(ck, args.boundary_band_mode)
-                        active_cand = None
-                        if 1 not in band_classes and int(args.boundary_band_px) > 0:
-                            use_band = int(args.boundary_band_px) > 0
-                    else:
-                        active_cand = None
-                    use_zoom = (
-                        use_band
-                        and band_mode == "shrink"
-                        and int(args.sl_zoom_patches) > 0
-                        and ck in (1, 2)
-                    )
-                    refined_k_mask = apply_sl_refiner(
-                        sl_k,
-                        img_2d,
-                        comp_init,
-                        soft_prob,
-                        device,
-                        cand_thr=(
-                            active_cand
-                            if active_cand is not None
-                            else (args.sl_cand_thr_boundary if use_band else args.sl_cand_thr)
-                        ),
-                        morph_small=(ck == 0),
-                        boundary_band_px=(int(args.boundary_band_px) if use_band else 0),
-                        boundary_mode=(band_mode if use_band else "replace"),
-                        zoom_n_patches=(int(args.sl_zoom_patches) if use_zoom else 0),
-                        zoom_patch=int(args.sl_zoom_patch),
-                        zoom_seed=(i * 1009 + k),
-                    )
-                elif agent_k is not None:
-                    use_band = False
-                    band_mode = args.boundary_band_mode
+                # PPO 3채널 순차 적용 (WT -> TC -> ET)
+                if agent_k is not None and sl_k is None:
                     from src.envs.zoom_ppo_refine import refine_zoom_ppo
-                    refined_k_mask = refine_zoom_ppo(
-                        agent_k,
-                        images[i],
-                        gt_masks[i],
-                        comp_init,
-                        soft_prob,
-                        ref_mode_k,
-                        device=str(device),
-                        enable_stop=enable_stop,
-                        seed=(i * 1009 + k),
-                        gt_free=bool(args.deploy_mode),
-                    )
+                    refined_3d = comp_init_3d.copy()
+                    
+                    for target_reg in (2, 1, 0):
+                        refined_3d = refine_zoom_ppo(
+                            agent_k,
+                            images[i, :1] if images[i].ndim == 3 and images[i].shape[0] > 1 else images[i],
+                            gt_task1_regions[i],
+                            refined_3d,
+                            soft_prob_3d,
+                            ref_mode_k,
+                            target_region=target_reg,
+                            device=str(device),
+                            enable_stop=enable_stop,
+                            seed=(i * 1009 + k + target_reg),
+                            gt_free=bool(args.deploy_mode),
+                        )
+                        
+                    refined_k_mask = refined_3d
                 else:
-                    use_band = False
-                    band_mode = args.boundary_band_mode
-                    refined_k_mask = comp_init.copy()
+                    # SL Refiner 등 레거시 처리 (여기서는 PPO만 가정하므로 그대로 패스)
+                    refined_k_mask = comp_init_3d.copy()
+                    
+                final_regions_merged = np.maximum(final_regions_merged, refined_k_mask)
 
-                if args.stage3_mode == "hybrid" and agent_k is not None and sl_k is not None:
-                    from src.envs.zoom_ppo_refine import refine_zoom_ppo
-                    refined_k_mask = refine_zoom_ppo(
-                        agent_k,
-                        images[i],
-                        gt_masks[i],
-                        refined_k_mask,
-                        soft_prob,
-                        ref_mode_k,
-                        device=str(device),
-                        enable_stop=enable_stop,
-                        seed=(i * 1009 + k + 17),
-                        gt_free=bool(args.deploy_mode),
-                    )
-                if np.sum(refined_k_mask) > 0:
-                    if use_band and band_mode == "shrink":
-                        refined_k_mask = np.minimum(refined_k_mask, comp_init)
-                    else:
-                        closed = binary_closing(refined_k_mask, struct_k).astype(np.float32)
-                        if use_band and band_mode == "expand":
-                            refined_k_mask = np.maximum(closed, comp_init)
-                        else:
-                            refined_k_mask = closed
-                if np.sum(refined_k_mask) == 0 or not _gt_free_accept(
-                    comp_init, refined_k_mask, lo=area_lo, hi=area_hi_by_class[int(c)]
-                ):
-                    refined_k_mask = comp_init
-                if apply_monotonic:
-                    refined_k_mask = apply_monotonic_dsc_gate(comp_init, refined_k_mask, gt_np)
-                final_mask_np = np.maximum(final_mask_np, refined_k_mask)
-
-            if not _gt_free_accept(
-                rough_mask_np, final_mask_np, lo=area_lo, hi=area_hi_by_class[int(c)]
-            ):
-                r_area = max(1.0, float(np.sum(rough_mask_np)))
-                f_area = float(np.sum(final_mask_np))
-                expand_hi = max(float(area_hi_by_class[int(c)]), 1.6 if int(c) == 1 else 1.45)
-                if not (
-                    args.boundary_band_mode == "expand"
-                    and int(c) in (1, 2)
-                    and f_area >= area_lo * r_area
-                    and f_area <= expand_hi * r_area
-                ):
-                    final_mask_np = rough_mask_np
-
-            if apply_monotonic:
-                gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
-                if not np.array_equal(gated_mask, final_mask_np):
-                    monotonic_reverts += 1
-                final_mask_np = gated_mask
+            final_regions_np = final_regions_merged.copy()
+            final_mask_np = final_regions_np[2]  # WT
 
             # Fast metric computation: reuse init values if mask was unchanged
             if np.array_equal(final_mask_np, rough_mask_np):
@@ -859,14 +778,14 @@ def main():
             class_final_dsc[c].append(fin_dsc)
             class_final_hd95[c].append(fin_hd95)
 
-            final_regions_np = init_regions_np.copy()
-            final_regions_np[2] = final_mask_np
+            # 논리적 제약사항 (ET ⊆ TC ⊆ WT) 재적용
             final_regions_np[1] = np.minimum(final_regions_np[1], final_regions_np[2])
             final_regions_np[0] = np.minimum(final_regions_np[0], final_regions_np[1])
             if getattr(args, "enable_kaist_postproc", True):
                 final_regions_np[0] = filter_small_components(final_regions_np[0], min_size=15)
                 final_regions_np[1] = np.maximum(final_regions_np[1], final_regions_np[0])
                 final_regions_np[2] = np.maximum(final_regions_np[2], final_regions_np[1])
+
             for region_idx, region_name in enumerate(task1_names):
                 gt_region = gt_task1_regions[i, region_idx]
                 init_region = init_regions_np[region_idx]
