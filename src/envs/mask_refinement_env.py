@@ -55,7 +55,7 @@ class MaskRefinementEnv(gym.Env):
     def __init__(
         self,
         images: np.ndarray,  # (N, H, W) or (N, C, H, W) float32
-        gt_masks: np.ndarray,  # (N, H, W) float32
+        gt_masks: np.ndarray,  # (N, H, W) or (N, C, H, W) float32
         rough_masks: np.ndarray,  # (N, H, W) float32
         uncertainty_maps: np.ndarray = None,  # (N, H, W) float32
         max_steps: int = 20,
@@ -165,16 +165,29 @@ class MaskRefinementEnv(gym.Env):
         else:
             imgs_t = _to_device(images, self.device)
         self._images_t = imgs_t
-        self._gt_t = _to_device(gt_masks, self.device)
-        self._rough_t = _to_device(rough_masks, self.device)
-
-        if uncertainty_maps is not None:
-            self._prob_t = _to_device(uncertainty_maps, self.device)
-            self.probability_maps = np.asarray(uncertainty_maps, dtype=np.float32)
+        
+        if gt_masks.ndim == 3:
+            self.num_classes = 1
+            self._gt_t = _to_device(gt_masks, self.device).unsqueeze(1)
+            self._rough_t = _to_device(rough_masks, self.device).unsqueeze(1)
+            if uncertainty_maps is not None:
+                self._prob_t = _to_device(uncertainty_maps, self.device).unsqueeze(1)
+                self.probability_maps = np.asarray(uncertainty_maps, dtype=np.float32)[:, None]
         else:
+            self.num_classes = gt_masks.shape[1]
+            self._gt_t = _to_device(gt_masks, self.device)
+            self._rough_t = _to_device(rough_masks, self.device)
+            if uncertainty_maps is not None:
+                self._prob_t = _to_device(uncertainty_maps, self.device)
+                self.probability_maps = np.asarray(uncertainty_maps, dtype=np.float32)
+
+        if uncertainty_maps is None:
             probs = []
             for i in range(N):
-                probs.append(tops.gaussian_blur2d(self._rough_t[i], sigma=2.0))
+                c_probs = []
+                for c in range(self.num_classes):
+                    c_probs.append(tops.gaussian_blur2d(self._rough_t[i, c], sigma=2.0))
+                probs.append(torch.stack(c_probs, 0))
             self._prob_t = torch.stack(probs, 0)
             self.probability_maps = self._prob_t.detach().cpu().numpy()
 
@@ -216,11 +229,11 @@ class MaskRefinementEnv(gym.Env):
                 self.action_space = spaces.MultiDiscrete([5] * 8)
 
         self._idx = 0
-        self._mask = torch.zeros(H, W, device=self.device, dtype=torch.float32)
+        self._mask = torch.zeros(self.num_classes, H, W, device=self.device, dtype=torch.float32)
         self._image = torch.zeros(self.img_ch, H, W, device=self.device, dtype=torch.float32)
-        self._prob = torch.zeros(H, W, device=self.device, dtype=torch.float32)
+        self._prob = torch.zeros(self.num_classes, H, W, device=self.device, dtype=torch.float32)
         self._edge = torch.zeros(H, W, device=self.device, dtype=torch.float32)
-        self._gt = torch.zeros(H, W, device=self.device, dtype=torch.float32)
+        self._gt = torch.zeros(self.num_classes, H, W, device=self.device, dtype=torch.float32)
         self._min_mask_limit = torch.zeros(H, W, device=self.device, dtype=torch.float32)
         self._max_mask_limit = torch.zeros(H, W, device=self.device, dtype=torch.float32)
         self._boundary_band = torch.zeros(H, W, device=self.device, dtype=torch.bool)
@@ -230,6 +243,7 @@ class MaskRefinementEnv(gym.Env):
         self._ys = torch.arange(H, device=self.device, dtype=torch.float32)
         self._xs = torch.arange(W, device=self.device, dtype=torch.float32)
         self._YY, self._XX = torch.meshgrid(self._ys, self._xs, indexing="ij")
+        self._target_region = 0
         self._step_count = 0
         self._prev_dsc = 0.0
         self._prev_boundary_dsc = 0.0
@@ -291,10 +305,10 @@ class MaskRefinementEnv(gym.Env):
         """Uncertainty-weighted point on action band; Small falls back to lesion centroid."""
         band = self._action_band
         if self.refinement_mode == "small" and not bool(band.any()):
-            cy, cx = tops.largest_component_centroid(self._mask)
+            cy, cx = tops.largest_component_centroid(self._mask[self._target_region])
             return int(cy), int(cx)
         if not bool(band.any()):
-            cy, cx = tops.largest_component_centroid(self._mask)
+            cy, cx = tops.largest_component_centroid(self._mask[self._target_region])
             return int(cy), int(cx)
         uncert = 1.0 - (2.0 * self._prob - 1.0).abs().clamp(0.0, 1.0)
         w = torch.where(band, uncert, torch.zeros_like(uncert))
@@ -331,7 +345,7 @@ class MaskRefinementEnv(gym.Env):
             obs = torch.cat(
                 [img, self._mask[None], self._prob[None], self._edge[None]], dim=0
             )
-            cy, cx = tops.largest_component_centroid(self._mask)
+            cy, cx = tops.largest_component_centroid(self._mask[self._target_region])
             return (
                 self._crop_zoom(obs, int(cy), int(cx))
                 .detach()
@@ -443,9 +457,15 @@ class MaskRefinementEnv(gym.Env):
         self._prob = self._prob_t[self._idx].clone()
         self._edge = self._edge_t[self._idx].clone()
         self._gt = self._gt_t[self._idx].clone()
+        self._target_region = 0
+        if options is not None and "target_region" in options:
+            self._target_region = options["target_region"]
+        elif self.num_classes == 3:
+            self._target_region = 2  # default to WT
+            
         self._step_count = 0
 
-        rough_bool = self._mask > 0.5
+        rough_bool = self._mask[self._target_region] > 0.5
         # under: 확장을 넓게 허용 / 과도한 내부 붕괴 방지
         if self.seg_bias == "under" and self.refinement_mode in ("medium", "large"):
             self._min_mask_limit = tops.binary_erosion(rough_bool, kernel=3, iterations=4).float()
@@ -459,7 +479,7 @@ class MaskRefinementEnv(gym.Env):
         eroded_gt = tops.binary_erosion(gt_bool, kernel=7, iterations=1)
         self._boundary_band = dilated_gt ^ eroded_gt
         # Reward용 GT 밴드와 별개: 액션은 예측(rough) 경계 밴드만 사용
-        self._action_band = self._predicted_action_band(self._mask > 0.5)
+        self._action_band = self._predicted_action_band(self._mask[self._target_region] > 0.5)
 
         opts = options or {}
         self._lock_zoom_center = False
@@ -469,7 +489,7 @@ class MaskRefinementEnv(gym.Env):
             self._lock_zoom_center = True
         elif self.use_zoom_obs:
             if self.refinement_mode == "small":
-                cy, cx = tops.largest_component_centroid(self._mask)
+                cy, cx = tops.largest_component_centroid(self._mask[self._target_region])
                 self._zoom_cy, self._zoom_cx = int(cy), int(cx)
             else:
                 # stochastic band sampling during training
@@ -481,18 +501,31 @@ class MaskRefinementEnv(gym.Env):
             self._zoom_cy, self._zoom_cx = self.H // 2, self.W // 2
         self._update_zoom_window()
 
-        self._prev_dsc = tops.dice(self._mask, self._gt)
-        self._initial_dsc = self._prev_dsc
-        self._prev_boundary_dsc = tops.dice(
-            self._mask * self._boundary_band.float(),
-            self._gt * self._boundary_band.float(),
-        )
-        self._initial_boundary_dsc = self._prev_boundary_dsc
-        self._gt_dist_map = tops.distance_transform_edt(~gt_bool)
-        self._prev_hd95 = tops.hd95(self._mask, self._gt, dist_b=self._gt_dist_map)
+        self._prev_dsc = []
+        self._prev_boundary_dsc = []
+        self._prev_hd95 = []
+        self._prev_perimeter = []
+        self._gt_dist_map = []
         
-        self._prev_perimeter = tops.perimeter(self._mask)
-        self._initial_perimeter = self._prev_perimeter
+        for k in range(self.num_classes):
+            c_mask = self._mask[k]
+            c_gt = self._gt[k]
+            c_gt_bool = c_gt > 0.5
+            
+            c_dist_map = tops.distance_transform_edt(~c_gt_bool)
+            self._gt_dist_map.append(c_dist_map)
+            
+            c_bb = self._boundary_band[k].float() if self._boundary_band.ndim == 3 else self._boundary_band.float()
+            
+            self._prev_dsc.append(tops.dice(c_mask, c_gt))
+            self._prev_boundary_dsc.append(tops.dice(c_mask * c_bb, c_gt * c_bb))
+            self._prev_hd95.append(tops.hd95(c_mask, c_gt, dist_b=c_dist_map))
+            self._prev_perimeter.append(tops.perimeter(c_mask))
+            
+        self._gt_dist_map = torch.stack(self._gt_dist_map, 0)
+        self._initial_dsc = list(self._prev_dsc)
+        self._initial_boundary_dsc = list(self._prev_boundary_dsc)
+        self._initial_perimeter = list(self._prev_perimeter)
 
         return self._obs(), {
             "zoom_center": (int(self._zoom_cy), int(self._zoom_cx)),
@@ -520,23 +553,23 @@ class MaskRefinementEnv(gym.Env):
             else:
                 # Modest stop reward; bonus only for *improving* vs init (no absolute DSC jackpot).
                 # Old +50 at DSC>=0.85 made "STOP immediately" dominate when init already ~0.86.
-                delta = cur_dsc - float(self._initial_dsc)
+                delta = cur_dsc - float(self._initial_dsc[self._target_region])
                 reward = -float(self.step_penalty)
                 if delta > 1e-4:
                     reward += float(min(5.0, 50.0 * delta))
             self._step_count += 1
             info = {
                 "dsc": cur_dsc,
-                "boundary_dsc": float(self._prev_boundary_dsc),
+                "boundary_dsc": float(self._prev_boundary_dsc[self._target_region]),
                 "prev_dsc": cur_dsc,
-                "prev_boundary_dsc": float(self._prev_boundary_dsc),
+                "prev_boundary_dsc": float(self._prev_boundary_dsc[self._target_region]),
                 "delta_dsc": 0.0,
                 "delta_boundary": 0.0,
                 "stopped": True,
             }
             return self._obs(), float(reward), True, False, info
 
-        cy, cx = tops.largest_component_centroid(self._mask)
+        cy, cx = tops.largest_component_centroid(self._mask[self._target_region])
         angles = torch.atan2(self._YY - cy, self._XX - cx)
         sectors = ((angles + np.pi) / (2.0 * np.pi) * 8.0).long().clamp(0, 7)
 
@@ -544,8 +577,8 @@ class MaskRefinementEnv(gym.Env):
             sector_action, sectors
         )
 
-        sdf = tops.signed_distance(self._mask > 0.5)
-        shift_map = torch.zeros_like(self._mask)
+        sdf = tops.signed_distance(self._mask[self._target_region] > 0.5)
+        shift_map = torch.zeros_like(self._mask[self._target_region])
         num_non_keep = 0
 
         if self.refinement_mode == "small":
@@ -569,7 +602,7 @@ class MaskRefinementEnv(gym.Env):
                 shift_map[sectors == i] = shift_val
 
         # 로컬화: 예측 경계 밴드 ∩ zoom window (+불확실성 soft gate)
-        self._action_band = self._predicted_action_band(self._mask > 0.5)
+        self._action_band = self._predicted_action_band(self._mask[self._target_region] > 0.5)
         edit_region = self._action_band
         if self.use_zoom_obs:
             edit_region = edit_region & self._zoom_window
@@ -611,60 +644,114 @@ class MaskRefinementEnv(gym.Env):
                 keep_region = keep_region & self._zoom_window
             new_mask = torch.where(keep_region, new_mask, prev_f)
 
-        new_dsc = tops.dice(new_mask, self._gt)
-        new_boundary_dsc = tops.dice(
-            new_mask * self._boundary_band.float(),
-            self._gt * self._boundary_band.float(),
-        )
-        delta_dsc = new_dsc - self._prev_dsc
-        delta_boundary_dsc = new_boundary_dsc - self._prev_boundary_dsc
-
-        prev_hd95 = self._prev_hd95
-        curr_hd95 = tops.hd95(new_mask, self._gt, dist_b=self._gt_dist_map)
-        delta_hd95 = prev_hd95 - curr_hd95
-        self._prev_hd95 = curr_hd95
+        # PPO 다중 영역(WT/TC/ET) 보상 합산식 뼈대 구축
+        # 현재는 입력이 1채널이므로 1회 루프를 돌지만, 향후 3채널(WT/TC/ET)로 
+        # 확장될 경우 채널 차원에 맞춰 쉽게 확장할 수 있도록 설계합니다.
+        # r_t = \sum w_k [ a*\Delta DSC + b*\Delta SurfaceDice + c*\Delta HD95/s_k ] - \lambda*Cost
         
-        curr_perimeter = tops.perimeter(new_mask)
-        delta_perimeter = curr_perimeter - self._prev_perimeter
+        # 1채널 vs 다채널 호환성을 위해 unsqueeze 적용
+        nm = new_mask.unsqueeze(0) if new_mask.ndim == 2 else new_mask
+        gt = self._gt.unsqueeze(0) if self._gt.ndim == 2 else self._gt
+        bb = self._boundary_band.unsqueeze(0) if self._boundary_band.ndim == 2 else self._boundary_band
+        prev_m = self._mask.unsqueeze(0) if self._mask.ndim == 2 else self._mask
+        
+        num_classes = nm.shape[0]
+        
+        # 이전 상태의 지표들을 1채널 텐서인 것처럼 취급 (현재 구조 유지용)
+        prev_dsc = self._prev_dsc
+        prev_bdsc = self._prev_boundary_dsc
+        prev_hd = self._prev_hd95
+        
+        new_dscs = []
+        new_bdscs = []
+        new_hds = []
+        
+        fidelity = 0.0
+        
+        fp_inc, fn_inc, fn_dec = 0.0, 0.0, 0.0
+        
+        # 영역(Class)별 루프
+        for k in range(num_classes):
+            c_nm = nm[k]
+            c_gt = gt[k]
+            c_bb = bb[k].float() if bb.ndim == 3 else bb.float()
+            c_prev_m = prev_m[k]
+            
+            # --- 1) 영역별 지표 계산 ---
+            c_new_dsc = tops.dice(c_nm, c_gt)
+            c_new_boundary_dsc = tops.dice(c_nm * c_bb, c_gt * c_bb)
+            c_curr_hd95 = tops.hd95(c_nm, c_gt) # dist_b는 표면 거리 연산에서 자동 계산되므로 무시됨
+            
+            new_dscs.append(c_new_dsc)
+            new_bdscs.append(c_new_boundary_dsc)
+            new_hds.append(c_curr_hd95)
+            
+            c_delta_dsc = c_new_dsc - prev_dsc[k]
+            c_delta_bdsc = c_new_boundary_dsc - prev_bdsc[k]
+            c_delta_hd95 = prev_hd[k] - c_curr_hd95
+            
+            tumor_area = max(1.0, float(c_gt.sum().item()))
+            size_scale = max(0.5, min(3.0, 200.0 / tumor_area))
+            
+            # --- 2) 영역별 가중치 (w_k) 및 텀 계산 ---
+            dsc_term = c_delta_dsc if c_delta_dsc >= 0 else c_delta_dsc * 2.0
+            boundary_term = c_delta_bdsc if c_delta_bdsc >= 0 else c_delta_bdsc * 2.0
+            hd95_term = c_delta_hd95 if c_delta_hd95 >= 0 else c_delta_hd95 * 2.0
+            
+            if self.refinement_mode == "large":
+                hd_w = 0.5
+            elif self.refinement_mode == "medium":
+                hd_w = 0.1
+            else:
+                hd_w = 0.2
+                
+            c_fidelity = (
+                dsc_term * 20.0 * self.dsc_scale
+                + boundary_term * 10.0 * self.boundary_scale
+                + hd95_term * hd_w * self.hd95_scale
+            ) * 30.0 * size_scale
+            
+            # --- 3) 비대칭 패널티 ---
+            if self.asymmetric_reward:
+                c_new_bin = c_nm > 0.5
+                c_gt_bin = c_gt > 0.5
+                c_prev_bin = c_prev_m > 0.5
+                
+                c_prev_fp = int((c_prev_bin & (~c_gt_bin)).sum().item())
+                c_new_fp = int((c_new_bin & (~c_gt_bin)).sum().item())
+                c_prev_fn = int(((~c_prev_bin) & c_gt_bin).sum().item())
+                c_new_fn = int(((~c_new_bin) & c_gt_bin).sum().item())
+                
+                fp_inc = float(max(0, c_new_fp - c_prev_fp))
+                fn_inc = float(max(0, c_new_fn - c_prev_fn))
+                fn_dec = float(max(0, c_prev_fn - c_new_fn))
+                
+                asym_pen = (self.fp_penalty_ratio * fp_inc + self.fn_penalty_ratio * fn_inc) / tumor_area
+                c_fidelity -= asym_pen * 30.0 * size_scale
+                if self.seg_bias == "under" and fn_dec > 0:
+                    c_fidelity += (fn_dec / tumor_area) * 30.0 * size_scale * self.fn_penalty_ratio
+                    
+            fidelity += c_fidelity
 
-        tumor_area = max(1.0, float(self._gt.sum().item()))
-        size_scale = max(0.5, min(3.0, 200.0 / tumor_area))
-
-        # --- (1) Fidelity: 마스크 개선도 ---
-        dsc_term = delta_dsc if delta_dsc >= 0 else delta_dsc * 2.0
-        boundary_term = delta_boundary_dsc if delta_boundary_dsc >= 0 else delta_boundary_dsc * 2.0
-        hd95_term = delta_hd95 if delta_hd95 >= 0 else delta_hd95 * 2.0
-        if self.refinement_mode == "large":
-            hd_w = 0.5
-        elif self.refinement_mode == "medium":
-            hd_w = 0.1
-        else:
-            hd_w = 0.2
-        fidelity = (
-            dsc_term * 20.0 * self.dsc_scale
-            + boundary_term * 10.0 * self.boundary_scale
-            + hd95_term * hd_w * self.hd95_scale
-        ) * 30.0 * size_scale
-
-        fp_inc = 0.0
-        fn_inc = 0.0
-        fn_dec = 0.0
-        if self.asymmetric_reward:
-            new_bin = new_mask > 0.5
-            gt_bin = self._gt > 0.5
-            prev_fp = int((prev_bin & (~gt_bin)).sum().item())
-            new_fp = int((new_bin & (~gt_bin)).sum().item())
-            prev_fn = int(((~prev_bin) & gt_bin).sum().item())
-            new_fn = int(((~new_bin) & gt_bin).sum().item())
-            fp_inc = float(max(0, new_fp - prev_fp))
-            fn_inc = float(max(0, new_fn - prev_fn))
-            fn_dec = float(max(0, prev_fn - new_fn))
-            asym_pen = (
-                self.fp_penalty_ratio * fp_inc + self.fn_penalty_ratio * fn_inc
-            ) / tumor_area
-            fidelity -= asym_pen * 30.0 * size_scale
-            if self.seg_bias == "under" and fn_dec > 0:
-                fidelity += (fn_dec / tumor_area) * 30.0 * size_scale * self.fn_penalty_ratio
+        # 호환성을 위해 target_region 결과를 scalar에 할당
+        new_dsc = new_dscs[self._target_region]
+        new_boundary_dsc = new_bdscs[self._target_region]
+        curr_hd95 = new_hds[self._target_region]
+        
+        delta_dsc = new_dsc - self._prev_dsc[self._target_region]
+        delta_boundary_dsc = new_boundary_dsc - self._prev_boundary_dsc[self._target_region]
+        delta_hd95 = self._prev_hd95[self._target_region] - curr_hd95
+        
+        curr_perimeter = tops.perimeter(new_mask[self._target_region])
+        delta_perimeter = curr_perimeter - self._prev_perimeter[self._target_region]
+        
+        tumor_area = max(1.0, float(self._gt[self._target_region].sum().item()))
+        
+        # update lists
+        self._prev_dsc = list(new_dscs)
+        self._prev_boundary_dsc = list(new_bdscs)
+        self._prev_hd95 = list(new_hds)
+        self._prev_perimeter[self._target_region] = curr_perimeter
 
         # --- (2) Edit-cost: 과도한 수정 / stopping 유도 ---
         edit_cost = num_non_keep * (self.step_penalty / 8.0)
@@ -676,29 +763,30 @@ class MaskRefinementEnv(gym.Env):
             edit_cost += (delta_perimeter / max(100.0, tumor_area**0.5)) * 0.5 * self.edit_cost_scale
 
         # 초기보다 나빠지면 강한 페널티 (over-correction)
-        if new_dsc < self._initial_dsc:
-            edit_cost += 5.0 * self.edit_cost_scale
+        over_correction_penalty = 0.0
+        if new_dsc < self._initial_dsc[self._target_region]:
+            c_scale = self._initial_dsc[self._target_region] - new_dsc
+            over_correction_penalty = (15.0 * c_scale) * self.edit_cost_scale
         # 무개선 스텝: non-keep인데 DSC가 사실상 그대로면 추가 비용
         if num_non_keep > 0 and abs(delta_dsc) < 1e-4 and abs(delta_boundary_dsc) < 1e-4:
             edit_cost += 0.02 * num_non_keep * self.edit_cost_scale
-        # 이미 충분히 좋으면 keep 유도
+        # 이미 충분히 정확하면 keep에 대해 패널티를 상쇄하거나 보너스를 부여합니다.
         keep_bonus = 0.0
+        if num_non_keep == 0 and new_dsc >= 0.85:
+            keep_bonus = 0.5 * self.edit_cost_scale
 
         target_bonus = 0.0
         if not self.enable_stop:
             # Relative improvement bonus only (no absolute DSC jackpot).
-            if new_dsc > self._initial_dsc + 1e-4:
-                target_bonus = float(min(5.0, 50.0 * (new_dsc - self._initial_dsc)))
+            if new_dsc > self._initial_dsc[self._target_region] + 1e-4:
+                target_bonus = float(min(5.0, 50.0 * (new_dsc - self._initial_dsc[self._target_region])))
 
-        reward = fidelity - edit_cost + keep_bonus + target_bonus
+        reward = fidelity - edit_cost + keep_bonus + target_bonus - over_correction_penalty
 
-        old_prev_dsc = self._prev_dsc
-        old_prev_boundary_dsc = self._prev_boundary_dsc
+        old_prev_dsc = self._prev_dsc[self._target_region]
+        old_prev_boundary_dsc = self._prev_boundary_dsc[self._target_region]
 
         self._mask = new_mask
-        self._prev_dsc = new_dsc
-        self._prev_boundary_dsc = new_boundary_dsc
-        self._prev_perimeter = curr_perimeter
         self._step_count += 1
 
         terminated = bool(new_dsc >= self.target_dsc)
