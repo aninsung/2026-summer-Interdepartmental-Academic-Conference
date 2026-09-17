@@ -314,21 +314,61 @@ def _resize_slice(arr: np.ndarray, target_size: int, is_mask: bool = False) -> n
     return resized.astype(np.float32)
 
 
+def _preprocess_volumes(
+    mod_vols: List[np.ndarray],
+    modality_list: List[str],
+    needed_zs: List[int],
+    target_size: int,
+) -> dict:
+    """
+    볼륨 레벨에서 필요한 z-슬라이스에 대해 CLAHE/bilateral 전처리를 한 번만 수행하고
+    결과를 {(mod_idx, z): processed_slice} 딕셔너리로 캐시하여 반환.
+    z-1, z, z+1 중복 호출을 완전히 제거합니다.
+    """
+    depth = int(mod_vols[0].shape[2])
+    # 필요한 모든 z 인덱스 수집 (중복 제거)
+    all_zs = set()
+    for z in needed_zs:
+        for dz in (-1, 0, 1):
+            all_zs.add(_clip_z(z + dz, depth))
+
+    cache = {}
+    for i, m_vol in enumerate(mod_vols):
+        mod_name = modality_list[i].lower()
+        for z in all_zs:
+            sl = m_vol[:, :, z]
+            if mod_name == "t1ce":
+                sl = _apply_clahe_2d(sl)
+            elif mod_name == "flair":
+                sl = _apply_bilateral_2d(sl)
+            if target_size > 0:
+                sl = _resize_slice(sl, target_size, is_mask=False)
+            cache[(i, z)] = sl
+    return cache
+
+
+def _modal_slice_from_cache(
+    preproc_cache: dict, mod_count: int, z: int, depth: int,
+) -> np.ndarray:
+    """전처리 캐시에서 슬라이스를 조합하여 (C, H, W) 반환."""
+    z = _clip_z(z, depth)
+    channels = [preproc_cache[(i, z)] for i in range(mod_count)]
+    return np.stack(channels, axis=0).astype(np.float32)
+
+
 def _modal_slice_from_vols(
     mod_vols: List[np.ndarray], z: int, target_size: int, modality_list: List[str]
 ) -> np.ndarray:
+    """Fallback: 캐시 없이 단일 슬라이스 처리 (하위 호환)."""
     z = _clip_z(z, int(mod_vols[0].shape[2]))
     channels = []
     for i, m_vol in enumerate(mod_vols):
         sl = m_vol[:, :, z]
-        
-        # 적용: 단계 2. 기존 2채널 전처리 품질 극대화
         mod_name = modality_list[i].lower()
         if mod_name == "t1ce":
             sl = _apply_clahe_2d(sl)
         elif mod_name == "flair":
             sl = _apply_bilateral_2d(sl)
-            
         if target_size > 0:
             sl = _resize_slice(sl, target_size, is_mask=False)
         channels.append(sl)
@@ -399,14 +439,22 @@ def _load_one_patient(
         valid_zs = _select_slices(seg_vol, min_tumor_ratio)
         rng = np.random.default_rng(noise_seed + (abs(hash(pid)) % 1_000_000_007))
 
+        # 볼륨 레벨 전처리 캐시: 중복 z-슬라이스 CLAHE/bilateral 제거
+        depth = int(mod_vols[0].shape[2])
+        preproc = _preprocess_volumes(mod_vols, modality_list, valid_zs, target_size)
+        mod_count = len(mod_vols)
+
+        # mod_vols 메모리 즉시 해제 (큰 볼륨 데이터)
+        del mod_vols
+
         samples = []
         for z in valid_zs:
-            img_sl = _modal_slice_from_vols(mod_vols, z, target_size, modality_list)
+            img_sl = _modal_slice_from_cache(preproc, mod_count, z, depth)
             img_25d = np.concatenate(
                 [
-                    _modal_slice_from_vols(mod_vols, z - 1, target_size, modality_list),
+                    _modal_slice_from_cache(preproc, mod_count, z - 1, depth),
                     img_sl,
-                    _modal_slice_from_vols(mod_vols, z + 1, target_size, modality_list),
+                    _modal_slice_from_cache(preproc, mod_count, z + 1, depth),
                 ],
                 axis=0,
             )
@@ -421,6 +469,8 @@ def _load_one_patient(
 
             rough_sl = make_noisy_mask(gt_sl, rng) if simulate_rough else gt_sl.copy()
             samples.append((img_sl, gt_sl, rough_sl, has_et, img_25d, seg_sl))
+
+        del preproc  # 전처리 캐시 메모리 해제
 
         if cache_dir and samples:
             Path(cache_dir).mkdir(parents=True, exist_ok=True)
@@ -488,8 +538,8 @@ class BraTS2020Dataset(Dataset):
         self._sample_pids: List[str] = []
         self._build(max_patients)
 
-    def _build(self, max_patients: Optional[int]) -> None:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+    def _build(self, max_patients: Optional[int]) -> None:  # noqa: C901
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
         patient_dirs = _find_patient_dirs(self.root_dir)
         if not patient_dirs:
@@ -532,16 +582,16 @@ class BraTS2020Dataset(Dataset):
         skipped = 0
         results_by_pid = {}
 
-        def _job(pdir: Path):
-            return _load_one_patient(
-                str(pdir),
-                self.modality_list,
-                self.target_size,
-                self.min_tumor_ratio,
-                self.simulate_rough,
-                self.noise_seed,
-                str(cache_path) if cache_path is not None else None,
-            )
+        from functools import partial
+        _job = partial(
+            _load_one_patient,
+            modality_list=self.modality_list,
+            target_size=self.target_size,
+            min_tumor_ratio=self.min_tumor_ratio,
+            simulate_rough=self.simulate_rough,
+            noise_seed=self.noise_seed,
+            cache_dir=str(cache_path) if cache_path is not None else None,
+        )
 
         try:
             from src.utils.progress import want_tqdm
@@ -564,8 +614,8 @@ class BraTS2020Dataset(Dataset):
         log_every = max(1, min(25, n_patients // 10))
         done_pts = 0
 
-        with ThreadPoolExecutor(max_workers=self.num_workers) as pool:
-            futs = {pool.submit(_job, p): p.name for p in patient_dirs}
+        with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
+            futs = {pool.submit(_job, str(p)): p.name for p in patient_dirs}
             for fut in as_completed(futs):
                 pid, samples, n, err = fut.result()
                 if err:

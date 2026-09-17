@@ -35,7 +35,7 @@ class MixedEnv(gym.Env):
         self.current = self.envs[first_mode][first_bucket]
         self.episode = 0
         self.phase = 0
-        self.buckets = ('fp', 'fn', 'mixed')
+        self.buckets = ('fp', 'fn', 'mixed', 'et_hard', 'hd95_hard')
 
     def set_phase(self, phase):
         self.phase = int(np.clip(phase, 0, 3))
@@ -43,11 +43,11 @@ class MixedEnv(gym.Env):
     def _bucket_weights(self, mode):
         available = [b for b in self.buckets if b in self.envs[mode]]
         if self.phase == 0:
-            base = {'fp': .50, 'fn': .25, 'mixed': .25}
+            base = {'fp': .30, 'fn': .15, 'mixed': .15, 'et_hard': .20, 'hd95_hard': .20}
         elif self.phase == 1:
-            base = {'fp': .25, 'fn': .50, 'mixed': .25}
+            base = {'fp': .15, 'fn': .30, 'mixed': .15, 'et_hard': .20, 'hd95_hard': .20}
         elif self.phase == 2:
-            base = {'fp': 1 / 3, 'fn': 1 / 3, 'mixed': 1 / 3}
+            base = {'fp': .2, 'fn': .2, 'mixed': .2, 'et_hard': .2, 'hd95_hard': .2}
         else:
             counts = {b: len(self.envs[mode][b].images) for b in available}
             total = max(1, sum(counts.values()))
@@ -78,6 +78,17 @@ def _error_bucket(gt, rough):
     fn = int(((~rough_b) & gt_b).sum())
     if fp + fn == 0:
         return None
+    
+    is_et_positive = False
+    if gt.ndim >= 3 and gt.shape[-3] == 3:
+        is_et_positive = int(gt[0].sum()) > 0
+
+    if is_et_positive and (fp > 0 or fn > 0):
+        return 'et_hard'
+        
+    if (fp + fn) > 100:
+        return 'hd95_hard'
+
     if fp > fn * 1.25:
         return 'fp'
     if fn > fp * 1.25:
@@ -85,16 +96,16 @@ def _error_bucket(gt, rough):
     return 'mixed'
 
 def _empty_bucket_banks():
-    return {m: {b: [] for b in ('fp', 'fn', 'mixed')} for m in MODES}
+    return {m: {b: [] for b in ('fp', 'fn', 'mixed', 'et_hard', 'hd95_hard')} for m in MODES}
 
 def _empty_priorities():
-    return {m: {b: np.empty(0, dtype=np.float32) for b in ('fp', 'fn', 'mixed')} for m in MODES}
+    return {m: {b: np.empty(0, dtype=np.float32) for b in ('fp', 'fn', 'mixed', 'et_hard', 'hd95_hard')} for m in MODES}
 
 def _add_to_banks(banks, priorities, mode, arrays, rng, cap):
     if len(arrays[0]) == 0:
         return
     labels = np.asarray([_error_bucket(g, r) for g, r in zip(arrays[1], arrays[2])], dtype=object)
-    for bucket in ('fp', 'fn', 'mixed'):
+    for bucket in ('fp', 'fn', 'mixed', 'et_hard', 'hd95_hard'):
         sel = labels == bucket
         if not bool(sel.any()):
             continue
@@ -122,7 +133,7 @@ def _load_balanced_banks(args, ids, rng, samples_per_bucket):
         del bundle
         gc.collect()
         torch.cuda.empty_cache()
-        retained = {m: {b: len(priorities[m][b]) for b in ('fp', 'fn', 'mixed')} for m in MODES}
+        retained = {m: {b: len(priorities[m][b]) for b in ('fp', 'fn', 'mixed', 'et_hard', 'hd95_hard')} for m in MODES}
         logging.info('Prepared patients %d/%d; retained %s', min(offset + len(chunk), len(ids)), len(ids), retained)
     return banks
 
@@ -131,7 +142,7 @@ def _evaluate_model(model, banks, device, steps):
     rows = []
     for mode in MODES:
         merged = None
-        for bucket in ('fp', 'fn', 'mixed'):
+        for bucket in ('fp', 'fn', 'mixed', 'et_hard', 'hd95_hard'):
             b = banks[mode][bucket]
             if not b:
                 continue

@@ -110,3 +110,49 @@ def filter_small_components_torch(mask, min_size: int):
         if not kept_any:
             out[bi] = binary.to(dtype=torch.float32)
     return out
+
+
+# --- Supervised Loss Functions ---
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DiceCELoss(nn.Module):
+    def __init__(self, weight_ce=1.0, weight_dice=1.0):
+        super().__init__()
+        self.weight_ce = weight_ce
+        self.weight_dice = weight_dice
+
+    def forward(self, pred, target):
+        ce = F.binary_cross_entropy_with_logits(pred, target)
+        pred_sigmoid = torch.sigmoid(pred)
+        intersection = (pred_sigmoid * target).sum(dim=(2, 3))
+        union = pred_sigmoid.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
+        dice = 1.0 - (2.0 * intersection + 1e-5) / (union + 1e-5)
+        return self.weight_ce * ce + self.weight_dice * dice.mean()
+
+class TverskyFocalLoss(nn.Module):
+    def __init__(self, alpha=0.7, beta=0.3, gamma=4.0 / 3.0):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+
+    def forward(self, pred, target):
+        pred_sigmoid = torch.sigmoid(pred)
+        tp = (pred_sigmoid * target).sum(dim=(2, 3))
+        fp = (pred_sigmoid * (1 - target)).sum(dim=(2, 3))
+        fn = ((1 - pred_sigmoid) * target).sum(dim=(2, 3))
+        tversky = (tp + 1e-5) / (tp + self.alpha * fp + self.beta * fn + 1e-5)
+        focal_tversky = torch.pow((1 - tversky), self.gamma)
+        return focal_tversky.mean()
+
+class SurfaceDistanceLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred, target, dist_map):
+        # pred: (B, C, H, W) logits, dist_map: precomputed distance transform
+        pred_sigmoid = torch.sigmoid(pred)
+        loss = pred_sigmoid * dist_map
+        return loss.mean()
