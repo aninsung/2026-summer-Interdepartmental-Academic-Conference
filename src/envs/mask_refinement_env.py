@@ -731,6 +731,19 @@ class MaskRefinementEnv(gym.Env):
                 if self.seg_bias == "under" and fn_dec > 0:
                     c_fidelity += (fn_dec / tumor_area) * 30.0 * size_scale * self.fn_penalty_ratio
                     
+            # --- 4) False-component 패널티 ---
+            c_new_bin = c_nm > 0.5
+            c_gt_bin = c_gt > 0.5
+            labeled, num_cc = tops.label_components(c_new_bin.unsqueeze(0))
+            labeled = labeled.squeeze(0)
+            fc_penalty = 0.0
+            for cc_i in range(1, num_cc + 1):
+                cc_mask = (labeled == cc_i)
+                if not torch.any(cc_mask & c_gt_bin):
+                    fc_penalty += float(cc_mask.sum().item())
+            if fc_penalty > 0:
+                c_fidelity -= (fc_penalty / tumor_area) * 20.0 * size_scale
+
             fidelity += c_fidelity
 
         # 호환성을 위해 target_region 결과를 scalar에 할당

@@ -162,6 +162,7 @@ def main():
                         help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값.")
     parser.add_argument("--task1_thresholds", type=str, default="0.50,0.50,0.50",
                         help="BraTS Task 1 ET,TC,WT thresholds.")
+    parser.add_argument("--tune_thresholds", action="store_true", help="Stage 2 예측에 대해 각 영역 최적 임계값을 탐색합니다.")
     parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
     parser.add_argument(
         "--stage3_mode",
@@ -586,6 +587,10 @@ def main():
     slice_pids = []
     slice_cls = []
     
+    # 튜닝용 변수
+    tune_thrs = [0.3, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7]
+    tune_dsc = {name: {t: [] for t in tune_thrs} for name in task1_names}
+    
     small_active_init, small_active_fin, small_active_init_hd, small_active_hd = [], [], [], []
     small_micro_init, small_micro_fin, small_micro_init_hd, small_micro_hd = [], [], [], []
     
@@ -663,10 +668,20 @@ def main():
                 if np.any(eroded):
                     rough_mask_np = eroded.astype(np.float32)
 
+            if args.tune_thresholds:
+                for t in tune_thrs:
+                    t_regions = (region_prob_tta_np >= t).astype(np.float32)
+                    t_regions[2] = (rough_prob_np >= t).astype(np.float32)
+                    t_regions[1] = np.minimum(t_regions[1], t_regions[2])
+                    t_regions[0] = np.minimum(t_regions[0], t_regions[1])
+                    for ridx, rname in enumerate(task1_names):
+                        tune_dsc[rname][t].append(dice(t_regions[ridx], gt_task1_regions[i, ridx]))
+
             init_regions_np = (region_prob_tta_np >= task1_thr[:, None, None]).astype(np.float32)
             init_regions_np[2] = rough_mask_np
-            init_regions_np[1] *= init_regions_np[2]
-            init_regions_np[0] *= init_regions_np[1]
+            # ET ⊆ TC ⊆ WT 엄격 적용
+            init_regions_np[1] = np.minimum(init_regions_np[1], init_regions_np[2])
+            init_regions_np[0] = np.minimum(init_regions_np[0], init_regions_np[1])
 
             # Precompute GT distance transform once per slice to reuse for initial & final HD95
             dist_gt = None
@@ -778,11 +793,12 @@ def main():
             class_final_dsc[c].append(fin_dsc)
             class_final_hd95[c].append(fin_hd95)
 
-            # 논리적 제약사항 (ET ⊆ TC ⊆ WT) 재적용
+            # 논리적 제약사항 (ET ⊆ TC ⊆ WT) 재적용: 투영(Projection)
             final_regions_np[1] = np.minimum(final_regions_np[1], final_regions_np[2])
             final_regions_np[0] = np.minimum(final_regions_np[0], final_regions_np[1])
             if getattr(args, "enable_kaist_postproc", True):
                 final_regions_np[0] = filter_small_components(final_regions_np[0], min_size=15)
+                # 하위 영역 필터링 후 상위 영역이 하위 영역을 반드시 포함하도록 다시 보정
                 final_regions_np[1] = np.maximum(final_regions_np[1], final_regions_np[0])
                 final_regions_np[2] = np.maximum(final_regions_np[2], final_regions_np[1])
 
@@ -855,6 +871,21 @@ def main():
             f"{np.mean(task1_init_prec[region_name]):.4f} -> {np.mean(task1_final_prec[region_name]):.4f} | "
             f"{np.mean(task1_init_rec[region_name]):.4f} -> {np.mean(task1_final_rec[region_name]):.4f}"
         )
+        
+    if args.tune_thresholds:
+        print("\n--- Threshold Tuning Results (Stage 2) ---")
+        for region_name in task1_names:
+            best_t = None
+            best_dsc = -1
+            print(f"[{region_name}]", end=" ")
+            for t in tune_thrs:
+                mean_dsc = float(np.mean(tune_dsc[region_name][t]))
+                print(f"t={t}: {mean_dsc:.4f} |", end=" ")
+                if mean_dsc > best_dsc:
+                    best_dsc = mean_dsc
+                    best_t = t
+            print(f" => Best t={best_t} (DSC: {best_dsc:.4f})")
+
     os.makedirs(os.path.dirname(args.metrics_out) or ".", exist_ok=True)
     np.savez_compressed(
         args.metrics_out,
