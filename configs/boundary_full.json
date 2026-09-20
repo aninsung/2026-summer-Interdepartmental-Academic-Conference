@@ -1,0 +1,39 @@
+{
+  "data_root": "src/data",
+  "output": "runs/boundary_hybrid_fix",
+  "seed": 42,
+  "split_seed": 20260920,
+  "resize": null,
+  "backbone": "segresnet_cfp",
+  "backbone_patients": 656,
+  "rl_patients": 219,
+  "val_patients": 188,
+  "backbone_steps": 50000,
+  "backbone_batch_size": 1,
+  "backbone_patch_size": 96,
+  "backbone_filters": 32,
+  "backbone_lr": 0.0002,
+  "backbone_val_every": 5000,
+  "torch_threads": 4,
+  "env": {
+    "patch_size": 24,
+    "max_steps": 64,
+    "band_mm": 5.0,
+    "logit_delta": 0.5,
+    "hd95_weight": 0.5,
+    "hd95_scale_mm": 5.0,
+    "reward_scale": 100.0,
+    "tolerance_mm": 2.0
+  },
+  "ppo": {
+    "total_timesteps": 30000,
+    "n_steps": 512,
+    "batch_size": 64,
+    "n_epochs": 4,
+    "learning_rate": 0.0001,
+    "gamma": 1.0,
+    "gae_lambda": 0.95,
+    "ent_coef": 0.05,
+    "clip_range": 0.2
+  }
+}

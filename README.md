@@ -1,127 +1,70 @@
-# TRIO (RL-Refiner)
+# 🧠  3D PPO Boundary Refinement for BraTS 2021
 
 2026 컴공&인지 연합학술제 연구트랙 · 팀 야호
 
-**크기별 전문가 분할 + SL 경계 보정(PPO teacher 증류)으로 뇌종양 MRI 마스크를 다듬는 삼중 스케일 시스템**
+**딥러닝(U-Net 계열)이 만든 뇌종양 초기 분할(Rough Mask)의 오차를 강화학습(PPO) 에이전트가 직접 3D 공간을 탐색하며 밀고 당겨 다듬는 하이브리드 파이프라인입니다.**
 
-딥러닝이 만든 초기 분할(Rough Mask)의 오차를 종양 크기에 맞는 Expert와 **SL Refiner**(학습 시 PPO teacher로 증류)가 순서대로 보정합니다. **BraTS 2021 Challenge 세부 영역 규약(ET: Enhancing Tumor, TC: Tumor Core, WT: Whole Tumor 다중 채널)을 직접 예측하며**, soft expert mixture 기반의 동적 라우팅으로 오차 경계를 다듬습니다.
-
-| 검증 영역 (BraTS 2021 val 250명 / 14,561 슬라이스) | Stage 2 DSC | Stage 3 DSC (배포) | HD95 (px) | Precision | Recall |
-|---|---:|---:|---:|---:|---:|
-| **WT (Whole Tumor)** | 0.8721 | **0.8758** | **2.108 px** | 0.8945 | 0.8776 |
-| **TC (Tumor Core)** | 0.8045 | **0.8120** | **11.532 px** | 0.8842 | 0.8601 |
-| **ET (Enhancing Tumor)** | 0.7792 | **0.7873** | **12.347 px** | 0.8317 | 0.8558 |
+기존의 단순 후처리(Post-processing)를 넘어, **임상적 치명성(Cost-Sensitive)이 반영된 보상 함수**와 **결정적 액션(Decisive Action Space)**을 통해 BraTS 2021 글로벌 Top-2 수준의 경계 오차(HD95) 달성을 목표로 합니다.
 
 ---
 
-## 목차
+## 🏆 주요 성과 (Hold-out Test 188명 기준)
 
-1. [왜 필요한가](#왜-필요한가)
-2. [파이프라인](#파이프라인)
-3. [주요 결과](#주요-결과)
-4. [시작하기](#시작하기)
-5. [프로젝트 구조](#프로젝트-구조)
-6. [시각화](#시각화)
-7. [문서](#문서)
+본 파이프라인의 V5 실험 결과, 보상 클리핑을 통해 치명적인 붕괴(Collapse)는 방어했으나 에이전트가 행동을 포기하는 **정책 마비(Paralysis)** 현상이 확인되었습니다. 이를 해결하기 위해 상태 가치 $Q(s)$ 기반 대칭 보상식을 도입하는 **V6-A 파이프라인 개편**이 예정되어 있습니다.
 
----
+| Method (적용 기법) | ET DSC ↑ | TC DSC ↑ | WT DSC ↑ | ET HD95 ↓ | TC HD95 ↓ | WT HD95 ↓ |
+|:---|---:|---:|---:|---:|---:|---:|
+| 1. Backbone (초기 상태) | 0.8581 | 0.9145 | 0.9310 | 13.977 mm | 5.767 mm | 6.841 mm |
+| 2. Backbone + PostProcess | 0.8581 | 0.9145 | 0.9311 | 13.979 mm | 5.762 mm | 6.875 mm |
+| **3. Ours (PPO Refiner V5)** | **0.8581** | **0.9145** | **0.9311** | **13.979 mm** | **5.762 mm** | **6.875 mm** |
 
-## 왜 필요한가
-
-U-Net 계열 모델은 종양의 전역 위치는 잘 잡지만, 크기별 이질성과 세부 영역(ET/TC/WT) 경계 오차가 남기 쉽습니다.
-
-- **임상적 정밀도:** 감마나이프 같은 방사선 정밀 수술이나 종양 절제 수술에서는 1 mm 수준의 오차가 임상적 결과를 좌우합니다.
-- **BraTS Challenge 표준 규약:** 단순 1채널 이진 경계선 제약을 넘어 **ET(조영 증강 종양), TC(종양 핵), WT(전체 종양)** 3개 세부 영역을 직접 세그멘테이션하고 동적 보정합니다.
-- **Soft Expert Mixture:** 경계 부근에서 hard routing 오분류로 인한 성능 저하를 방지하기 위해 소프트맥스 확률 가중치를 적용합니다.
+*(※ V5 평가 결과, 에이전트 기여도 0. V6-A에서 근본적 보상식 개편 예정)*
 
 ---
 
-## 파이프라인
+## 📂 프로젝트 구조 (Standard ML Project)
 
-<img width="1024" height="507" alt="TRIO pipeline" src="https://github.com/user-attachments/assets/78c1aab7-dab0-4c6c-a0bd-c5d98093b11a" />
-
-| 단계 | 역할 | 산출물 |
-|:---:|---|---|
-| **1** | 종양 면적으로 Small / Medium / Large 분류 | `shape_classifier_best.pt` |
-| **2** | 클래스별 Expert가 다중 영역 확률 맵 생성 | `caranet_best.pt`, `unetplusplus_best.pt`, `segresnet_best.pt` |
-| **3** | 클래스별 SL Refiner 학습 (PPO teacher 교대 증류). **배포 추론은 SL** | `sl_refiner_*.pt`, `ppo_*.zip`(teacher) |
-| **4** | BraTS Challenge 세부 영역 (ET/TC/WT) DSC / HD95 / Precision / Recall 평가 | `results/pipeline_slice_metrics_deploy.npz` |
-
-크기별 라우팅 기준 (Soft Mixture 적용):
-
-| 클래스 | 면적 임계값 | Expert 백본 | Stage3 (배포=SL) |
-|---|---|---|---|
-| Small | `< 200 px` | CaraNet 2.5D (`z-1, z, z+1`) | Multi-Region SL (+ PPO teacher) |
-| Medium | `200–500 px` | UNet++ | Multi-Region SL (+ PPO teacher) |
-| Large | `≥ 500 px` | SegResNet (ED/TC → WT multi-head) | Multi-Region SL (+ PPO teacher) |
-
-관측에는 GT가 들어가지 않습니다. GT는 학습 시 손실/보상과 평가 지표에만 씁니다. 데이터는 **환자 단위(Patient-level Split)**로 고르게 나눕니다. (`checkpoints/patient_split.json`, seed 42). 재학습 시 이전 가중치 파일은 안전하게 직접 삭제(`os.remove`)되어 저장 공간 낭비를 방지합니다.
-
-| 역할 | 환자 수 | 슬라이스 수 |
-|---|---:|---:|
-| train | 1,001명 | 54,921 |
-| val (Hold-out 검증) | 250명 | **14,561** |
+```text
+.
+├── configs/                # PPO 및 백본 훈련 설정 (boundary_v5.json 등)
+├── docs/                   # 논문(papers), 세부 기획 마크다운(markdowns)
+├── requirements.txt        # 패키지 의존성 (PyTorch, MONAI, Stable-Baselines3)
+├── scripts/                # 파이프라인 실행 스크립트 모음 (run_pipeline.py 포함)
+├── src/                    # 모델, 환경(Env), 데이터 로더 핵심 소스코드
+├── results/                # 평가 지표(.json), 시각화(.png), 리포트(.md)
+├── runs/                   # 훈련 출력물 (가중치, 로그, 예측 캐시)
+└── tests/                  # 단위 테스트 코드
+```
 
 ---
 
-## 주요 결과
+## 🚀 파이프라인 핵심 기술 (V5 기준)
 
-`t1ce+flair` 2채널, BraTS 2021 전체 환자 1,251명 중 **val 250명(14,561 슬라이스) hold-out** 평가 결과입니다.
+### 1. Cost-Sensitive Reward (비대칭 보상 설계)
+의료 도메인에서 종양을 놓치는 것(False Negative)은 치명적입니다. 에이전트가 놓친 종양 픽셀을 복구하여 DSC가 상승할 때 **10배의 증폭된 보상(DSC Boost)**을 부여하고 최대 보상을 50으로 제한(`reward_clip=50`)하여, 무작정 부피를 깎아 HD95만 낮추는 Reward Hacking과 Value Loss 폭발을 원천 차단했습니다.
 
-| 평가 영역 | 초기 Expert (Stage 2) DSC | 최종 SL Refiner (Stage 3) DSC | HD95 (px) | Precision | Recall |
-|---|---:|---:|---:|---:|---:|
-| **WT (Whole Tumor)** | 0.8721 | **0.8758** | **2.108 px** | 0.8945 | 0.8776 |
-| **TC (Tumor Core)** | 0.8045 | **0.8120** | **11.532 px** | 0.8842 | 0.8601 |
-| **ET (Enhancing Tumor)** | 0.7792 | **0.7873** | **12.347 px** | 0.8317 | 0.8558 |
+### 2. Decisive Action Space (결정적 픽셀 편집)
+기존의 미세한 로짓(Logit) 조정 방식을 벗어나, 에이전트가 확신을 가진 경계에 대해 단 한 번의 액션(`logit_delta=2.0`)으로 클래스를 완전히 뒤바꿀 수 있는 환경을 구축했습니다. 에피소드당 최대 256번의 타격을 통해 거대한 구멍(Hole)도 순식간에 메웁니다.
+
+### 3. Patient-level Strict Split (엄격한 데이터 통제)
+전체 1,251명의 BraTS 2021 환자 데이터를 **Backbone(656명) / PPO(219명) / Validation(188명) / Test(188명)**로 완벽하게 분할하여 Data Leakage를 차단하고 객관적인 Hold-out 성능을 측정합니다.
 
 ---
 
-## 시작하기
+## 💻 시작하기
 
-### 1. 환경 설치
-
+### 환경 설치
 ```bash
 git clone https://github.com/aninsung/2026-summer-Interdepartmental-Academic-Conference.git
 cd 2026-summer-Interdepartmental-Academic-Conference
 pip install -r requirements.txt
 ```
 
-BraTS 2021 데이터는 `src/data/archive`에 위치합니다.
-
-### 2. 전체 파이프라인 학습 및 평가 실행
-
+### 전체 3D 경계 보정 파이프라인 실행
 ```bash
-# 전체 파이프라인 실행 (재학습 시 기존 체크포인트 자동 삭제 후 학습)
-PYTHONUNBUFFERED=1 python -u run_pipeline.py --no_tta --confidence_threshold 0.85
-
-# 특정 평가 배포 모드 실행
-python scripts/eval/evaluate_pipeline.py --split_role val --deploy_mode --stage3_mode sl
+# V5 본학습 전체 파이프라인 런칭 (백본 -> 캐시적재 -> PPO학습 -> 평가)
+python scripts/train/train_boundary_3d.py --config configs/boundary_v5.json --stage all
 ```
 
 ---
-
-## 프로젝트 구조
-
-```
-├── run_pipeline.py                 # Stage 1–4 원스톱 자동 파이프라인
-├── scripts/train/                  # 분류기 · Expert · Stage3 SL/PPO 교대 학습
-├── scripts/eval/                   # 배포 평가, 영역별 지표 스윕, 비교 시각화
-├── src/data/                       # BraTS 로더, 환자 단위 80/20 분할
-├── src/envs/                       # MaskRefinementEnv (PPO teacher 환경)
-├── src/models/                     # Shape Classifier, Experts, SL Refiner, AdaptivePipeline
-├── src/utils/                      # DSC/HD95, 세부 영역 손실 함수, 게이트
-├── baselines/                      # BraTS21 1·2위(KAIST, NVAUTO) 2D 각색 베이스라인
-├── checkpoints/                    # 환자 분할 json 및 모델 가중치 (재학습 시 자동 삭제)
-└── docs/                           # 파이프라인 · 실험 결과 · 논문 초안
-```
-
----
-
-## 문서
-
-| 문서 | 내용 |
-|---|---|
-| [docs/PIPELINE.md](docs/PIPELINE.md) | 파이프라인 구조, Soft Routing, BraTS Multi-Region 손실 함수 및 배포 |
-| [docs/EXPERIMENT_RESULTS.md](docs/EXPERIMENT_RESULTS.md) | 세부 영역(WT/TC/ET) 평가 결과 및 정량적 벤치마크 분석 |
-| [docs/paper_draft_ko.md](docs/paper_draft_ko.md) | 논문 초안 (학술적 기여 및 수식 정리) |
-| [baselines/README.md](baselines/README.md) | KAIST / NVAUTO 2D 각색 베이스라인 구현 상세 |
+*자세한 PPO 환경 설계와 평가 공식은 [docs/markdowns/BOUNDARY_3D.md](docs/markdowns/BOUNDARY_3D.md)를 참조하세요.*

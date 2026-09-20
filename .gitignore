@@ -23,3 +23,7 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+runs/
+
+src/data/BraTS2021_*/
