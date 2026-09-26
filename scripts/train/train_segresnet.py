@@ -68,10 +68,16 @@ def train_segresnet(
     patient_split: str = None,
     seed: int = 42,
     deterministic: bool = False,
+    num_workers: int = 8,
     multi_region: bool = True,
 ) -> None:
     from src.utils.seed import set_seed
     set_seed(seed, deterministic)
+
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+        if not deterministic:
+            torch.backends.cudnn.benchmark = True
 
     if device == "auto":
         from src.utils.device import get_torch_device
@@ -150,7 +156,7 @@ def train_segresnet(
             out["gt_regions"] = torch.stack([b["gt_regions"] for b in batch])
         return out
 
-    n_workers = 0
+    n_workers = max(0, int(num_workers))
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         num_workers=n_workers, pin_memory=True,
@@ -175,9 +181,7 @@ def train_segresnet(
         dropout_prob=dropout_prob,
     ).to(device)
 
-    init_path = pretrained_path if pretrained_path and os.path.exists(pretrained_path) else (
-        save_path if os.path.exists(save_path) else ""
-    )
+    init_path = pretrained_path if pretrained_path and os.path.exists(pretrained_path) else ""
     if init_path:
         from src.utils.weight_adapt import load_adapted_state_dict
         log.info(f"기존 가중치에서 초기화: {init_path}")
@@ -353,6 +357,7 @@ if __name__ == "__main__":
     # 학습 관련
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--save_path", type=str, default="checkpoints/segresnet_best.pt", help="최우수 모델 저장 경로")
     parser.add_argument("--loss", type=str, default="bce_dice", choices=["bce_dice", "dice", "boundary"], help="사용할 손실 함수")

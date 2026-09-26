@@ -78,8 +78,12 @@ class MaskRefinementEnv(gym.Env):
         refinement_mode: str = "small", # "small", "medium", "large"
         confidence_threshold: float = 0.85, # RL-Refiner 진입을 결정하는 기준값
         edge_maps: Optional[np.ndarray] = None,
+        refinement_profile: str = "legacy",
     ):
         super().__init__()
+        if refinement_profile not in {"legacy", "ppo_v2", "ppo_v3"}:
+            raise ValueError("Unknown refinement profile")
+        self.refinement_profile = refinement_profile
         self.confidence_threshold = confidence_threshold
         assert images.shape[0] == gt_masks.shape[0] == rough_masks.shape[0]
         self.images = images
@@ -113,7 +117,13 @@ class MaskRefinementEnv(gym.Env):
                 self.edge_maps[i] = _edge_map_from_image(_obs_image_slice(images[i]))
 
         # 관측 공간 정의 (small은 4채널 64x64 Zoom-in, 그 외는 기존 체크포인트와 호환되는 3채널 128x128)
-        if self.refinement_mode == "small":
+        if self.refinement_profile == "ppo_v3":
+            # Full-slice policy: every MRI modality plus mask, probability,
+            # accumulated SDF, remaining time and both reachable-mask limits.
+            channels = images.shape[1] if images.ndim == 4 else 1
+            self.observation_space = spaces.Box(
+                low=0., high=1., shape=(channels + 6, H, W), dtype=np.float32)
+        elif self.refinement_mode == "small":
             self.observation_space = spaces.Box(
                 low=0.0, high=1.0,
                 shape=(4, 64, 64),
@@ -144,6 +154,16 @@ class MaskRefinementEnv(gym.Env):
 
     # ── 내부 유틸 ──────────────────────────────────────────
     def _obs(self) -> np.ndarray:
+        if self.refinement_profile == "ppo_v3":
+            image = self.images[self._idx]
+            modalities = image if image.ndim == 3 else image[None]
+            # Monotone encoding preserves subpixel state without hard saturation.
+            sdf = .5 + np.arctan(self._continuous_sdf / 8.) / np.pi
+            remaining = np.full_like(self._current_mask,
+                                     max(0., 1. - self._step_count / self.max_steps))
+            return np.concatenate([np.clip(modalities, 0., 1.), np.stack([
+                self._current_mask, self._current_prob, sdf, remaining,
+                self._min_mask_limit, self._max_mask_limit])]).astype(np.float32)
         if self.refinement_mode == "small":
             obs = np.stack([self._current_image, self._current_mask, self._current_prob, self._current_edge], axis=0).astype(np.float32)
             
@@ -189,7 +209,13 @@ class MaskRefinementEnv(gym.Env):
         self._current_edge = self.edge_maps[self._idx].copy()
         self._current_gt = self.gt_masks[self._idx].copy()
         self._step_count = 0
-        
+        initial_binary = self._current_mask.astype(bool)
+        if initial_binary.any() and not initial_binary.all():
+            sdf = distance_transform_edt(initial_binary) - distance_transform_edt(~initial_binary)
+            self._continuous_sdf = sdf - .5 * np.sign(sdf)
+        else:
+            self._continuous_sdf = np.full_like(self._current_mask, 999. if initial_binary.all() else -999.)
+
         # 초기 Rough 마스크 백업 및 허용 경계 제약용 마스크 사전 계산 (+-8 픽셀 범위로 대폭 완화)
         self._initial_rough_mask = self._current_mask.copy()
         struct_limit = np.ones((3, 3), dtype=bool)
@@ -211,6 +237,8 @@ class MaskRefinementEnv(gym.Env):
         return self._obs(), {}
 
     def step(self, action):
+        if self.refinement_profile == "ppo_v2" and self.refinement_mode == "small" and self._current_mask.sum() < 35:
+            action = np.maximum(action, 0.)
         # 8개 섹터 개별 변형 (SDF 기반 연속 미세 변형 적용)
         # 분리된 종양이 있을 때 질량 중심이 빈 공간에 놓이는 현상을 방지하기 위해 가장 큰 연결 요소의 중심 사용
         lbl, num_features = label(self._current_mask > 0.5)
@@ -266,12 +294,17 @@ class MaskRefinementEnv(gym.Env):
             shift_map[sector_pixels] = shift_val
 
         # SDF + shift_map >= 0 이면 새로운 마스크 영역으로 결정
-        new_mask = (sdf + shift_map) >= 0.0
+        if self.refinement_profile in {"ppo_v2", "ppo_v3"}:
+            # Accumulate subpixel actions; KEEP preserves the mask exactly.
+            self._continuous_sdf += shift_map
+            new_mask = self._continuous_sdf >= 0.
+        else:
+            new_mask = (sdf + shift_map) >= 0.0
         new_mask = new_mask.astype(np.float32)
 
         # ── 위상 보존 (Topological Constraints) ──
         new_mask_bool = new_mask.astype(bool)
-        if np.sum(new_mask_bool) > 20:
+        if self.refinement_profile == "legacy" and np.sum(new_mask_bool) > 20:
             struct = np.ones((3, 3), dtype=bool)
             new_mask_bool = binary_dilation(new_mask_bool, structure=struct, iterations=1)
             new_mask_bool = binary_erosion(new_mask_bool, structure=struct, iterations=1) # Closing
@@ -285,6 +318,21 @@ class MaskRefinementEnv(gym.Env):
         step_cost = num_non_keep * (self.step_penalty / 8.0)
         
         new_dsc = _dice(new_mask, self._current_gt)
+        if self.refinement_profile == "ppo_v3":
+            # Whole-slice GT and exact output mask; no inference-only morphology.
+            previous = self._prev_dsc
+            reward = 100. * (new_dsc - previous) - step_cost
+            self._step_count += 1
+            truncated = self._step_count >= self.max_steps
+            if truncated:
+                reward += 100. * (new_dsc - self._initial_dsc)
+            self._current_mask = new_mask
+            self._prev_dsc = new_dsc
+            return self._obs(), float(reward), False, truncated, {
+                "dsc": new_dsc, "initial_dsc": self._initial_dsc,
+                "delta_from_initial": new_dsc - self._initial_dsc,
+                "prev_dsc": previous, "delta_dsc": new_dsc - previous,
+            }
         new_boundary_dsc = _dice(new_mask * self._boundary_band, self._current_gt * self._boundary_band)
 
         delta_dsc = new_dsc - self._prev_dsc
@@ -333,6 +381,12 @@ class MaskRefinementEnv(gym.Env):
         if is_keep_and_good:
             reward += 0.05
 
+        if self.refinement_profile == "ppo_v2":
+            # Reward improvement, not absolute initial quality. No recurring target/KEEP bonus.
+            reward = 100. * delta_dsc + 20. * delta_boundary_dsc - step_cost
+            if self._step_count + 1 >= self.max_steps:
+                reward += 100. * (new_dsc - self._initial_dsc)
+
         old_prev_dsc = self._prev_dsc
         old_prev_boundary_dsc = self._prev_boundary_dsc
 
@@ -341,11 +395,13 @@ class MaskRefinementEnv(gym.Env):
         self._prev_boundary_dsc = new_boundary_dsc
         self._step_count += 1
 
-        terminated = bool(new_dsc >= self.target_dsc)
+        terminated = bool(new_dsc >= self.target_dsc) if self.refinement_profile == "legacy" else False
         truncated = bool(self._step_count >= self.max_steps)
 
         info = {
             "dsc": new_dsc,
+            "initial_dsc": self._initial_dsc,
+            "delta_from_initial": new_dsc - self._initial_dsc,
             "boundary_dsc": new_boundary_dsc,
             "prev_dsc": old_prev_dsc,
             "prev_boundary_dsc": old_prev_boundary_dsc,

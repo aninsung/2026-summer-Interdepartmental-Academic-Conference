@@ -33,6 +33,9 @@ GT 레이블(seg) 값:
 """
 
 import os
+import hashlib
+import pickle
+from concurrent.futures import ThreadPoolExecutor
 import glob
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -55,11 +58,107 @@ def _normalize_volume(vol: np.ndarray) -> np.ndarray:
     mean = vol[brain].mean()
     std  = vol[brain].std() + 1e-8
     normed = (vol - mean) / std
-    # 99 퍼센타일 기준 클리핑 후 0~1 스케일
-    p1, p99 = np.percentile(normed[brain], [1, 99])
+    # 99 퍼센타일 기준 클리핑 후 0~1 스케일 (속도를 위해 샘플링)
+    vals = normed[brain]
+    sub_vals = vals[::8] if len(vals) > 100000 else vals
+    p1, p99 = np.percentile(sub_vals, [1, 99])
     normed = np.clip(normed, p1, p99)
     normed = (normed - p1) / (p99 - p1 + 1e-8)
     return normed.astype(np.float32)
+
+
+def _resize_volume_torch(vol: np.ndarray, target_size: int, is_mask: bool = False) -> np.ndarray:
+    """PyTorch interpolate를 활용한 초고속 3D 볼륨 배치 리사이즈."""
+    if target_size <= 0:
+        return vol.astype(np.float32)
+    H, W, D = vol.shape
+    if H == target_size and W == target_size:
+        return vol.astype(np.float32)
+    
+    # (H, W, D) -> (D, 1, H, W)
+    t = torch.from_numpy(vol).permute(2, 0, 1).unsqueeze(1)
+    mode = 'nearest' if is_mask else 'bilinear'
+    align_corners = None if is_mask else False
+    t_resized = torch.nn.functional.interpolate(
+        t, size=(target_size, target_size), mode=mode, align_corners=align_corners
+    )
+    # (D, 1, target_size, target_size) -> (target_size, target_size, D)
+    res = t_resized.squeeze(1).permute(1, 2, 0).numpy()
+    return res.astype(np.float32)
+
+
+def _process_single_patient_job(args: Tuple) -> Tuple[str, Optional[Tuple[list, list, list]], Optional[str]]:
+    (
+        pdir,
+        modality_list,
+        target_size,
+        slice_selection,
+        min_tumor_ratio,
+        simulate_rough,
+        noise_seed,
+    ) = args
+
+    pid = pdir.name
+    rng = np.random.default_rng(noise_seed)
+
+    mod_paths = [_find_modality_file(pdir, pid, m) for m in modality_list]
+    seg_path = _find_seg_file(pdir, pid)
+
+    if any(p is None for p in mod_paths) or seg_path is None:
+        return pid, None, f"[SKIP] 파일 없음: {pid}"
+
+    try:
+        raw_mod_vols = [_load_volume(str(p)) for p in mod_paths]
+        seg_vol = _load_volume(str(seg_path))
+
+        mod_vols = [_normalize_volume(v) for v in raw_mod_vols]
+
+        if target_size > 0:
+            mod_vols = [_resize_volume_torch(v, target_size, is_mask=False) for v in mod_vols]
+            seg_vol = _resize_volume_torch(seg_vol, target_size, is_mask=True)
+
+        has_et = bool((seg_vol == 4.0).any())
+
+        valid_zs = (
+            range(mod_vols[0].shape[2])
+            if slice_selection == "all"
+            else _select_slices(seg_vol, min_tumor_ratio)
+        )
+
+        samples = []
+        sample_pids = []
+        sample_zs = []
+        depth = int(mod_vols[0].shape[2])
+
+        for z in valid_zs:
+            z_prev = _clip_z(z - 1, depth)
+            z_curr = _clip_z(z, depth)
+            z_next = _clip_z(z + 1, depth)
+
+            img_sl = np.stack([m[:, :, z_curr] for m in mod_vols], axis=0).astype(np.float32)
+            prev_sl = np.stack([m[:, :, z_prev] for m in mod_vols], axis=0).astype(np.float32)
+            next_sl = np.stack([m[:, :, z_next] for m in mod_vols], axis=0).astype(np.float32)
+
+            img_25d = np.concatenate([prev_sl, img_sl, next_sl], axis=0)
+            img_sl_out = img_sl[0] if img_sl.shape[0] == 1 else img_sl
+
+            gt_sl = (seg_vol[:, :, z_curr] > 0).astype(np.float32)
+            seg_sl = np.rint(seg_vol[:, :, z_curr]).astype(np.float32)
+
+            if simulate_rough:
+                rough_sl = make_noisy_mask(gt_sl, rng)
+            else:
+                rough_sl = gt_sl.copy()
+
+            samples.append((img_sl_out, gt_sl, rough_sl, has_et, img_25d, seg_sl))
+            sample_pids.append(pid)
+            sample_zs.append(int(z))
+
+        return pid, (samples, sample_pids, sample_zs), None
+
+    except Exception as e:
+        return pid, None, f"[ERROR] {pid}: {e}"
+
 
 
 def _load_volume(path: str) -> np.ndarray:
@@ -222,18 +321,71 @@ class BraTS2020Dataset(Dataset):
         noise_seed: int = 42,
         simulate_rough: bool = True,
         patient_ids: Optional[List[str]] = None,
+        slice_selection: str = "tumor",
+        num_workers: Optional[int] = None,
+        cache_dir: Optional[str] = None,
     ):
+        if slice_selection not in {"tumor", "all"}:
+            raise ValueError("slice_selection must be tumor or all")
+        self.slice_selection = slice_selection
+        if num_workers is None:
+            num_workers = os.environ.get("BRATS_NUM_WORKERS", "1")
+        self.num_workers = max(1, int(num_workers))
+        self.cache_dir = cache_dir or os.environ.get("BRATS_CACHE_DIR")
         self.root_dir        = root_dir
         self.modality        = modality
         self.target_size     = target_size
         self.min_tumor_ratio = min_tumor_ratio
         self.simulate_rough  = simulate_rough
+        self.noise_seed      = noise_seed
         self.patient_ids     = set(patient_ids) if patient_ids is not None else None
         self.rng = np.random.default_rng(noise_seed)
 
         self._samples: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         self._sample_pids: List[str] = []
+        self._sample_zs: List[int] = []
+        if self._load_cache():
+            return
         self._build(max_patients)
+        self._save_cache()
+
+    def _cache_path(self) -> Optional[Path]:
+        if not self.cache_dir:
+            return None
+        ids = sorted(self.patient_ids) if self.patient_ids is not None else []
+        key = repr((str(self.root_dir), self.modality, self.target_size,
+                    self.slice_selection, self.simulate_rough, self.min_tumor_ratio,
+                    self.noise_seed, self.patient_ids is not None, ids)).encode()
+        digest = hashlib.sha1(key).hexdigest()[:16]
+        return Path(self.cache_dir) / f"brats_{digest}.pkl"
+
+    def _load_cache(self) -> bool:
+        path = self._cache_path()
+        if path is None or not path.is_file():
+            return False
+        try:
+            with path.open("rb") as f:
+                samples, pids, zs = pickle.load(f)
+            self._samples = samples
+            self._sample_pids = pids
+            self._sample_zs = zs
+            print(f"[BraTS Cache] loaded {len(samples)} slices: {path}")
+            return True
+        except Exception as exc:
+            print(f"[BraTS Cache] ignoring invalid cache {path}: {exc}")
+            return False
+
+    def _save_cache(self) -> None:
+        path = self._cache_path()
+        if path is None or not self._samples:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("wb") as f:
+            pickle.dump((self._samples, self._sample_pids, self._sample_zs), f,
+                        protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(path)
+        print(f"[BraTS Cache] saved {len(self._samples)} slices: {path}")
 
     # ── 내부 빌더 ──────────────────────────────────────────
     def _build(self, max_patients: Optional[int]) -> None:
@@ -247,87 +399,60 @@ class BraTS2020Dataset(Dataset):
         elif max_patients is not None:
             patient_dirs = patient_dirs[:max_patients]
 
-        try:
-            from tqdm import tqdm
-            _iter = tqdm(patient_dirs, desc="[BraTS] Loading patients", unit="pt", ncols=80, ascii=True)
-        except ImportError:
-            _iter = patient_dirs
-            print(f"[BraTS Dataset] {len(patient_dirs)}명 환자 로딩 중...")
-
-        import sys
-        sys.stdout.reconfigure(errors='replace') if hasattr(sys.stdout, 'reconfigure') else None
-        total_slices = 0
-        skipped = 0
-
         # 모달리티 파싱 (단일 't1ce' 또는 복합 't1ce+flair', 't1ce+t2' 등 지원)
         if isinstance(self.modality, str):
             self.modality_list = [m.strip() for m in self.modality.replace(',', '+').split('+')]
         else:
             self.modality_list = list(self.modality)
 
-        for pdir in _iter:
-            pid = pdir.name
+        jobs = []
+        for pdir in patient_dirs:
+            patient_seed = int(hashlib.md5(f"{self.noise_seed}_{pdir.name}".encode()).hexdigest()[:8], 16) % (2**31)
+            jobs.append((
+                pdir,
+                self.modality_list,
+                self.target_size,
+                self.slice_selection,
+                self.min_tumor_ratio,
+                self.simulate_rough,
+                patient_seed,
+            ))
 
-            mod_paths = [_find_modality_file(pdir, pid, m) for m in self.modality_list]
-            seg_path = _find_seg_file(pdir, pid)
+        total_slices = 0
+        skipped = 0
+        max_w = min(self.num_workers, len(jobs))
+        print(f"[BraTS Dataset] {len(jobs)}명 환자 병렬 로딩 중 (workers={max_w})...")
 
-            if any(p is None for p in mod_paths) or seg_path is None:
-                skipped += 1
-                if hasattr(_iter, 'write'):
-                    _iter.write(f"  [SKIP] 파일 없음: {pid}")
-                else:
-                    print(f"  [SKIP] 파일 없음: {pid}")
-                continue
-
-            try:
-                # 볼륨 로드 및 정규화
-                mod_vols = [_normalize_volume(_load_volume(str(p))) for p in mod_paths] # list of (H,W,D)
-                seg_vol = _load_volume(str(seg_path))                                   # (H,W,D) 레이블
-
-                # 해당 환자의 전체 볼륨에 레이블 4(ET)가 존재하는지 체크
-                has_et = bool((seg_vol == 4.0).any())
-
-                # 유효 슬라이스 선택
-                valid_zs = _select_slices(seg_vol, self.min_tumor_ratio)
-                for z in valid_zs:
-                    img_sl = self._modal_slice(mod_vols, z)
-                    img_25d = np.concatenate(
-                        [
-                            self._modal_slice(mod_vols, z - 1),
-                            img_sl,
-                            self._modal_slice(mod_vols, z + 1),
-                        ],
-                        axis=0,
-                    )
-                    if img_sl.shape[0] == 1:
-                        img_sl = img_sl[0]
-
-                    gt_sl = (seg_vol[:, :, z] > 0).astype(np.float32)
-                    seg_sl = seg_vol[:, :, z].astype(np.float32)
-                    if self.target_size > 0:
-                        gt_sl = self._resize(gt_sl, is_mask=True)
-                        seg_sl = np.rint(self._resize(seg_sl, is_mask=True)).astype(np.float32)
-
-                    if self.simulate_rough:
-                        rough_sl = make_noisy_mask(gt_sl, self.rng)
+        if max_w > 1:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            import multiprocessing
+            with ProcessPoolExecutor(max_workers=max_w, mp_context=multiprocessing.get_context("spawn")) as executor:
+                futures = {executor.submit(_process_single_patient_job, job): job[0].name for job in jobs}
+                completed = []
+                for future in as_completed(futures):
+                    completed.append(future.result())
+                for pid, res, err_msg in sorted(completed, key=lambda row: row[0]):
+                    if err_msg or res is None:
+                        skipped += 1
+                        print(f"  {err_msg}")
                     else:
-                        rough_sl = gt_sl.copy()
-
-                    self._samples.append((img_sl, gt_sl, rough_sl, has_et, img_25d, seg_sl))
-                    self._sample_pids.append(pid)
-
-                total_slices += len(valid_zs)
-                if hasattr(_iter, 'set_postfix'):
-                    _iter.set_postfix({"slices": total_slices, "this_pt": len(valid_zs)})
-
-            except Exception as e:
-                skipped += 1
-                msg = f"  [ERROR] {pid}: {e}"
-                if hasattr(_iter, 'write'):
-                    _iter.write(msg)
+                        p_samples, p_pids, p_zs = res
+                        self._samples.extend(p_samples)
+                        self._sample_pids.extend(p_pids)
+                        self._sample_zs.extend(p_zs)
+                        total_slices += len(p_samples)
+        else:
+            for job in jobs:
+                pid, res, err_msg = _process_single_patient_job(job)
+                if err_msg or res is None:
+                    skipped += 1
+                    print(f"  {err_msg}")
                 else:
-                    print(msg)
-                continue
+                    p_samples, p_pids, p_zs = res
+                    self._samples.extend(p_samples)
+                    self._sample_pids.extend(p_pids)
+                    self._sample_zs.extend(p_zs)
+                    total_slices += len(p_samples)
 
         print(f"[BraTS Dataset] 완료: 총 {total_slices}개 유효 슬라이스 로드. (건너뜀: {skipped}명)")
 

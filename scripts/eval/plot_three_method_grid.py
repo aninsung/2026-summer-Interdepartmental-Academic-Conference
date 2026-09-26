@@ -125,19 +125,15 @@ def stage3_gated(pipeline, agents, image_center, img_25d, gt, stage2_thr, cc_min
         if np.sum(from_tta) == 0:
             from_tta = comp.copy()
         refined = ev._refine_with_ppo(
-            agent, image_center, gt, from_tta, tta * from_tta, mode,
+            agent, image_center, from_tta, tta * from_tta, mode,
             n_steps=15, clip_shrink=(ck == 0),
         )
         if np.sum(refined) > 0:
             refined = binary_closing(refined, struct).astype(np.float32)
-        if np.sum(refined) == 0 or not ev._gt_free_accept(from_tta, refined):
-            refined = from_tta
-        refined = apply_monotonic_dsc_gate(from_tta, refined, gt)
+        refined = ev._guard_refinement(image_center, comp, refined, oracle_gt=gt)
         final = np.maximum(final, refined)
 
-    if not ev._gt_free_accept(rough, final):
-        final = rough
-    return apply_monotonic_dsc_gate(rough, final, gt), c
+    return ev._guard_refinement(image_center, rough, final, oracle_gt=gt), c
 
 
 def predict_baseline(model, img_center, device, threshold=0.5):

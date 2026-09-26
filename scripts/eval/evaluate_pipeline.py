@@ -1,6 +1,11 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 import os
+import time
+import hashlib
+import json
+from pathlib import Path
+from datetime import datetime, timezone
 import torch
 import numpy as np
 from src.data.brats2020_dataset import BraTS2020Dataset
@@ -9,6 +14,9 @@ from src.models.dynamic_router import AdaptivePipeline
 from src.utils.metrics import apply_monotonic_dsc_gate, dice, filter_small_components, hd95, precision, recall
 from src.envs.mask_refinement_env import MaskRefinementEnv
 from stable_baselines3 import PPO
+from src.utils.refinement_inputs import boundary_energy, component_inputs, stage2_mask
+from src.utils.quality_gate import QualityGate, pair_features
+from src.utils.evaluation_records import RecordWriter, measured_metrics
 from scipy.ndimage import sobel, binary_dilation, binary_erosion, binary_closing, binary_opening
 
 def _compute_edge_map(img: np.ndarray) -> np.ndarray:
@@ -95,7 +103,18 @@ def _edge_accept(image: np.ndarray, rough: np.ndarray, refined: np.ndarray, marg
     return e_refined >= (e_rough * (1.0 - margin))
 
 
-def _refine_with_ppo(agent, image, init_mask, prob_map, refinement_mode, n_steps=15, clip_shrink=False, clip_shrink_threshold=150):
+def _guard_refinement(image, rough, refined, *, edge_gate=True, oracle_gt=None):
+    """TTA/PPO/closing 전체 후보를 원래 마스크와 비교한다. GT는 명시적 상한 평가 전용."""
+    if not _gt_free_accept(rough, refined):
+        return rough.copy()
+    if edge_gate and not _edge_accept(image, rough, refined):
+        return rough.copy()
+    if oracle_gt is not None:
+        return apply_monotonic_dsc_gate(rough, refined, oracle_gt)
+    return refined.copy()
+
+
+def _refine_with_ppo(agent, image, init_mask, prob_map, refinement_mode, n_steps=15, clip_shrink=False, clip_shrink_threshold=35):
     """
     100% GT-Free 순수 자율 추론:
     정답(GT)을 보지 않고 입력 영상, 초기 마스크, 확률 맵만으로 PPO가 15스텝 동안 경계를 보정합니다.
@@ -108,39 +127,95 @@ def _refine_with_ppo(agent, image, init_mask, prob_map, refinement_mode, n_steps
         np.expand_dims(init_mask, 0),
         uncertainty_maps=np.expand_dims(prob_map, 0),
         max_steps=n_steps,
-        target_dsc=1.0,
+        target_dsc=float("inf"),  # 더미 GT에 의한 조기 종료 방지
         refinement_mode=refinement_mode,
+        refinement_profile=getattr(agent, "refinement_profile", "legacy"),
     )
     obs, _ = env.reset(seed=0)
     for _ in range(n_steps):
-        try:
-            action, _ = agent.predict(obs, deterministic=True)
-            if clip_shrink and np.sum(env._current_mask) < clip_shrink_threshold:
-                action = np.maximum(0.0, action)
-            obs, _, _, truncated, _ = env.step(action)
-            if truncated:
-                break
-        except Exception as e:
-            print(f"Skipping RL step for component due to: {e}")
+        action, _ = agent.predict(obs, deterministic=True)
+        if clip_shrink and getattr(agent, "refinement_profile", "legacy") != "ppo_v3" and np.sum(env._current_mask) < clip_shrink_threshold:
+            action = np.maximum(0.0, action)
+        obs, _, terminated, truncated, _ = env.step(action)
+        if terminated or truncated:
             break
     # 15스텝 완주 후의 최종 결과 마스크 반환 (GT 대조 최고점 선택 없음)
     return env._current_mask.copy()
+
+def refinement_candidates(agents, image, rough, probability, slice_class, threshold,
+                          confidence_threshold=None, small_confidence_threshold=None, original_probability=None,
+                          run_ppo=True, edge_gate=True, energy_gate=False, energy_threshold=0.12, energy_model=None, energy_device=None, refinement_profile=None):
+    """Shared candidates for ablation; this interface deliberately cannot accept GT."""
+    if refinement_profile is None:
+        refinement_profile = getattr(agents.get(slice_class), "refinement_profile", "legacy")
+    if refinement_profile == "ppo_v3":
+        # TTA conditions the policy; Stage 2 remains the unchanged initial mask.
+        # No component union, closing, or hard rejection of empty predictions.
+        if energy_gate or confidence_threshold is not None or small_confidence_threshold is not None:
+            raise ValueError("ppo_v3 raw ablation does not support component bypass gates")
+        masks = {'stage2': rough.copy(), 'augmentation': rough.copy()}
+        if not run_ppo:
+            return masks, 0, []
+        agent = agents.get(slice_class)
+        if agent is None or getattr(agent, 'refinement_profile', None) != 'ppo_v3':
+            raise ValueError('ppo_v3 requires a matching whole-slice agent')
+        masks['ppo_raw'] = _refine_with_ppo(
+            agent, image, rough, probability,
+            {0: 'small', 1: 'medium', 2: 'large'}[slice_class])
+        return masks, 1, []
+    augmented = np.zeros_like(rough)
+    raw = np.zeros_like(rough)
+    guarded = np.zeros_like(rough)
+    ppo_calls = 0
+    energy_scores = []
+    original_probability = probability if original_probability is None else original_probability
+    for comp, ck, initial, component_probability in component_inputs(rough, probability, threshold):
+        if initial is None:
+            augmented = np.maximum(augmented, comp)
+            raw = np.maximum(raw, comp)
+            guarded = np.maximum(guarded, comp)
+            continue
+        augmented_comp = binary_closing(initial, np.ones((3, 3))).astype(np.float32)
+        augmented = np.maximum(augmented, augmented_comp)
+        bypass_threshold = (small_confidence_threshold if ck == 0 and small_confidence_threshold is not None
+                            else confidence_threshold)
+        bypass = bypass_threshold is not None and float(probability[initial > .5].mean()) >= bypass_threshold
+        energy = boundary_energy(image, original_probability, probability, comp, model=energy_model, device=energy_device)
+        energy_scores.append(energy)
+        if energy_gate and energy < energy_threshold:
+            bypass = True
+        if run_ppo and not bypass:
+            if agents.get(ck) is None:
+                raise ValueError(f'Missing PPO agent for class {ck}')
+            observation_probability = (component_probability if getattr(agents[ck], 'refinement_profile', 'legacy') == 'ppo_v2'
+                                       else probability * initial)
+            refined = _refine_with_ppo(agents[ck], image, initial, observation_probability,
+                                      {0: 'small', 1: 'medium', 2: 'large'}[ck], clip_shrink=ck == 0)
+            ppo_calls += 1
+            refined = binary_closing(refined, np.ones((3, 3))).astype(np.float32)
+        else:
+            refined = augmented_comp
+        raw = np.maximum(raw, refined)
+        guarded = np.maximum(guarded, _guard_refinement(image, comp, refined, edge_gate=edge_gate))
+    guarded = _guard_refinement(image, rough, guarded, edge_gate=edge_gate)
+    return {'stage2': rough.copy(), 'augmentation': augmented, 'ppo_raw': raw, 'heuristic': guarded}, ppo_calls, energy_scores
+
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="3-Stage Dynamic Routing Pipeline Evaluation")
     parser.add_argument("--train_root", type=str, default="src/data/archive", help="데이터셋 경로")
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
-    parser.add_argument("--max_patients", type=int, default=210, help="평가 풀 환자 수 (split 생성 기준)")
+    parser.add_argument("--max_patients", type=int, default=1251, help="평가 풀 환자 수 (split 생성 기준)")
     parser.add_argument("--max_samples_per_class", type=int, default=None, help="클래스당 최대 샘플 수 (None이면 제한 없음)")
     parser.add_argument("--patient_split", type=str, default=DEFAULT_SPLIT_PATH)
-    parser.add_argument("--split_role", type=str, default="val", choices=["train", "val", "all"])
+    parser.add_argument("--split_role", type=str, default="val", choices=["train", "val", "test", "all"])
     parser.add_argument("--oracle_routing", action="store_true", help="GT 면적으로 Expert를 고르는 상한 평가")
-    parser.add_argument("--confidence_threshold", type=float, default=0.95, help="이 값 이상 평균 확률이면 PPO 생략 (고신뢰도 보호 우회, 기본값: 0.95)")
-    parser.add_argument("--small_confidence_threshold", type=float, default=0.80, help="Small 클래스용 고신뢰도 보호 우회 임계값 (기본값: 0.80)")
+    parser.add_argument("--confidence_threshold", type=float, default=None, help="이 값 이상 평균 확률이면 PPO 생략 (기본 비활성)")
+    parser.add_argument("--small_confidence_threshold", type=float, default=None, help="Small 전용 confidence 임계값 (미지정 시 공통값)")
     parser.add_argument("--disable_edge_gate", action="store_true", help="비지도 MRI 에지 물리 일치도 게이트 비활성화")
-    parser.add_argument("--stage2_thresholds", type=str, default="0.70,0.70,0.50",
-                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. Small=0.70, Medium=0.70, Large=0.50.")
+    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
+                        help="클래스별(Small,Medium,Large) Stage 2 이진화 임계값. Small=0.80, Medium=0.80, Large=0.50.")
     parser.add_argument("--skip_ppo", action="store_true", help="Stage 3 생략 (Stage 2 단독 베이스라인 측정)")
     parser.add_argument("--allow_oracle_gate", action="store_true", help="연구용 오라클 단조 게이트(GT 필요) 활성화")
     parser.add_argument("--micro_area_floor", type=float, default=80.0,
@@ -149,7 +224,64 @@ def main():
                         help="마이크로 조각 임계값 완화의 하한.")
     parser.add_argument("--cc_min_sizes", type=str, default="0,15,25",
                         help="클래스별(Small,Medium,Large) 연결요소 최소 픽셀. 0이면 비활성.")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--deterministic", action="store_true", default=True)
+    parser.add_argument("--no_deterministic", action="store_false", dest="deterministic")
+    parser.add_argument("--eval_mode", choices=["stage2", "augmentation", "ppo_raw", "heuristic", "quality", "oracle", "compare"], default="heuristic")
+    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3"], default="legacy")
+    parser.add_argument("--energy_gate", action="store_true", help="GT-free energy selector for PPO components")
+    parser.add_argument("--energy_threshold", type=float, default=0.12)
+    parser.add_argument("--energy_model", help="trained EnergyModel checkpoint (optional)")
+    parser.add_argument("--agent_dir", default=None)
+    parser.add_argument("--quality_gate", help="Frozen calibrated quality gate JSON")
+    parser.add_argument("--slice_selection", choices=["tumor", "all"], default="tumor")
+    parser.add_argument("--output_dir", help="New directory for measured records (must not exist)")
+    parser.add_argument("--save_masks", action="store_true")
+    parser.add_argument("--no_plots", action="store_true")
     args = parser.parse_args()
+    if args.skip_ppo:
+        if args.eval_mode not in {"heuristic", "stage2"} or args.allow_oracle_gate:
+            parser.error("--skip_ppo cannot be combined with refinement modes/oracle gate")
+        args.eval_mode = "stage2"
+    if args.allow_oracle_gate:
+        if args.eval_mode not in {"heuristic", "oracle", "compare"}:
+            parser.error("--allow_oracle_gate requires oracle/compare mode")
+        if args.eval_mode != "compare":
+            args.eval_mode = "oracle"
+    if args.eval_mode == "quality" and not args.quality_gate:
+        parser.error("--eval_mode quality requires --quality_gate")
+    if args.refinement_profile == "ppo_v3":
+        if args.slice_selection != "all":
+            parser.error("ppo_v3 requires --slice_selection all to match training")
+        if args.micro_area_floor != 80. or args.micro_thr_floor != .15:
+            parser.error("ppo_v3 requires the shared training micro thresholds (80, 0.15)")
+        if args.eval_mode not in {"stage2", "augmentation", "ppo_raw", "compare", "oracle"}:
+            parser.error("ppo_v3 supports stage2/augmentation/ppo_raw/compare/oracle; use --eval_mode compare")
+        if args.quality_gate or args.energy_gate or args.energy_model or args.confidence_threshold is not None or args.small_confidence_threshold is not None:
+            parser.error("ppo_v3 requires ungated evaluation; legacy gates are not calibrated for it")
+    args.agent_dir = args.agent_dir or (f"checkpoints/{args.refinement_profile}" if args.refinement_profile != "legacy" else "checkpoints")
+    quality_gate = QualityGate.load(args.quality_gate) if args.quality_gate else None
+    energy_model = None
+    if args.energy_model:
+        from src.models.energy_model import EnergyModel
+        energy_model = EnergyModel().to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        energy_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        state = torch.load(args.energy_model, map_location=energy_device, weights_only=True)
+        energy_model.load_state_dict(state['model'] if isinstance(state, dict) and 'model' in state else state)
+        energy_model.eval()
+    run_ppo = args.eval_mode not in {"stage2", "augmentation"}
+    required = ["shape_classifier_best.pt", "caranet_best.pt", "unetplusplus_best.pt", "segresnet_best.pt"]
+    if run_ppo:
+        required += ["ppo_small.zip", "ppo_medium.zip", "ppo_large.zip"]
+    checkpoint_hashes = {}
+    for name in required:
+        path = Path(args.agent_dir if name.startswith("ppo_") else "checkpoints") / name
+        if not path.is_file():
+            raise FileNotFoundError(f"Evaluation requires trained checkpoint: {path}")
+        with path.open("rb") as f:
+            checkpoint_hashes[name] = hashlib.file_digest(f, "sha256").hexdigest()
+    from src.utils.seed import set_seed
+    set_seed(args.seed, deterministic=args.deterministic)
 
     stage2_thr = [float(t) for t in args.stage2_thresholds.split(",")]
     if len(stage2_thr) != 3:
@@ -165,8 +297,14 @@ def main():
     
     patient_ids = None
     if args.split_role != "all":
-        split = load_or_create_patient_split(args.train_root, args.max_patients, args.patient_split)
-        patient_ids = split[args.split_role]
+        if args.split_role == "test":
+            split = json.loads(Path(args.patient_split).read_text())
+            patient_ids = split.get("test", [])
+            if not patient_ids or set(patient_ids) & (set(split.get("train", [])) | set(split.get("val", []))):
+                raise ValueError("test requires nonempty patient IDs disjoint from train/val in the supplied split file")
+        else:
+            split = load_or_create_patient_split(args.train_root, args.max_patients, args.patient_split)
+            patient_ids = split[args.split_role]
         print(f"Eval split: {args.split_role} ({len(patient_ids)} patients) from {args.patient_split}")
 
     dataset = BraTS2020Dataset(
@@ -176,15 +314,39 @@ def main():
         max_patients=None if patient_ids is not None else args.max_patients,
         patient_ids=patient_ids,
         simulate_rough=False,
+        slice_selection=args.slice_selection,
     )
     
+    if not len(dataset):
+        raise ValueError("No evaluation samples")
+    if patient_ids is not None and set(patient_ids) != set(dataset._sample_pids):
+        raise ValueError("Some requested patients yielded no slices; check data files and slice selection")
+    if quality_gate:
+        quality_gate.check_patients(dataset._sample_pids)
+        if quality_gate.artifact['checkpoint_hashes'] != checkpoint_hashes:
+            raise ValueError("Quality gate and evaluation checkpoint hashes differ")
+        for key in ('stage2_thresholds', 'cc_min_sizes', 'modality', 'slice_selection',
+                    'confidence_threshold', 'small_confidence_threshold', 'micro_area_floor', 'micro_thr_floor', 'refinement_profile'):
+            if quality_gate.artifact['evaluation_config'][key] != getattr(args, key):
+                raise ValueError(f"Quality gate evaluation configuration differs: {key}")
+    args.output_dir = args.output_dir or "results/evaluation_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    writer = RecordWriter(args.output_dir, {
+        'config': vars(args), 'checkpoint_hashes': checkpoint_hashes,
+        'patients': sorted(set(dataset._sample_pids)),
+        'gt_selected_slices': args.slice_selection == 'tumor',
+        'distance_definition': '2D surface HD95 in resized pixels; one-empty is null',
+        'quality_gate_artifact': quality_gate.artifact if quality_gate else None,
+        'ppo_unit': 'slice' if args.refinement_profile == 'ppo_v3' else 'component',
+        'augmentation_note': ('TTA probability input only; mask equals Stage 2'
+                              if args.refinement_profile == 'ppo_v3' else 'TTA rethreshold + closing'),
+    })
     # Extract arrays
     images, gt_masks, _ = dataset.get_numpy_arrays()
     images_25d = dataset.get_numpy_25d_arrays()
     
     print("Loading 3-Stage Pipeline Models...")
     in_ch = images.shape[1] if images.ndim == 4 else 1
-    pipeline = AdaptivePipeline(device, in_channels=in_ch)
+    pipeline = AdaptivePipeline(device, in_channels=in_ch, strict_checkpoints=True)
     
     # 3. Stage 3: RL Refiner (Multi-Agent)
     print("Loading PPO Refiners...")
@@ -195,15 +357,17 @@ def main():
         "large": "ppo_large.zip"
     }
     for mode, class_idx in zip(["small", "medium", "large"], [0, 1, 2]):
-        agent_path = f"checkpoints/{agent_name_map[mode]}"
-        if args.skip_ppo:
+        agent_path = os.path.join(args.agent_dir, agent_name_map[mode])
+        if not run_ppo:
             agents[class_idx] = None
         elif os.path.exists(agent_path):
             print(f"Loading PPO Agent: {agent_path}")
             agents[class_idx] = PPO.load(agent_path, device=device)
+            loaded_profile = getattr(agents[class_idx], 'refinement_profile', 'legacy')
+            if loaded_profile != args.refinement_profile:
+                raise ValueError(f"PPO checkpoint profile {loaded_profile} != {args.refinement_profile}; retrain with the selected profile")
         else:
-            print(f"[Warning] PPO Agent not found: {agent_path}. S3 Refinement will be skipped for class {class_idx}.")
-            agents[class_idx] = None
+            raise FileNotFoundError(f"PPO checkpoint missing: {agent_path}; use --skip_ppo for Stage 2 evaluation")
         
     initial_dsc_list = []
     initial_hd95_list = []
@@ -229,6 +393,9 @@ def main():
     
     print("\nStarting Evaluation...")
     for i in range(len(images)):
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        started = time.perf_counter()
         img_np = images_25d[i]
         gt_np = gt_masks[i]
         center_np = images[i]
@@ -265,111 +432,77 @@ def main():
         # ── Micro Fragment 임계값 완화 (Small 전용) ──
         # 클래스 임계값에서 조각이 지나치게 작아지면 소실을 막기 위해 임계값을
         # 단계적으로 낮춘다. 면적 하한(상수)만 보며 GT는 참조하지 않는다.
-        rough_mask_np = (rough_prob_np > stage2_thr[c]).astype(np.float32)
-        if c == 0 and np.sum(rough_mask_np) < args.micro_area_floor:
-            for thr in np.arange(stage2_thr[c] - 0.05, args.micro_thr_floor - 1e-9, -0.05):
-                cand_mask = (rough_prob_np > thr).astype(np.float32)
-                rough_mask_np = cand_mask
-                if np.sum(cand_mask) >= args.micro_area_floor:
-                    break
-        rough_mask_np = filter_small_components(rough_mask_np, cc_min[c])
-            
+        rough_mask_np = stage2_mask(rough_prob_np, c, stage2_thr, cc_min,
+                                    args.micro_area_floor, args.micro_thr_floor)
+
         init_dsc = dice(rough_mask_np, gt_np)
-        init_hd95 = hd95(rough_mask_np, gt_np)
+        init_hd95 = measured_metrics(rough_mask_np, gt_np)["hd95_surface_px"]
+        init_hd95 = float("nan") if init_hd95 is None else init_hd95
         initial_dsc_list.append(init_dsc)
         initial_hd95_list.append(init_hd95)
         
-        # Stage 3: Component-wise Independent Refinement
-        from scipy.ndimage import label as sp_label
-        lbl, num_feats = sp_label(rough_mask_np > 0.2)
-        
-        valid_comp_indices = [k for k in range(1, num_feats + 1) if np.sum(lbl == k) >= 5]
-        
-        final_mask_np = np.zeros_like(rough_mask_np)
-        for k in range(1, num_feats + 1):
-            if k not in valid_comp_indices:
-                final_mask_np = np.maximum(final_mask_np, (lbl == k).astype(np.float32))
-
-        prob_tta_np = _tta_probability(pipeline, img_t, rough_mask_t, class_pred)
-                
-        # 유효 컴포넌트들을 각각 독립적으로 보정하여 합산 (분리된 종양들의 독립 미세 조정 지원)
-        for k in valid_comp_indices:
-            comp_mask_k = (lbl == k).astype(np.float32)
-            comp_area = float(np.sum(comp_mask_k))
-            
-            # Component-level Size Routing (개별 컴포넌트 크기에 따라 적합한 전문가 에이전트 매핑)
-            if comp_area < 300:
-                ck = 0
-            elif comp_area < 700:
-                ck = 1
-            else:
-                ck = 2
-                
-            agent_k = agents[ck]
-            ref_mode_k = {0: "small", 1: "medium", 2: "large"}[ck]
-            
-            if agent_k is None:
-                final_mask_np = np.maximum(final_mask_np, comp_mask_k)
-                continue
-
-            struct_k = np.ones((3, 3))
-            dilate_iter = 2 if ck == 0 else 3
-            comp_dilated = binary_dilation(comp_mask_k, struct_k, iterations=dilate_iter)
-            is_micro = (ck == 0 and comp_area < 50)
-            # TTA 재이진화는 Stage 2와 같은 슬라이스 클래스 임계값을 쓴다.
-            # 컴포넌트 크기 ck 로 자르면 Large 슬라이스의 작은 덩어리가 Small 0.80으로 다시 잘린다.
-            tta_thr = 0.30 if is_micro else stage2_thr[c]
-            comp_from_tta = (prob_tta_np > tta_thr).astype(np.float32) * comp_dilated
-            if np.sum(comp_from_tta) == 0:
-                comp_from_tta = comp_mask_k.copy()
-
-            if args.confidence_threshold is not None:
-                nz = comp_from_tta > 0.5
-                mean_p = float(np.mean(prob_tta_np[nz])) if np.any(nz) else 0.0
-                bypass_thr = args.small_confidence_threshold if ck == 0 else args.confidence_threshold
-                if mean_p >= bypass_thr:
-                    final_mask_np = np.maximum(final_mask_np, comp_from_tta)
-                    continue
-
-            refined_k_mask = _refine_with_ppo(
-                agent_k,
-                images[i],
-                comp_from_tta,
-                prob_tta_np * comp_from_tta,
-                ref_mode_k,
-                n_steps=15,
-                clip_shrink=(ck == 0),
-                clip_shrink_threshold=150,
+        if args.eval_mode == 'stage2':
+            masks, ppo_calls = {'stage2': rough_mask_np.copy()}, 0
+            prob_tta_np = rough_prob_np
+            energy_scores = []
+        else:
+            prob_tta_np = _tta_probability(pipeline, img_t, rough_mask_t, class_pred)
+            masks, ppo_calls, energy_scores = refinement_candidates(
+                agents, center_np, rough_mask_np, prob_tta_np, c, stage2_thr[c],
+                args.confidence_threshold, args.small_confidence_threshold,
+                original_probability=rough_prob_np, run_ppo=run_ppo, edge_gate=not args.disable_edge_gate,
+                energy_gate=args.energy_gate, energy_threshold=args.energy_threshold,
+                energy_model=energy_model, energy_device=device,
+                refinement_profile=args.refinement_profile,
             )
-            if np.sum(refined_k_mask) > 0:
-                refined_k_mask = binary_closing(refined_k_mask, struct_k).astype(np.float32)
-            # 1. 면적 가드 검사 (0.2x ~ 4.0x)
-            if np.sum(refined_k_mask) == 0 or not _gt_free_accept(comp_from_tta, refined_k_mask):
-                refined_k_mask = comp_from_tta
-            # 2. 비지도 MRI 에지 물리 일치도 가드 검사 (정답 불필요)
-            elif not args.disable_edge_gate:
-                if not _edge_accept(images[i], comp_from_tta, refined_k_mask):
-                    refined_k_mask = comp_from_tta
-
-            if args.allow_oracle_gate:
-                refined_k_mask = apply_monotonic_dsc_gate(comp_from_tta, refined_k_mask, gt_np)
-            final_mask_np = np.maximum(final_mask_np, refined_k_mask)
-
-        # 슬라이스 레벨 2중 비지도 안전 가드 검사 (GT 불필요)
-        if not _gt_free_accept(rough_mask_np, final_mask_np):
-            final_mask_np = rough_mask_np
-        elif not args.disable_edge_gate:
-            if not _edge_accept(images[i], rough_mask_np, final_mask_np):
-                final_mask_np = rough_mask_np
-
-        if args.allow_oracle_gate:
-            gated_mask = apply_monotonic_dsc_gate(rough_mask_np, final_mask_np, gt_np)
-            if not np.array_equal(gated_mask, final_mask_np):
-                monotonic_reverts += 1
-            final_mask_np = gated_mask
+        features, gate_score, gate_accepted = None, None, None
+        energy_before, energy_after = None, None
+        if run_ppo:
+            features = pair_features(center_np, rough_prob_np, prob_tta_np, rough_mask_np, masks['ppo_raw'])
+            # Learned energy is a GT-free safety layer for accepting PPO output.
+            if args.energy_gate and energy_model is not None:
+                energy_before = boundary_energy(
+                    center_np, rough_prob_np, prob_tta_np, rough_mask_np,
+                    model=energy_model, device=device,
+                )
+                energy_after = boundary_energy(
+                    center_np, rough_prob_np, prob_tta_np, masks['ppo_raw'],
+                    model=energy_model, device=device,
+                )
+            energy_accept = (energy_after is None or energy_after <= energy_before + 1e-6)
+            if quality_gate or args.energy_gate:
+                gate_score = quality_gate.predict_delta(features) if quality_gate else None
+                quality_accept = quality_gate.accept(features) if quality_gate else True
+                gate_accepted = (quality_accept and energy_accept
+                                 and _gt_free_accept(rough_mask_np, masks['ppo_raw']))
+                masks['quality'] = masks['ppo_raw'].copy() if gate_accepted else rough_mask_np.copy()
+            if args.eval_mode == 'oracle' or (args.eval_mode == 'compare' and args.allow_oracle_gate):
+                masks['oracle'] = apply_monotonic_dsc_gate(rough_mask_np, masks['ppo_raw'], gt_np)
+                monotonic_reverts += int(not np.array_equal(masks['oracle'], masks['ppo_raw']))
+        selected_mode = ('quality' if (quality_gate or args.energy_gate) else 'heuristic') if args.eval_mode == 'compare' else args.eval_mode
+        if args.refinement_profile == 'ppo_v3' and args.eval_mode == 'compare':
+            selected_mode = 'ppo_raw'
+        final_mask_np = masks[selected_mode]
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        elapsed = time.perf_counter() - started
+        evaluated = masks if args.eval_mode == 'compare' else {k: masks[k] for k in {'stage2', selected_mode}}
+        record = {
+            'sample_index': i, 'patient_id': dataset._sample_pids[i], 'slice_z': dataset._sample_zs[i],
+            'routing_class': int(c), 'oracle_routing': args.oracle_routing,
+            'methods': {name: measured_metrics(mask, gt_np) for name, mask in evaluated.items()},
+            'shared_inference_seconds': elapsed, 'ppo_component_calls': ppo_calls if args.refinement_profile != 'ppo_v3' else 0,
+            'quality_features': features.tolist() if features is not None else None,
+            'quality_predicted_delta': gate_score, 'quality_accepted': gate_accepted,
+            'energy_scores': energy_scores, 'energy_before': energy_before,
+            'energy_after': energy_after, 'energy_gate': args.energy_gate,
+            'ppo_slice_calls': ppo_calls if args.refinement_profile == 'ppo_v3' else 0,
+        }
+        writer.append(record, masks={**evaluated, 'gt': gt_np} if args.save_masks else None)
 
         fin_dsc = dice(final_mask_np, gt_np)
-        fin_hd95 = hd95(final_mask_np, gt_np)
+        fin_hd95 = measured_metrics(final_mask_np, gt_np)["hd95_surface_px"]
+        fin_hd95 = float("nan") if fin_hd95 is None else fin_hd95
 
         final_dsc_list.append(fin_dsc)
         final_hd95_list.append(fin_hd95)
@@ -412,20 +545,24 @@ def main():
         if (i+1) % 100 == 0:
             print(f"Processed {i+1}/{len(images)} slices...")
             
-    gate_str = "monotonic DSC gate (Oracle upper bound)" if args.allow_oracle_gate else "100% GT-Free Deployable Mode"
-    print(f"\n--- Pipeline Evaluation ({'oracle routing' if args.oracle_routing else 'classifier routing'}, PPO all classes, {gate_str}, CC filter) ---")
+    writer.finish()
+    print(f"Measured evaluation records: {args.output_dir}")
+    print("HD95: 2D boundary distances in resized pixels; one-empty masks are undefined (NaN/null).")
+    gate_str = "Oracle upper bound (GT used)" if args.allow_oracle_gate or args.eval_mode == "oracle" or args.oracle_routing else "GT-Free refinement"
+    stage_str = args.eval_mode
+    print(f"\n--- Pipeline Evaluation ({'oracle routing' if args.oracle_routing else 'classifier routing'}, {stage_str}, {gate_str}, CC filter) ---")
     print(f"Total Slices Evaluated: {len(initial_dsc_list)}")
     if args.allow_oracle_gate:
         print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
     else:
         conf_str = f"Confidence Bypass (Small >= {args.small_confidence_threshold}, Med/Large >= {args.confidence_threshold})" if args.confidence_threshold is not None else "Confidence Bypass: OFF"
         edge_str = "MRI Edge Physical Guard: ON" if not args.disable_edge_gate else "MRI Edge Physical Guard: OFF"
-        print(f"Unsupervised Safety Guards: {conf_str} | {edge_str} (100% GT-Free)")
+        print(f"Unsupervised Safety Guards: {conf_str} | {edge_str} (guards use no GT)")
     print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
     print(f"Average Initial DSC  (Stage 2):        {np.mean(initial_dsc_list):.4f}")
     print(f"Average Final   DSC  (Stage 3 RL):     {np.mean(final_dsc_list):.4f}")
-    print(f"Average Initial HD95 (px):             {np.mean(initial_hd95_list):.4f}")
-    print(f"Average Final   HD95 (px):             {np.mean(final_hd95_list):.4f}")
+    print(f"Surface Initial HD95 (px):             {np.mean(initial_hd95_list):.4f}")
+    print(f"Surface Final   HD95 (px):             {np.mean(final_hd95_list):.4f}")
     
     print("\n--- Class-wise Performance Breakdown ---")
     names = {0: "Small (CaraNet)", 1: "Medium (UNet++)", 2: "Large (SegResNet)"}
@@ -455,7 +592,8 @@ def main():
     
     # 시각화: 클래스 평균 Final DSC에 가깝고, Final > Initial인 원본 2장 → 총 6장
     pipeline_samples = _select_pipeline_samples(all_candidates, class_final_dsc, n=2)
-    _plot_pipeline_results(pipeline_samples, output_dir="results")
+    if not args.no_plots:
+        _plot_pipeline_results(pipeline_samples, output_dir=os.path.join(args.output_dir, "plots"))
 
 
 def _select_pipeline_samples(all_candidates, class_final_dsc, n=2):

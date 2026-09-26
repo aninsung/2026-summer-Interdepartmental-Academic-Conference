@@ -1,3 +1,4 @@
+# PPO 자체 개선 실험: 기존 08-20 설정은 ppo_brats.yaml에 보존
 # PPO 에이전트 학습 설정
 # 사용 예시: python train_agent.py --config configs/ppo_brats.yaml
 
@@ -19,12 +20,12 @@ modality: "t1ce+flair"
 image_size: 128
 
 # 환자 수 제한 (Stage 1–4 공통, run_pipeline.py 기본값과 동일)
-max_train_patients: 1251
+max_train_patients: 210
 
 # ──────────────────────────────────────────────
 # RL 환경 설정
 # ──────────────────────────────────────────────
-max_steps: 15  # 추론과 동일한 ppo_v2 에피소드 길이
+max_steps: 15  # 추론과 동일한 에피소드 길이
 target_dsc: 1.0          # 0.88 → 1.0: 초정밀 보정 학습을 위해 조기종료 비활성화 (1.0 도달 시만 종료)
 step_penalty: 0.001       # 0.005 → 0.001: 탐색 억제 최대한 완화
 
@@ -58,13 +59,12 @@ stop_plateau: false
 # ──────────────────────────────────────────────
 # 저장 경로
 # ──────────────────────────────────────────────
-save_path: "checkpoints/ppo_refiner"
-log_path: "logs/ppo"
+save_path: "checkpoints/ppo_v2/ppo_refiner"
+log_path: "logs/ppo_v2"
 unet_checkpoint: "checkpoints/segresnet_best.pt"
 model_type: "segresnet"
 
 
-# 논문용 기본 프로필: 학습과 추론 입력 정합
 refinement_profile: ppo_v2
 stage2_thresholds: "0.80,0.80,0.50"
 cc_min_sizes: "0,15,25"

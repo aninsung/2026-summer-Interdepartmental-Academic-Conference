@@ -50,9 +50,15 @@ def train_unetplusplus(
     patient_split: str = None,
     seed: int = 42,
     deterministic: bool = False,
+    num_workers: int = 8,
 ) -> None:
     from src.utils.seed import set_seed
     set_seed(seed, deterministic)
+
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+        if not deterministic:
+            torch.backends.cudnn.benchmark = True
 
     if device == "auto":
         from src.utils.device import get_torch_device
@@ -112,7 +118,7 @@ def train_unetplusplus(
 
         return {"image": images, "gt_mask": gt_masks, "rough_mask": rough_masks}
 
-    n_workers = 0
+    n_workers = max(0, int(num_workers))
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         num_workers=n_workers, pin_memory=True,
@@ -262,6 +268,7 @@ if __name__ == "__main__":
     # 학습 관련
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--save_path", type=str, default="checkpoints/unetplusplus_best.pt")
     parser.add_argument("--device", type=str, default="auto")

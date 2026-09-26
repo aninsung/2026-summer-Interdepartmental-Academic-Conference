@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--train_root", type=str, default="src/data/archive", help="데이터셋 경로")
     parser.add_argument("--max_train_patients", type=int, default=None, help="학습 환자 수 제한 (None이면 전체)")
     parser.add_argument("--batch_size", type=int, default=64, help="배치 크기")
+    parser.add_argument("--num_workers", type=int, default=8, help="DataLoader workers")
     parser.add_argument("--epochs", type=int, default=15, help="에폭 수")
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
@@ -32,6 +33,9 @@ def main():
     set_seed(args.seed, args.deterministic)
     print(f"Seed: {args.seed} (deterministic={args.deterministic})")
 
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.benchmark = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     
@@ -52,8 +56,8 @@ def main():
     val_size = len(val_set)
     print(f"Total valid slices: {train_size + val_size} (train={train_size}, val={val_size})")
     
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=max(0, args.num_workers), pin_memory=True, persistent_workers=(args.num_workers > 0))
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=max(0, args.num_workers), pin_memory=True, persistent_workers=(args.num_workers > 0))
     
     # 3. 모델 초기화
     sample_img, _ = train_set[0]

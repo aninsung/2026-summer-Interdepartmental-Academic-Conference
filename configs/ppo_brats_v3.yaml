@@ -1,0 +1,27 @@
+# Experimental whole-slice refiner. Compare on validation before using test.
+use_real_data: true
+train_root: src/data/archive
+modality: t1ce+flair
+image_size: 128
+max_train_patients: 400
+refinement_profile: ppo_v3
+max_steps: 15
+target_dsc: 1.0
+step_penalty: 0.001
+total_timesteps: 300000
+n_envs: 4
+n_steps: 256
+batch_size: 128
+n_epochs: 10
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.01
+learning_rate: 0.0001
+net_arch: [256, 128]
+stop_dsc_target: 0
+stop_plateau: false
+save_path: checkpoints/ppo_v3/ppo_refiner
+log_path: logs/ppo_v3
+stage2_thresholds: "0.80,0.80,0.50"
+cc_min_sizes: "0,15,25"

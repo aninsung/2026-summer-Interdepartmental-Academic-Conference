@@ -13,8 +13,9 @@ class AdaptivePipeline(nn.Module):
     Small Expert는 2.5D(prev/center/next) 입력을 쓰고,
     Large Expert는 ED/TC 2채널 출력을 WT로 합친다.
     """
-    def __init__(self, device, in_channels=1):
+    def __init__(self, device, in_channels=1, strict_checkpoints=False):
         super().__init__()
+        self.strict_checkpoints = strict_checkpoints
         self.device = device
         self.base_in_channels = in_channels
         
@@ -103,6 +104,8 @@ class AdaptivePipeline(nn.Module):
                     model.load_state_dict(st)
                     return model
                 except Exception as e:
+                    if self.strict_checkpoints:
+                        raise
                     print(f"[Router] {desc} load failed ({e}), trying default out_channels={out_channels}")
                     model = fn(in_channels=ex_in_ch, out_channels=out_channels).to(device)
                     model.load_state_dict(st, strict=False)

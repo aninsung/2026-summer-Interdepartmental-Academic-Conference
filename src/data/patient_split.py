@@ -40,33 +40,37 @@ def _split_cache_valid(
     root_dir: str,
     max_patients: Optional[int],
     val_ratio: float,
+    test_ratio: float,
     seed: int,
 ) -> bool:
     return (
         split.get("root_dir") == root_dir
         and split.get("max_patients") == max_patients
         and split.get("val_ratio") == val_ratio
+        and split.get("test_ratio", 0.0) == test_ratio
         and split.get("seed") == seed
     )
 
 
 def load_or_create_patient_split(
     root_dir: str,
-    max_patients: Optional[int] = 210,
+    max_patients: Optional[int] = 1251,
     split_path: str = DEFAULT_SPLIT_PATH,
-    val_ratio: float = 0.2,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
     seed: int = 42,
 ) -> Dict:
     path = Path(split_path)
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
             split = json.load(f)
-        if _split_cache_valid(split, root_dir, max_patients, val_ratio, seed):
+        if _split_cache_valid(split, root_dir, max_patients, val_ratio, test_ratio, seed):
             log.info(
-                "환자 분할 로드: %s (train=%d, val=%d)",
+                "환자 분할 로드: %s (train=%d, val=%d, test=%d)",
                 path,
                 len(split.get("train", [])),
                 len(split.get("val", [])),
+                len(split.get("test", [])),
             )
             return split
         log.warning(
@@ -83,25 +87,34 @@ def load_or_create_patient_split(
     n_val = max(1, int(round(len(ids) * val_ratio)))
     if len(ids) > 1:
         n_val = min(n_val, len(ids) - 1)
+    n_test = int(round(len(ids) * test_ratio))
+    if len(ids) > 1:
+        n_val = min(n_val, len(ids) - 1)
+        n_test = min(n_test, len(ids) - n_val - 1)
     val_idx = set(int(i) for i in perm[:n_val])
-    train = [ids[i] for i in range(len(ids)) if i not in val_idx]
+    test_idx = set(int(i) for i in perm[n_val:n_val + n_test])
+    train = [ids[i] for i in range(len(ids)) if i not in val_idx and i not in test_idx]
     val = [ids[i] for i in range(len(ids)) if i in val_idx]
+    test = [ids[i] for i in range(len(ids)) if i in test_idx]
     split = {
         "seed": seed,
         "val_ratio": val_ratio,
+        "test_ratio": test_ratio,
         "max_patients": max_patients,
         "root_dir": root_dir,
         "train": train,
         "val": val,
+        "test": test,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(split, f, indent=2, ensure_ascii=False)
     log.info(
-        "환자 분할 생성: %s (train=%d, val=%d, seed=%d)",
+        "환자 분할 생성: %s (train=%d, val=%d, test=%d, seed=%d)",
         path,
         len(train),
         len(val),
+        len(test),
         seed,
     )
     return split

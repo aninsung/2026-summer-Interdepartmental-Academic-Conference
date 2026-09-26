@@ -32,6 +32,86 @@ from src.envs.mask_refinement_env import MaskRefinementEnv
 # 진행 상황 콜백
 # ──────────────────────────────────────────────
 
+class RefinementGainCallback(BaseCallback):
+    """Select checkpoints by held-out raw PPO gain over matched closing-only input."""
+    def __init__(self, images, gts, roughs, probabilities, mode, directory, eval_freq, max_samples=64):
+        super().__init__()
+        self.arrays = (images, gts, roughs, probabilities)
+        self.indices = np.linspace(0, len(images)-1, min(max_samples, len(images)), dtype=int)
+        self.mode, self.directory, self.eval_freq = mode, directory, eval_freq
+        self.best_gain, self.last_eval = -float("inf"), 0
+
+    def _evaluate(self):
+        import json
+        from scipy.ndimage import binary_closing
+        from src.utils.metrics import dice
+        from scripts.eval.evaluate_pipeline import _refine_with_ppo
+        gains = []
+        for index in self.indices:
+            image, gt, rough, prob = (a[index] for a in self.arrays)
+            refined = _refine_with_ppo(self.model, image, rough, prob, self.mode,
+                                      n_steps=15, clip_shrink=self.mode == "small")
+            baseline = binary_closing(rough, np.ones((3, 3)))
+            candidate = binary_closing(refined, np.ones((3, 3)))
+            gains.append(dice(candidate, gt)-dice(baseline, gt))
+        gain = float(np.mean(gains))
+        self.logger.record("eval/raw_ppo_delta_dsc", gain)
+        self.logger.record("eval/raw_ppo_harm_rate", float(np.mean(np.asarray(gains) < -1e-6)))
+        if gain > self.best_gain:
+            self.best_gain = gain
+            self.model.save(os.path.join(self.directory, "best_model"))
+            with open(os.path.join(self.directory, "selection.json"), "w") as f:
+                json.dump(dict(timesteps=self.num_timesteps, mean_component_delta_dsc=gain,
+                               components=len(gains), oracle_gate=False,
+                               baseline="augmentation + closing", sampling="fixed evenly spaced validation components"), f, indent=2)
+        self.last_eval = self.num_timesteps
+
+    def _on_step(self):
+        if self.num_timesteps - self.last_eval >= self.eval_freq:
+            self._evaluate()
+        return True
+
+    def _on_training_end(self):
+        if self.last_eval != self.num_timesteps:
+            self._evaluate()
+
+
+class WholeSliceGainCallback(RefinementGainCallback):
+    """V3 selection: equal-weight patient means over all routed validation slices."""
+    def __init__(self, images, gts, roughs, probabilities, patient_ids, mode, directory, eval_freq):
+        super().__init__(images, gts, roughs, probabilities, mode, directory,
+                         eval_freq, max_samples=len(images))
+        self.patient_ids = np.asarray(patient_ids)
+        if len(self.patient_ids) != len(images):
+            raise ValueError("Validation patient IDs must match v3 slices")
+
+    def _evaluate(self):
+        import json
+        from src.utils.metrics import dice
+        from scripts.eval.evaluate_pipeline import _refine_with_ppo
+        gains = []
+        for index in self.indices:
+            image, gt, rough, probability = (a[index] for a in self.arrays)
+            candidate = _refine_with_ppo(self.model, image, rough, probability, self.mode)
+            gains.append(dice(candidate, gt) - dice(rough, gt))
+        gains = np.asarray(gains)
+        patient_gains = np.asarray([gains[self.patient_ids == pid].mean()
+                                   for pid in np.unique(self.patient_ids)])
+        gain = float(patient_gains.mean())
+        self.logger.record("eval/patient_delta_dsc", gain)
+        self.logger.record("eval/harmed_patient_rate", float((patient_gains < -1e-6).mean()))
+        if gain > self.best_gain:
+            self.best_gain = gain
+            self.model.save(os.path.join(self.directory, "best_model"))
+            with open(os.path.join(self.directory, "selection.json"), "w") as f:
+                json.dump(dict(refinement_profile="ppo_v3", timesteps=self.num_timesteps,
+                               patient_mean_delta_dsc=gain, improves_baseline=gain > 0.,
+                               patients=len(patient_gains), slices=len(gains),
+                               baseline="Stage 2 whole-slice mask", oracle_gate=False,
+                               sampling="all validation slices routed to this agent"), f, indent=2)
+        self.last_eval = self.num_timesteps
+
+
 class ProgressCallback(BaseCallback):
     """
     N 스텝마다 학습 진행 현황을 한 줄로 출력합니다.
@@ -296,7 +376,10 @@ def load_real_data(
     refinement_mode: str = "small",
     patient_ids: Optional[list] = None,
     mixup: bool = True,
-    stage2_thresholds: str = "0.70,0.70,0.50",
+    stage2_thresholds: str = "0.80,0.80,0.50",
+    refinement_profile: str = "legacy",
+    cc_min_sizes: str = "0,15,25",
+    sample_metadata: Optional[dict] = None,
 ):
     """실제 BraTS2021 데이터를 NumPy 배열로 반환."""
     from src.data.brats2020_dataset import BraTS2020Dataset
@@ -311,6 +394,7 @@ def load_real_data(
         patient_ids=patient_ids,
         simulate_rough=False,  # 실제/합성 믹스업을 위해 일단 False로 로드
         noise_seed=noise_seed,
+        slice_selection="all" if refinement_profile == "ppo_v3" else "tumor",
     )
     imgs, gts, _ = ds.get_numpy_arrays()
     imgs_25d = ds.get_numpy_25d_arrays()
@@ -324,18 +408,6 @@ def load_real_data(
 
     rng = np.random.default_rng(noise_seed)
 
-    # 1. 합성 노이즈 마스크 및 시뮬레이션된 확률 맵 생성
-    from src.data.brats2020_dataset import make_noisy_mask
-    from scipy.ndimage import gaussian_filter
-    morph_px = 5  # train/eval 동일: max_morph_px=5 (분포 일치)
-    log.info(f"학습 데이터에 대한 합성 노이즈 마스크 및 시뮬레이션 확률 맵 생성 중... (max_morph_px={morph_px})")
-    synthetic_roughs = np.stack(
-        [make_noisy_mask(gt, rng, max_morph_px=morph_px) for gt in gts], axis=0
-    )
-    synthetic_probs = np.zeros_like(synthetic_roughs)
-    for i in range(len(synthetic_roughs)):
-        synthetic_probs[i] = gaussian_filter(synthetic_roughs[i].astype(float), sigma=2.0)
-
     # 2. 실제 모델 예측 마스크 및 Sigmoid 확률 맵 생성 (AdaptivePipeline 사용)
     from src.utils.metrics import gt_size_class
 
@@ -347,16 +419,13 @@ def load_real_data(
     ]
     missing = [p for p in _REQUIRED_CKPTS if not os.path.exists(p)]
     if missing:
-        log.warning(
-            "Stage 2/1 체크포인트 없음 (%s). AdaptivePipeline rough mask 품질이 낮을 수 있습니다.",
-            ", ".join(missing),
-        )
+        raise FileNotFoundError("PPO training requires trained Stage 1/2 checkpoints: " + ", ".join(missing))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     from src.models.dynamic_router import AdaptivePipeline
     log.info(f"AdaptivePipeline 3-Stage 라우터 로드 중... (Device: {device})")
     in_ch = imgs.shape[1] if imgs.ndim == 4 else 1
-    pipeline = AdaptivePipeline(device, in_channels=in_ch)
+    pipeline = AdaptivePipeline(device, in_channels=in_ch, strict_checkpoints=True)
     
     batch_size = 64
     num_slices = len(imgs)
@@ -393,6 +462,61 @@ def load_real_data(
         actual_probs = np.squeeze(actual_probs, axis=1)
     class_preds_all = np.array(class_preds_all)
     log.info(f"AdaptivePipeline 초안 마스크 생성 완료 (개수: {len(actual_roughs)})")
+
+    if refinement_profile in {"ppo_v2", "ppo_v3"}:
+        from src.utils.refinement_inputs import stage2_mask, component_inputs
+        from scipy.ndimage import binary_dilation
+        cc_sizes = [int(v) for v in cc_min_sizes.split(',')]
+        if len(cc_sizes) != 3:
+            raise ValueError("cc_min_sizes requires three values")
+        target = {"small": 0, "medium": 1, "large": 2}[refinement_mode]
+        components = []
+        tta_batch = 128
+        augmented_probs = np.empty_like(actual_probs)
+        with torch.no_grad():
+            for start in range(0, len(imgs_25d), tta_batch):
+                end = min(start + tta_batch, len(imgs_25d))
+                image_t = torch.from_numpy(imgs_25d[start:end]).to(device)
+                route_t = torch.from_numpy(class_preds_all[start:end]).long().to(device)
+                horizontal, _ = pipeline(torch.flip(image_t, [3]), true_class_preds=route_t)
+                vertical, _ = pipeline(torch.flip(image_t, [2]), true_class_preds=route_t)
+                h_np = torch.flip(horizontal, [3]).squeeze(1).cpu().numpy()
+                v_np = torch.flip(vertical, [2]).squeeze(1).cpu().numpy()
+                augmented_probs[start:end] = (actual_probs[start:end] + h_np + v_np) / 3.
+        if refinement_profile == "ppo_v3":
+            indices = np.flatnonzero(class_preds_all == target)
+            if len(indices) == 0:
+                raise ValueError(f"No predicted slices for {refinement_mode}")
+            roughs = np.stack([stage2_mask(actual_probs[i], int(class_preds_all[i]),
+                                          stage2_thr, cc_sizes) for i in indices])
+            if sample_metadata is not None:
+                sample_metadata['patient_ids'] = [ds._sample_pids[i] for i in indices]
+            log.info("PPO v3: %d whole slices, all modalities, full GT, including empty GT", len(indices))
+            return imgs[indices], gts[indices], roughs, augmented_probs[indices]
+        for i in range(len(imgs)):
+            route = int(class_preds_all[i])
+            rough = stage2_mask(actual_probs[i], route, stage2_thr, cc_sizes)
+            for comp, ck, initial, probability in component_inputs(rough, augmented_probs[i], stage2_thr[route]):
+                if ck != target or initial is None:
+                    continue
+                support = binary_dilation(initial, np.ones((3, 3)), iterations=8)
+                components.append((imgs[i], gts[i] * support, initial, probability))
+        if not components:
+            raise ValueError(f"No predicted components for {refinement_mode}")
+        log.info("PPO v2: %d predicted components; aligned TTA/size routing/probability support, no synthetic mix", len(components))
+        return tuple(np.stack([row[j] for row in components]) for j in range(4))
+
+    # 1. 합성 노이즈 마스크 및 시뮬레이션된 확률 맵 생성
+    from src.data.brats2020_dataset import make_noisy_mask
+    from scipy.ndimage import gaussian_filter
+    morph_px = 5  # train/eval 동일: max_morph_px=5 (분포 일치)
+    log.info(f"학습 데이터에 대한 합성 노이즈 마스크 및 시뮬레이션 확률 맵 생성 중... (max_morph_px={morph_px})")
+    synthetic_roughs = np.stack(
+        [make_noisy_mask(gt, rng, max_morph_px=morph_px) for gt in gts], axis=0
+    )
+    synthetic_probs = np.zeros_like(synthetic_roughs)
+    for i in range(len(synthetic_roughs)):
+        synthetic_probs[i] = gaussian_filter(synthetic_roughs[i].astype(float), sigma=2.0)
 
     # 3. GT 면적 기준 크기 클래스 필터 (Expert 학습과 동일)
     target_class = {"small": 0, "medium": 1, "large": 2}[refinement_mode.lower()]
@@ -477,7 +601,9 @@ def train_agent(
     # 모드
     refinement_mode:     str   = "small",     # "small", "medium", "large"
     patient_split:       Optional[str] = None,
-    stage2_thresholds:   str   = "0.70,0.70,0.50",
+    stage2_thresholds:   str   = "0.80,0.80,0.50",
+    refinement_profile: str = "legacy",
+    cc_min_sizes: str = "0,15,25",
     # 재현성
     seed:                int   = 42,
     deterministic:       bool  = False,
@@ -488,6 +614,10 @@ def train_agent(
     from stable_baselines3.common.vec_env import DummyVecEnv
     from stable_baselines3.common.monitor import Monitor
 
+    if refinement_profile in {"ppo_v2", "ppo_v3"} and max_steps != 15:
+        raise ValueError(f"{refinement_profile} requires max_steps=15 to match inference")
+    if refinement_profile == "ppo_v3" and not use_real_data:
+        raise ValueError("ppo_v3 training requires patient-labeled real data")
     from src.utils.seed import set_seed
     set_seed(seed, deterministic)
 
@@ -506,6 +636,7 @@ def train_agent(
         )
         train_ids, val_ids = split["train"], split["val"]
 
+    train_metadata, val_metadata = {}, {}
     if use_real_data:
         images, gt_masks, rough_masks, uncertainty_maps = load_real_data(
             train_root=train_root,
@@ -519,6 +650,9 @@ def train_agent(
             mixup=True,
             noise_seed=seed,
             stage2_thresholds=stage2_thresholds,
+            refinement_profile=refinement_profile,
+            cc_min_sizes=cc_min_sizes,
+            sample_metadata=train_metadata,
         )
         val_images, val_gt_masks, val_roughs, val_uncerts = load_real_data(
             train_root=train_root,
@@ -532,6 +666,9 @@ def train_agent(
             mixup=False,
             noise_seed=seed,
             stage2_thresholds=stage2_thresholds,
+            refinement_profile=refinement_profile,
+            cc_min_sizes=cc_min_sizes,
+            sample_metadata=val_metadata,
         )
     else:
         images, gt_masks, rough_masks, uncertainty_maps = load_synthetic_data()
@@ -576,6 +713,7 @@ def train_agent(
                 step_penalty=step_penalty,
                 model_type=model_type,
                 refinement_mode=refinement_mode,
+                refinement_profile=refinement_profile,
             )
             return Monitor(env)
         return _init
@@ -616,9 +754,14 @@ def train_agent(
         ),
     )
 
+    model.refinement_profile = refinement_profile
+
     # ── 콜백 ────────────────────────────────────────────────
     ckpt_dir = os.path.dirname(save_path) or "checkpoints"
     best_dir = os.path.join(ckpt_dir, f"best_{refinement_mode}")
+    if refinement_profile in {"ppo_v2", "ppo_v3"}:
+        from datetime import datetime, timezone
+        best_dir = os.path.join(best_dir, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
     os.makedirs(best_dir, exist_ok=True)
     eval_cb = EvalCallback(
         eval_env,
@@ -628,6 +771,13 @@ def train_agent(
         n_eval_episodes=10,
         deterministic=True,
     )
+    if refinement_profile == "ppo_v2":
+        eval_cb = RefinementGainCallback(val_img, val_gt, val_rough, val_uncert,
+                                        refinement_mode, best_dir, max(1000, total_timesteps // 20))
+    if refinement_profile == "ppo_v3":
+        eval_cb = WholeSliceGainCallback(val_img, val_gt, val_rough, val_uncert,
+                                        val_metadata['patient_ids'], refinement_mode,
+                                        best_dir, max(1000, total_timesteps // 20))
     ckpt_cb = CheckpointCallback(
         save_freq=max(5000, total_timesteps // 10),
         save_path=ckpt_dir,
@@ -787,8 +937,10 @@ def main():
     parser.add_argument("--refinement_mode",     type=str, default="small", choices=["small", "medium", "large"],
                         help="학습할 PPO 에이전트의 타겟 Shape Class (small, medium, large)")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
-    parser.add_argument("--stage2_thresholds", type=str, default="0.70,0.70,0.50",
+    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
                         help="평가와 동일한 클래스별(Small,Medium,Large) Stage 2 이진화 임계값")
+    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3"], default="legacy")
+    parser.add_argument("--cc_min_sizes", default="0,15,25")
     parser.add_argument("--seed", type=int, default=42, help="전역 시드 (PPO 포함)")
     parser.add_argument("--deterministic", action="store_true", help="cuDNN 결정적 모드 (느려짐)")
 
@@ -837,6 +989,8 @@ def main():
         "refinement_mode":     "refinement_mode",
         "patient_split":       "patient_split",
         "stage2_thresholds":   "stage2_thresholds",
+        "refinement_profile": "refinement_profile",
+        "cc_min_sizes": "cc_min_sizes",
         "seed":                "seed",
         "deterministic":       "deterministic",
     }
@@ -859,7 +1013,8 @@ def main():
             cli_val  = cli_args.get(fn_key, None)
             default_val = defaults.get(fn_key, None)
             # CLI가 기본값과 다르면(사용자가 직접 지정) 우선, 아니면 YAML, 그 외 기본값
-            if cli_val != default_val and cli_val is not None:
+            explicitly_set = any(arg == f"--{fn_key}" or arg.startswith(f"--{fn_key}=") for arg in sys.argv[1:])
+            if (explicitly_set or cli_val != default_val) and cli_val is not None:
                 final_params[fn_key] = cli_val
             elif yaml_val is not None:
                 final_params[fn_key] = yaml_val

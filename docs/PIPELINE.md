@@ -1,5 +1,9 @@
 # RL-Refiner 파이프라인 상세
 
+실측 비교·환자 통계·학습형 GT-free gate 실행 방법: [품질 gate 평가 안내](QUALITY_GATE.md).
+
+> **현재 코드: 08-20 설정 + GT gate 수정.** Stage 2 임계값 0.80/0.80/0.50, CC 0/15/25, PPO 학습 300,000 스텝(rollout 1,024, 10 epochs, 에피소드 30스텝), 평가 15스텝, confidence skip OFF입니다. 기본 추론은 GT 없이 마지막 PPO 스텝을 사용하고 면적·MRI 에지 가드를 적용합니다. `--allow_oracle_gate`를 명시할 때만 GT 단조 게이트를 추가합니다. 아래 08-20 수치는 과거 GT 기반 스텝 선택·게이트 결과이며, 수정 코드의 성능을 뜻하지 않습니다. 새 성능은 재평가가 필요합니다.
+
 3단계 동적 라우팅(분류 → 크기별 Expert 분할 → 크기별 경계 보정)과 4번째 평가 단계를 **코드 기준**으로 정리한 문서입니다.
 
 실험 수치와 이력은 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md), 대회 상위 입상 방법과의 비교는 [baselines/README.md](../baselines/README.md), 논문 초안은 [paper_draft_ko.md](paper_draft_ko.md)를 봅니다. 비교 그림·표에서 이 파이프라인 Stage 3(단조 DSC 게이트)는 **TRIO**로 표기합니다.
@@ -280,7 +284,7 @@ flowchart LR
 - 클래스별 이진화 임계값 `--stage2_thresholds 0.80,0.80,0.50`
 - 연결요소 최소 픽셀 `--cc_min_sizes 0,15,25` (Small은 끔)
 - Small / Medium / Large **모두** PPO `predict()` 15스텝
-- GT-free 면적 게이트 + Monotonic DSC Gate
+- GT-free 면적 + MRI 에지 게이트. Monotonic DSC Gate는 `--allow_oracle_gate`로만 활성화
 
 주요 인자:
 
@@ -295,6 +299,9 @@ flowchart LR
 | `--oracle_routing` | off | GT 면적 라우팅 (상한) |
 | `--skip_ppo` | off | Stage 3 생략, Stage 2 단독 베이스라인 측정 |
 | `--confidence_threshold` | None | 평균 확률이 이 값 이상이면 PPO 생략 |
+| `--small_confidence_threshold` | None | Small confidence 임계값 (미지정 시 공통값) |
+| `--allow_oracle_gate` | off | GT 단조 게이트를 추가하는 연구용 상한 평가 |
+| `--disable_edge_gate` | off | MRI 에지 가드 비활성화 |
 
 ### 8.1 슬라이스별 처리 순서
 
@@ -307,7 +314,7 @@ flowchart TD
     MICRO --> COMP["연결요소 필터<br/>CC 0 / 15 / 25"]
     COMP --> PPO["크기별 PPO 15스텝"]
     PPO --> AREA["GT-free 면적 게이트<br/>0.2× ~ 4× 아니면 TTA/Rough 유지"]
-    AREA --> GATE["Monotonic DSC Gate"]
+    AREA --> GATE["MRI 에지 게이트 (GT-free)"]
     GATE --> OUT["최종 마스크"]
 ```
 
@@ -339,33 +346,20 @@ Small은 마스크가 35 px 미만이면 수축(음수) 행동을 0으로 자릅
 
 ### 8.5 안전 가드 (Stage 3 → 최종 마스크)
 
-08-20 기본 평가에 **켜져 있는** 가드는 두 개입니다. 컴포넌트마다 한 번, 슬라이스 합친 뒤에 한 번 더 적용합니다.
+현재 기본 가드는 **면적 비율(0.2×–4×)**과 **MRI 에지 정합**입니다. 컴포넌트와 슬라이스 병합 결과 모두 검사하며, TTA·PPO·closing을 거친 후보를 보정 전 마스크와 비교합니다. Confidence로 PPO를 생략해도 가드를 통과해야 합니다.
 
-![Safety guards](../results/safety_guards.png)
+- GT는 기본 경로에서 지표 계산에만 사용합니다. PPO는 실제 GT를 받지 않고 마지막 스텝을 반환합니다. 더미 GT에 따른 종료를 막고, 추론 오류는 숨기지 않고 실행 실패로 보고합니다.
+- `--allow_oracle_gate`는 위 가드 뒤에 GT DSC 단조 게이트를 추가합니다. GT로 중간 스텝을 고르지는 않으므로 과거 08-20 실행과 완전히 같지 않습니다.
+- `--oracle_routing`도 GT를 사용하는 상한 평가로 표시합니다.
+- MRI 에지 가드는 DSC 개선을 보장하지 않습니다. 현재 GT-free Stage 3 성능은 재평가해야 합니다.
+- 과거 08-20 결과는 GT로 최적 스텝을 고른 후 단조 게이트를 적용한 상한입니다. 당시 858장(35.3%) 원복 수치는 역사적 기록으로만 유지합니다.
 
-```mermaid
-flowchart LR
-    PPO["PPO 15스텝"] --> A["① GT-free 면적<br/>비었거나 0.2×~4× 밖이면 기각"]
-    A --> B["② Monotonic DSC<br/>최종 DSC &lt; 초기 DSC 이면 Stage 2 유지"]
-    B --> OUT["최종 마스크"]
+```bash
+# 08-20 학습 설정 + GT-free 평가
+python run_pipeline.py batch_size=64
+# 학습된 체크포인트로 연구용 GT gate 평가
+python run_pipeline.py --skip_classifier --skip_experts --skip_agents --allow_oracle_gate
 ```
-
-| 순서 | 가드 | 판정 | GT | 08-20 기본 |
-|---|---|---|:---:|:---:|
-| ① | GT-free 면적 (`_gt_free_accept`) | 보정이 비었거나 면적이 초기의 0.2배 미만 / 4배 초과 | ✗ | **ON** |
-| ② | Monotonic DSC (`apply_monotonic_dsc_gate`) | 보정 DSC &lt; 초기 DSC | **✓** | **ON** |
-| — | Confidence skip (`--confidence_threshold`) | 컴포넌트 평균 확률 ≥ 임계값이면 PPO 자체를 생략 | ✗ | **OFF** (기본 `None`) |
-
-학습 중 환경 안에도 하락을 막는 장치가 있습니다. 초기 Rough **±8 px** 밖으로 못 나가게 클립하고, 에피소드 시작 DSC보다 떨어지면 보상 **−5.0**입니다. 평가의 `_refine_with_ppo`는 15스텝 중 GT DSC가 가장 좋았던 스텝을 고른 뒤 다시 단조 게이트를 탑니다. 이 스텝 선택도 GT를 씁니다.
-
-**현재 코드에 없는 것** (옛 발표 슬라이드와 다름):
-
-- 확률–에지 정합이 안 좋아지면 되돌리는 **Edge / Prob Fallback**
-- DSC 하락 **또는 HD95 증가** 시 원복하는 Dual Gate
-- 기본 평가에서 Confidence 0.85로 PPO를 건너뛰는 설정
-- “3개 클래스 점수 하락 0%” 같은 결과는 단조 게이트가 GT로 하락분을 잘라낸 뒤에만 성립합니다. 게이트 없이 PPO가 나빠진 슬라이스는 2,434장 중 **858장(35.3%)** 입니다.
-
-Monotonic DSC Gate는 배포에 쓸 수 없습니다. 베이스라인과 공정 비교의 대상은 게이트를 타지 않은 **Stage 2 초기 DSC**입니다.
 
 ### 8.6 이번 실행 결과 (val 42명 · 2,434 슬라이스, 2026-08-20)
 

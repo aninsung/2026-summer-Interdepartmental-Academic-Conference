@@ -1,5 +1,7 @@
 # RL-Refiner 실험 결과
 
+> **현재 코드: 08-20 설정 + GT gate 수정.** Stage 2 임계값 0.80/0.80/0.50, CC 0/15/25, PPO 학습 300,000 스텝(rollout 1,024, 10 epochs, 에피소드 30스텝), 평가 15스텝, confidence skip OFF입니다. 기본 추론은 GT 없이 마지막 PPO 스텝을 사용하고 면적·MRI 에지 가드를 적용합니다. `--allow_oracle_gate`를 명시할 때만 GT 단조 게이트를 추가합니다. 아래 08-20 수치는 과거 GT 기반 스텝 선택·게이트 결과이며, 수정 코드의 성능을 뜻하지 않습니다. 새 성능은 재평가가 필요합니다.
+
 > 실험 이력과 최종 벤치마크를 한 파일로 정리한 문서입니다.
 > 이전 `EXPERIMENTS.md`, `final_models_report.md`, `technical_report.md`의 내용을 통합했습니다.
 
@@ -32,7 +34,7 @@
 | Confidence skip | 기본 **OFF** (`--confidence_threshold` 미지정) |
 | 시드 / 결정적 모드 | 42 / ON |
 
-이전 문서의 **Dual Monotonic Safety Gate**(DSC 하락 **또는 HD95 증가** 시 원복)는 현재 코드에 없습니다. 확률–에지 정합 Fallback도 없습니다. 지금은 면적 게이트와 DSC 단조 게이트만 기본으로 켭니다. 상세는 [PIPELINE.md §8.5](PIPELINE.md)를 봅니다.
+08-20 기록에서는 면적 게이트와 GT DSC 단조 게이트를 사용했습니다. 현재 기본값은 면적·MRI 에지 가드이며 GT 단조 게이트는 명시적 옵션입니다. DSC/HD95 Dual Gate는 구현되어 있지 않습니다. 상세는 [PIPELINE.md §8.5](PIPELINE.md)를 봅니다.
 
 ### 1.2 파이프라인 종합
 
