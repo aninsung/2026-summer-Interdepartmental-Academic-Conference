@@ -76,6 +76,88 @@ class RefinementGainCallback(BaseCallback):
             self._evaluate()
 
 
+class SelectiveGainCallback(RefinementGainCallback):
+    """V4 selection: the exact inference path (shrink/expand rollouts + GT-free choice + closing)."""
+    def __init__(self, images, gts, roughs, probabilities, mode, directory, eval_freq, max_samples=256):
+        super().__init__(images, gts, roughs, probabilities, mode, directory, eval_freq, max_samples)
+
+    def _evaluate(self):
+        import json
+        from scipy.ndimage import binary_closing
+        from src.utils.metrics import dice
+        from src.utils.evaluation_records import measured_metrics
+        from scripts.eval.evaluate_pipeline import _selective_refine
+        gains, hd_gains = [], []
+        for index in self.indices:
+            image, gt, initial, prob = (a[index] for a in self.arrays)
+            refined = _selective_refine(self.model, image, initial, prob, self.mode,
+                                        clip_shrink=self.mode == "small")
+            candidate = binary_closing(refined, np.ones((3, 3))).astype(np.float32)
+            gains.append(dice(candidate, gt) - dice(initial, gt))
+            before = measured_metrics(initial, gt)["hd95_surface_px"]
+            after = measured_metrics(candidate, gt)["hd95_surface_px"]
+            if before is not None and after is not None:
+                hd_gains.append(before - after)
+        gain = float(np.mean(gains))
+        hd_gain = float(np.mean(hd_gains)) if hd_gains else 0.
+        self.logger.record("eval/selective_delta_dsc", gain)
+        self.logger.record("eval/selective_delta_hd95_px", hd_gain)
+        self.logger.record("eval/selective_harm_rate", float(np.mean(np.asarray(gains) < -1e-6)))
+        print(f"  [v4 eval] step={self.num_timesteps:,} ΔDSC={gain:+.4f} ΔHD95(improve)={hd_gain:+.3f}px "
+              f"harm={np.mean(np.asarray(gains) < -1e-6):.3f}", flush=True)
+        if gain > self.best_gain:
+            self.best_gain = gain
+            self.model.save(os.path.join(self.directory, "best_model"))
+            with open(os.path.join(self.directory, "selection.json"), "w") as f:
+                json.dump(dict(refinement_profile="ppo_v4", timesteps=self.num_timesteps,
+                               mean_component_delta_dsc=gain, mean_component_hd95_improvement_px=hd_gain,
+                               components=len(gains), oracle_gate=False,
+                               baseline="Stage 2 component (no closing)",
+                               sampling="fixed evenly spaced gate-eligible validation components"), f, indent=2)
+        self.last_eval = self.num_timesteps
+
+
+class FreeRefineGainCallback(RefinementGainCallback):
+    """V5 selection: free per-sector PPO rollout (MRI decides expand/shrink) + closing."""
+    def __init__(self, images, gts, roughs, probabilities, mode, directory, eval_freq, max_samples=256):
+        super().__init__(images, gts, roughs, probabilities, mode, directory, eval_freq, max_samples)
+
+    def _evaluate(self):
+        import json
+        from scipy.ndimage import binary_closing
+        from src.utils.metrics import dice
+        from src.utils.evaluation_records import measured_metrics
+        from scripts.eval.evaluate_pipeline import _selective_refine
+        gains, hd_gains = [], []
+        for index in self.indices:
+            image, gt, initial, prob = (a[index] for a in self.arrays)
+            refined = _selective_refine(self.model, image, initial, prob, self.mode,
+                                        clip_shrink=self.mode == "small")
+            candidate = binary_closing(refined, np.ones((3, 3))).astype(np.float32)
+            gains.append(dice(candidate, gt) - dice(initial, gt))
+            before = measured_metrics(initial, gt)["hd95_surface_px"]
+            after = measured_metrics(candidate, gt)["hd95_surface_px"]
+            if before is not None and after is not None:
+                hd_gains.append(before - after)
+        gain = float(np.mean(gains))
+        hd_gain = float(np.mean(hd_gains)) if hd_gains else 0.
+        self.logger.record("eval/free_delta_dsc", gain)
+        self.logger.record("eval/free_delta_hd95_px", hd_gain)
+        self.logger.record("eval/free_harm_rate", float(np.mean(np.asarray(gains) < -1e-6)))
+        print(f"  [v5 eval] step={self.num_timesteps:,} ΔDSC={gain:+.4f} ΔHD95(improve)={hd_gain:+.3f}px "
+              f"harm={np.mean(np.asarray(gains) < -1e-6):.3f}", flush=True)
+        if gain > self.best_gain:
+            self.best_gain = gain
+            self.model.save(os.path.join(self.directory, "best_model"))
+            with open(os.path.join(self.directory, "selection.json"), "w") as f:
+                json.dump(dict(refinement_profile="ppo_v5", timesteps=self.num_timesteps,
+                               mean_component_delta_dsc=gain, mean_component_hd95_improvement_px=hd_gain,
+                               components=len(gains), oracle_gate=False,
+                               baseline="Stage 2 component (no closing)",
+                               sampling="fixed evenly spaced validation components"), f, indent=2)
+        self.last_eval = self.num_timesteps
+
+
 class WholeSliceGainCallback(RefinementGainCallback):
     """V3 selection: equal-weight patient means over all routed validation slices."""
     def __init__(self, images, gts, roughs, probabilities, patient_ids, mode, directory, eval_freq):
@@ -463,8 +545,9 @@ def load_real_data(
     class_preds_all = np.array(class_preds_all)
     log.info(f"AdaptivePipeline 초안 마스크 생성 완료 (개수: {len(actual_roughs)})")
 
-    if refinement_profile in {"ppo_v2", "ppo_v3"}:
+    if refinement_profile in {"ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"}:
         from src.utils.refinement_inputs import stage2_mask, component_inputs
+        from scripts.eval.evaluate_pipeline import selective_eligible
         from scipy.ndimage import binary_dilation
         cc_sizes = [int(v) for v in cc_min_sizes.split(',')]
         if len(cc_sizes) != 3:
@@ -493,17 +576,24 @@ def load_real_data(
                 sample_metadata['patient_ids'] = [ds._sample_pids[i] for i in indices]
             log.info("PPO v3: %d whole slices, all modalities, full GT, including empty GT", len(indices))
             return imgs[indices], gts[indices], roughs, augmented_probs[indices]
+        skipped = 0
         for i in range(len(imgs)):
             route = int(class_preds_all[i])
             rough = stage2_mask(actual_probs[i], route, stage2_thr, cc_sizes)
             for comp, ck, initial, probability in component_inputs(rough, augmented_probs[i], stage2_thr[route]):
                 if ck != target or initial is None:
                     continue
+                # v4 trains only on components the inference gate would hand to PPO.
+                if refinement_profile == "ppo_v4" and not selective_eligible(
+                        initial, probability, refinement_mode, refinement_profile):
+                    skipped += 1
+                    continue
                 support = binary_dilation(initial, np.ones((3, 3)), iterations=8)
                 components.append((imgs[i], gts[i] * support, initial, probability))
         if not components:
             raise ValueError(f"No predicted components for {refinement_mode}")
-        log.info("PPO v2: %d predicted components; aligned TTA/size routing/probability support, no synthetic mix", len(components))
+        log.info("PPO %s: %d predicted components (%d skipped by inference gate); aligned TTA/size routing/probability support, no synthetic mix",
+                 refinement_profile, len(components), skipped)
         return tuple(np.stack([row[j] for row in components]) for j in range(4))
 
     # 1. 합성 노이즈 마스크 및 시뮬레이션된 확률 맵 생성
@@ -611,10 +701,10 @@ def train_agent(
     from stable_baselines3 import PPO
     from stable_baselines3.common.env_util import make_vec_env
     from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
-    from stable_baselines3.common.vec_env import DummyVecEnv
+    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
     from stable_baselines3.common.monitor import Monitor
 
-    if refinement_profile in {"ppo_v2", "ppo_v3"} and max_steps != 15:
+    if refinement_profile in {"ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"} and max_steps != 15:
         raise ValueError(f"{refinement_profile} requires max_steps=15 to match inference")
     if refinement_profile == "ppo_v3" and not use_real_data:
         raise ValueError("ppo_v3 training requires patient-labeled real data")
@@ -718,7 +808,12 @@ def train_agent(
             return Monitor(env)
         return _init
 
-    train_env = make_vec_env(make_monitored_env_fn(tr_img, tr_gt, tr_rough, tr_uncert, tr_edge, max_steps, target_dsc, step_penalty, model_type, refinement_mode), n_envs=n_envs)
+    vec_cls = SubprocVecEnv if n_envs > 1 else DummyVecEnv
+    train_env = make_vec_env(
+        make_monitored_env_fn(tr_img, tr_gt, tr_rough, tr_uncert, tr_edge, max_steps, target_dsc, step_penalty, model_type, refinement_mode),
+        n_envs=n_envs,
+        vec_env_cls=vec_cls,
+    )
     eval_env  = DummyVecEnv([make_monitored_env_fn(val_img, val_gt, val_rough, val_uncert, val_edge, max_steps, target_dsc, step_penalty, model_type, refinement_mode)])
 
     # ── PPO 에이전트 ─────────────────────────────────────────
@@ -759,7 +854,7 @@ def train_agent(
     # ── 콜백 ────────────────────────────────────────────────
     ckpt_dir = os.path.dirname(save_path) or "checkpoints"
     best_dir = os.path.join(ckpt_dir, f"best_{refinement_mode}")
-    if refinement_profile in {"ppo_v2", "ppo_v3"}:
+    if refinement_profile in {"ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"}:
         from datetime import datetime, timezone
         best_dir = os.path.join(best_dir, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
     os.makedirs(best_dir, exist_ok=True)
@@ -774,6 +869,12 @@ def train_agent(
     if refinement_profile == "ppo_v2":
         eval_cb = RefinementGainCallback(val_img, val_gt, val_rough, val_uncert,
                                         refinement_mode, best_dir, max(1000, total_timesteps // 20))
+    if refinement_profile == "ppo_v4":
+        eval_cb = SelectiveGainCallback(val_img, val_gt, val_rough, val_uncert,
+                                        refinement_mode, best_dir, max(1000, total_timesteps // 20))
+    if refinement_profile == "ppo_v5":
+        eval_cb = FreeRefineGainCallback(val_img, val_gt, val_rough, val_uncert,
+                                         refinement_mode, best_dir, max(1000, total_timesteps // 20))
     if refinement_profile == "ppo_v3":
         eval_cb = WholeSliceGainCallback(val_img, val_gt, val_rough, val_uncert,
                                         val_metadata['patient_ids'], refinement_mode,
@@ -939,7 +1040,7 @@ def main():
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
     parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50",
                         help="평가와 동일한 클래스별(Small,Medium,Large) Stage 2 이진화 임계값")
-    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3"], default="legacy")
+    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"], default="legacy")
     parser.add_argument("--cc_min_sizes", default="0,15,25")
     parser.add_argument("--seed", type=int, default=42, help="전역 시드 (PPO 포함)")
     parser.add_argument("--deterministic", action="store_true", help="cuDNN 결정적 모드 (느려짐)")

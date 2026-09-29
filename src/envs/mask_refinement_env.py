@@ -10,6 +10,11 @@ Action : 8방위 섹터별 마스크 수축/팽창 조절
          - Small: Box(-2.0, 2.0, shape=(8,)) 연속 픽셀 조절
 Reward : Boundary-DSC 기반 보상 강화 + HD95(px 단위) 패널티 + 위상 최적화
 Episode: 최대 max_steps 스텝, DSC >= target_dsc 이면 조기 종료
+
+ppo_v4: 모든 MRI 채널 관측, 섹터 16/24/32(Small/Medium/Large), 추론 게이트와 같은
+        불확실 섹터·단방향(shrink/expand) 제한, 보상 = 크기 보정 ΔDSC + HD95 개선항
+ppo_v5: MRI(T1ce+FLAIR)+마스크+prob+edge 관측, 섹터마다 늘리기/줄이기/유지 자유,
+        게이트·단방향 없음, 보상 = 부채꼴별 정확도 개선 + HD95 + 에피소드 ΔDSC
 """
 
 import numpy as np
@@ -20,7 +25,59 @@ from scipy.ndimage import binary_erosion, binary_dilation, distance_transform_ed
 
 from src.utils.metrics import dice as _dice, hd95 as _hd95, apply_monotonic_dsc_gate
 
-__all__ = ["MaskRefinementEnv", "_dice", "_hd95", "apply_monotonic_dsc_gate"]
+__all__ = ["MaskRefinementEnv", "_dice", "_hd95", "apply_monotonic_dsc_gate",
+           "V4_SECTORS", "V5_SECTORS", "sector_ids", "uncertain_sectors", "surface_hd95"]
+
+V4_SECTORS = {"small": 16, "medium": 24, "large": 32}
+V5_SECTORS = V4_SECTORS  # same angular resolution; free mixed expand/shrink
+V4_HD95_WEIGHT = 2.0
+V5_HD95_WEIGHT = 2.0
+V5_SECTOR_REWARD = 100.0
+
+
+def sector_ids(mask: np.ndarray, n: int = 8) -> np.ndarray:
+    """가장 큰 연결 요소 중심 기준 n등분 각도 섹터 번호 (H, W)."""
+    lbl, num = label(mask > 0.5)
+    if num > 0:
+        k = int(np.argmax([(lbl == i).sum() for i in range(1, num + 1)])) + 1
+        y, x = np.where(lbl == k)
+        cy, cx = float(y.mean()), float(x.mean())
+    else:
+        cy, cx = mask.shape[0] / 2.0, mask.shape[1] / 2.0
+    ys, xs = np.indices(mask.shape)
+    ang = np.arctan2(ys - cy, xs - cx)
+    return np.clip(((ang + np.pi) / (2.0 * np.pi) * n).astype(int), 0, n - 1)
+
+
+def uncertain_sectors(mask: np.ndarray, prob: np.ndarray, n: int = 8,
+                      sectors: Optional[np.ndarray] = None) -> np.ndarray:
+    """경계 평균 확률이 [0.35, 0.65]인 섹터 (추론 선택 게이트와 동일 기준)."""
+    struct = np.ones((3, 3), dtype=bool)
+    binary = mask > 0.5
+    boundary = binary_dilation(binary, structure=struct) ^ binary_erosion(binary, structure=struct)
+    sectors = sector_ids(mask, n) if sectors is None else sectors
+    flags = np.zeros(n, dtype=bool)
+    for i in range(n):
+        pix = boundary & (sectors == i)
+        if np.any(pix):
+            flags[i] = 0.35 <= float(prob[pix].mean()) <= 0.65
+    return flags
+
+
+def surface_hd95(pred: np.ndarray, gt: np.ndarray, gt_surface_dist: Optional[np.ndarray] = None,
+                 one_empty: float = 30.) -> float:
+    """Stage 4와 같은 2D surface HD95. 한쪽만 비면 정의되지 않으므로 보상용 상한값."""
+    p, g = pred > .5, gt > .5
+    if p.any() != g.any():
+        return one_empty
+    if not p.any():
+        return 0.
+    ps = p & ~binary_erosion(p)
+    if gt_surface_dist is None:
+        gt_surface_dist = distance_transform_edt(~(g & ~binary_erosion(g)))
+    gs = g & ~binary_erosion(g)
+    d = np.concatenate([gt_surface_dist[ps], distance_transform_edt(~ps)[gs]])
+    return float(np.percentile(d, 95))
 
 
 def _obs_image_slice(img: np.ndarray) -> np.ndarray:
@@ -81,7 +138,7 @@ class MaskRefinementEnv(gym.Env):
         refinement_profile: str = "legacy",
     ):
         super().__init__()
-        if refinement_profile not in {"legacy", "ppo_v2", "ppo_v3"}:
+        if refinement_profile not in {"legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"}:
             raise ValueError("Unknown refinement profile")
         self.refinement_profile = refinement_profile
         self.confidence_threshold = confidence_threshold
@@ -116,8 +173,26 @@ class MaskRefinementEnv(gym.Env):
             for i in range(N):
                 self.edge_maps[i] = _edge_map_from_image(_obs_image_slice(images[i]))
 
+        if refinement_profile == "ppo_v5":
+            self.n_sectors = V5_SECTORS[refinement_mode]
+        elif refinement_profile == "ppo_v4":
+            self.n_sectors = V4_SECTORS[refinement_mode]
+        else:
+            self.n_sectors = 8
+        self.n_modalities = images.shape[1] if images.ndim == 4 else 1
+
         # 관측 공간 정의 (small은 4채널 64x64 Zoom-in, 그 외는 기존 체크포인트와 호환되는 3채널 128x128)
-        if self.refinement_profile == "ppo_v3":
+        if self.refinement_profile == "ppo_v5":
+            # MRI modalities + current mask + probability + edge. Agent chooses every sector freely.
+            side = 64 if refinement_mode == "small" else H
+            self.observation_space = spaces.Box(
+                low=0., high=1., shape=(self.n_modalities + 3, side, side), dtype=np.float32)
+        elif self.refinement_profile == "ppo_v4":
+            # All MRI modalities + mask, prob, edge, editable-sector map, direction plane.
+            side = 64 if refinement_mode == "small" else H
+            self.observation_space = spaces.Box(
+                low=0., high=1., shape=(self.n_modalities + 5, side, side), dtype=np.float32)
+        elif self.refinement_profile == "ppo_v3":
             # Full-slice policy: every MRI modality plus mask, probability,
             # accumulated SDF, remaining time and both reachable-mask limits.
             channels = images.shape[1] if images.ndim == 4 else 1
@@ -138,9 +213,9 @@ class MaskRefinementEnv(gym.Env):
         
         # 8개 섹터, 각 섹터별 행동 정의 (small은 연속 행동 공간 Box, 그 외는 이산 MultiDiscrete)
         if self.refinement_mode == "small":
-            self.action_space = spaces.Box(low=-2.0, high=2.0, shape=(8,), dtype=np.float32)
+            self.action_space = spaces.Box(low=-2.0, high=2.0, shape=(self.n_sectors,), dtype=np.float32)
         else:
-            self.action_space = spaces.MultiDiscrete([5] * 8)
+            self.action_space = spaces.MultiDiscrete([5] * self.n_sectors)
 
         self._idx = 0
         self._current_mask: np.ndarray = np.zeros((H, W), dtype=np.float32)
@@ -164,35 +239,63 @@ class MaskRefinementEnv(gym.Env):
             return np.concatenate([np.clip(modalities, 0., 1.), np.stack([
                 self._current_mask, self._current_prob, sdf, remaining,
                 self._min_mask_limit, self._max_mask_limit])]).astype(np.float32)
+        if self.refinement_profile == "ppo_v5":
+            image = self.images[self._idx]
+            modalities = image if image.ndim == 3 else image[None]
+            obs = np.concatenate([np.clip(modalities, 0., 1.), np.stack([
+                self._current_mask, self._current_prob, self._current_edge])]).astype(np.float32)
+            return self._crop64(obs) if self.refinement_mode == "small" else obs
+        if self.refinement_profile == "ppo_v4":
+            image = self.images[self._idx]
+            modalities = image if image.ndim == 3 else image[None]
+            editable = self._editable[self._sectors].astype(np.float32)
+            direction = np.full_like(self._current_mask, 1. if self._direction == "expand" else 0.)
+            obs = np.concatenate([np.clip(modalities, 0., 1.), np.stack([
+                self._current_mask, self._current_prob, self._current_edge,
+                editable, direction])]).astype(np.float32)
+            return self._crop64(obs) if self.refinement_mode == "small" else obs
         if self.refinement_mode == "small":
             obs = np.stack([self._current_image, self._current_mask, self._current_prob, self._current_edge], axis=0).astype(np.float32)
-            
-            # Find connected components to avoid center-of-mass falling in empty space between disconnected components
-            lbl, num_features = label(self._current_mask > 0.5)
-            if num_features > 0:
-                component_sizes = [np.sum(lbl == k) for k in range(1, num_features + 1)]
-                largest_k = np.argmax(component_sizes) + 1
-                y_indices, x_indices = np.where(lbl == largest_k)
-                cy, cx = int(y_indices.mean()), int(x_indices.mean())
-            else:
-                cy, cx = self.H // 2, self.W // 2
-            
-            half = 32
-            y1, y2 = max(0, cy - half), min(self.H, cy + half)
-            x1, x2 = max(0, cx - half), min(self.W, cx + half)
-            
-            cropped = np.zeros((4, 64, 64), dtype=np.float32)
-            pad_y1 = half - (cy - y1)
-            pad_y2 = 64 - (half - (y2 - cy))
-            pad_x1 = half - (cx - x1)
-            pad_x2 = 64 - (half - (x2 - cx))
-            
-            cropped[:, pad_y1:pad_y2, pad_x1:pad_x2] = obs[:, y1:y2, x1:x2]
-            return cropped
+            return self._crop64(obs)
         else:
             # 실제 Uncertainty(Probability) Map을 3번째 채널로 전달 (버그 수정: 기존 zeros → 실제 prob map)
             obs = np.stack([self._current_image, self._current_mask, self._current_prob], axis=0).astype(np.float32)
             return obs
+
+    def _crop64(self, obs: np.ndarray) -> np.ndarray:
+        # Find connected components to avoid center-of-mass falling in empty space between disconnected components
+        lbl, num_features = label(self._current_mask > 0.5)
+        if num_features > 0:
+            component_sizes = [np.sum(lbl == k) for k in range(1, num_features + 1)]
+            largest_k = np.argmax(component_sizes) + 1
+            y_indices, x_indices = np.where(lbl == largest_k)
+            cy, cx = int(y_indices.mean()), int(x_indices.mean())
+        else:
+            cy, cx = self.H // 2, self.W // 2
+
+        half = 32
+        y1, y2 = max(0, cy - half), min(self.H, cy + half)
+        x1, x2 = max(0, cx - half), min(self.W, cx + half)
+
+        cropped = np.zeros((obs.shape[0], 64, 64), dtype=np.float32)
+        pad_y1 = half - (cy - y1)
+        pad_y2 = 64 - (half - (y2 - cy))
+        pad_x1 = half - (cx - x1)
+        pad_x2 = 64 - (half - (x2 - cx))
+
+        cropped[:, pad_y1:pad_y2, pad_x1:pad_x2] = obs[:, y1:y2, x1:x2]
+        return cropped
+
+    def constrain_action(self, action) -> np.ndarray:
+        """Non-editable sectors KEEP; editable ones move only in the episode direction."""
+        action = np.array(action, copy=True)
+        keep = 0. if self.refinement_mode == "small" else 2
+        action[~self._editable] = keep
+        if self._direction == "shrink":
+            action = np.minimum(action, keep)
+        elif self._direction == "expand":
+            action = np.maximum(action, keep)
+        return action
 
     # ── Gymnasium API ──────────────────────────────────────
     def reset(self, *, seed=None, options=None):
@@ -233,29 +336,63 @@ class MaskRefinementEnv(gym.Env):
         self._prev_boundary_dsc = _dice(self._current_mask * self._boundary_band, self._current_gt * self._boundary_band)
         self._gt_dist_map = distance_transform_edt(~self._current_gt.astype(bool))
         self._prev_hd95 = _hd95(self._current_mask, self._current_gt, dist_b=self._gt_dist_map)
+        if self.refinement_profile in {"ppo_v4", "ppo_v5"}:
+            g = self._current_gt > .5
+            self._gt_surface_dist = distance_transform_edt(~(g & ~binary_erosion(g)))
+            self._prev_hd95 = surface_hd95(self._current_mask, self._current_gt, self._gt_surface_dist)
+        self._initial_hd95 = self._prev_hd95
+
+        # Sectors are frozen at the initial mask so the editable flags keep referring
+        # to the same wedges that the inference gate selected.
+        self._sectors = sector_ids(self._initial_rough_mask, self.n_sectors)
+        self._editable = np.ones(self.n_sectors, dtype=bool)
+        self._direction = "both"
+        if self.refinement_profile == "ppo_v4":
+            self._editable = uncertain_sectors(self._initial_rough_mask, self._current_prob,
+                                               self.n_sectors, self._sectors)
+            direction = (options or {}).get("direction")
+            if direction is None:
+                direction = "expand" if self.np_random.random() < .5 else "shrink"
+            if direction not in {"shrink", "expand"}:
+                raise ValueError("ppo_v4 direction must be 'shrink' or 'expand'")
+            self._direction = direction
+            # A 1 px boundary shift changes DSC by ~1/sqrt(area); rescale so large
+            # tumors get a comparable learning signal per pixel moved.
+            self._size_scale = float(np.clip(np.sqrt(max(1., self._current_gt.sum()) / 300.), .5, 4.))
+        if self.refinement_profile == "ppo_v5":
+            self._size_scale = float(np.clip(np.sqrt(max(1., self._current_gt.sum()) / 300.), .5, 4.))
+            gt_b = self._current_gt > .5
+            mask_b = self._current_mask > .5
+            self._prev_sector_acc = self._sector_accuracies(mask_b, gt_b)
 
         return self._obs(), {}
 
-    def step(self, action):
-        if self.refinement_profile == "ppo_v2" and self.refinement_mode == "small" and self._current_mask.sum() < 35:
-            action = np.maximum(action, 0.)
-        # 8개 섹터 개별 변형 (SDF 기반 연속 미세 변형 적용)
-        # 분리된 종양이 있을 때 질량 중심이 빈 공간에 놓이는 현상을 방지하기 위해 가장 큰 연결 요소의 중심 사용
-        lbl, num_features = label(self._current_mask > 0.5)
-        if num_features > 0:
-            component_sizes = [np.sum(lbl == k) for k in range(1, num_features + 1)]
-            largest_k = np.argmax(component_sizes) + 1
-            y_indices, x_indices = np.where(lbl == largest_k)
-            cy, cx = y_indices.mean(), x_indices.mean()
-        else:
-            cy, cx = self.H / 2.0, self.W / 2.0
+    def _sector_accuracies(self, mask_b: np.ndarray, gt_b: np.ndarray) -> np.ndarray:
+        """Per-sector fraction of pixels matching GT (credit for local edits)."""
+        acc = np.zeros(self.n_sectors, dtype=np.float64)
+        for i in range(self.n_sectors):
+            pix = self._sectors == i
+            n = int(pix.sum())
+            if n == 0:
+                continue
+            acc[i] = float(np.mean(mask_b[pix] == gt_b[pix]))
+        return acc
 
-        ys = np.arange(self.H)
-        xs = np.arange(self.W)
-        Y, X = np.meshgrid(ys, xs, indexing='ij')
-        angles = np.arctan2(Y - cy, X - cx)  # [-pi, pi]
-        sectors = ((angles + np.pi) / (2.0 * np.pi) * 8.0).astype(int)
-        sectors = np.clip(sectors, 0, 7)
+    def step(self, action):
+        if self.refinement_profile in {"ppo_v2", "ppo_v4"} and self.refinement_mode == "small" and self._current_mask.sum() < 35:
+            action = np.maximum(action, 0.)
+        if self.refinement_profile == "ppo_v4":
+            action = self.constrain_action(action)
+            sectors = self._sectors
+        elif self.refinement_profile == "ppo_v5":
+            # Free mixed expand/shrink per sector from MRI+mask observation.
+            sectors = self._sectors
+            if self.refinement_mode == "small" and self._current_mask.sum() < 35:
+                action = np.maximum(action, 0.)
+        else:
+            # 8개 섹터 개별 변형 (SDF 기반 연속 미세 변형 적용)
+            # 분리된 종양이 있을 때 질량 중심이 빈 공간에 놓이는 현상을 방지하기 위해 가장 큰 연결 요소의 중심 사용
+            sectors = sector_ids(self._current_mask, 8)
 
         # ── SDF (Signed Distance Field) 계산 ──
         m_bool = self._current_mask.astype(bool)
@@ -271,8 +408,9 @@ class MaskRefinementEnv(gym.Env):
         shift_map = np.zeros_like(self._current_mask)
         num_non_keep = 0
         mapped_actions = []
+        edited = np.zeros(self.n_sectors, dtype=bool)
 
-        for i in range(8):
+        for i in range(self.n_sectors):
             sector_pixels = (sectors == i)
             if self.refinement_mode == "small":
                 # 연속 공간: action[i] 가 직접 픽셀 shift 거리로 사용됨 (예: [-2, 2] 범위)
@@ -281,6 +419,7 @@ class MaskRefinementEnv(gym.Env):
                 # Keep 여부 판정 (실수값이므로 절대값 0.1 이하는 Keep으로 간주)
                 if abs(shift_val) > 0.1:
                     num_non_keep += 1
+                    edited[i] = True
             else:
                 # 이산 공간: 기존 checkpoints 호환성 유지하면서 미세 SDF shift로 변환
                 act = int(action[i])
@@ -291,10 +430,11 @@ class MaskRefinementEnv(gym.Env):
                 shift_val = mapping.get(act, 0.0)
                 if act != 2:
                     num_non_keep += 1
+                    edited[i] = True
             shift_map[sector_pixels] = shift_val
 
         # SDF + shift_map >= 0 이면 새로운 마스크 영역으로 결정
-        if self.refinement_profile in {"ppo_v2", "ppo_v3"}:
+        if self.refinement_profile in {"ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"}:
             # Accumulate subpixel actions; KEEP preserves the mask exactly.
             self._continuous_sdf += shift_map
             new_mask = self._continuous_sdf >= 0.
@@ -315,7 +455,7 @@ class MaskRefinementEnv(gym.Env):
         # ── 수색 영역 제한 (Boundary Band Constraint) ──
         new_mask = np.maximum(self._min_mask_limit, np.minimum(new_mask, self._max_mask_limit))
 
-        step_cost = num_non_keep * (self.step_penalty / 8.0)
+        step_cost = num_non_keep * (self.step_penalty / self.n_sectors)
         
         new_dsc = _dice(new_mask, self._current_gt)
         if self.refinement_profile == "ppo_v3":
@@ -340,7 +480,10 @@ class MaskRefinementEnv(gym.Env):
         
         # HD95 델타 계산
         prev_hd95 = self._prev_hd95
-        curr_hd95 = _hd95(new_mask, self._current_gt, dist_b=self._gt_dist_map)
+        if self.refinement_profile in {"ppo_v4", "ppo_v5"}:
+            curr_hd95 = surface_hd95(new_mask, self._current_gt, self._gt_surface_dist)
+        else:
+            curr_hd95 = _hd95(new_mask, self._current_gt, dist_b=self._gt_dist_map)
         delta_hd95 = prev_hd95 - curr_hd95
         self._prev_hd95 = curr_hd95
         
@@ -387,6 +530,32 @@ class MaskRefinementEnv(gym.Env):
             if self._step_count + 1 >= self.max_steps:
                 reward += 100. * (new_dsc - self._initial_dsc)
 
+        if self.refinement_profile == "ppo_v4":
+            s = self._size_scale
+            reward = (s * (100. * delta_dsc + 20. * delta_boundary_dsc)
+                      + V4_HD95_WEIGHT * float(np.clip(delta_hd95, -5., 5.)) - step_cost)
+            if self._step_count + 1 >= self.max_steps:
+                reward += (s * 100. * (new_dsc - self._initial_dsc)
+                           + V4_HD95_WEIGHT * float(np.clip(self._initial_hd95 - curr_hd95, -10., 10.)))
+
+        if self.refinement_profile == "ppo_v5":
+            # PixelRL-style factorization of the scalar: only edited wedges contribute
+            # their local accuracy Δ. KEEP wedges do not dilute credit/blame.
+            s = self._size_scale
+            new_acc = self._sector_accuracies(new_mask > .5, self._current_gt > .5)
+            sector_delta = new_acc - self._prev_sector_acc
+            if edited.any():
+                local = float(sector_delta[edited].sum())
+            else:
+                # All-KEEP: reward leaving a good mask alone; nudge exploration otherwise.
+                local = 0.05 / V5_SECTOR_REWARD if new_dsc >= 0.85 else -0.02 / V5_SECTOR_REWARD
+            reward = (s * V5_SECTOR_REWARD * local
+                      + V5_HD95_WEIGHT * float(np.clip(delta_hd95, -5., 5.)) - step_cost)
+            if self._step_count + 1 >= self.max_steps:
+                reward += (s * 100. * (new_dsc - self._initial_dsc)
+                           + V5_HD95_WEIGHT * float(np.clip(self._initial_hd95 - curr_hd95, -10., 10.)))
+            self._prev_sector_acc = new_acc
+
         old_prev_dsc = self._prev_dsc
         old_prev_boundary_dsc = self._prev_boundary_dsc
 
@@ -407,5 +576,7 @@ class MaskRefinementEnv(gym.Env):
             "prev_boundary_dsc": old_prev_boundary_dsc,
             "delta_dsc": delta_dsc,
             "delta_boundary": delta_boundary_dsc,
+            "hd95": curr_hd95,
+            "initial_hd95": self._initial_hd95,
         }
         return self._obs(), reward, terminated, truncated, info

@@ -39,7 +39,7 @@ class GuardTests(unittest.TestCase):
         for candidate in (np.zeros_like(self.rough), self.rough.copy()):
             self.edge.return_value = False
             out = self.h['_guard_refinement'](None, self.rough, candidate)
-            np.testing.assert_array_equal(out, self.rough)
+            np.testing.assert_array_equal(out, candidate)
         self.oracle.assert_not_called()
 
     def test_explicit_oracle(self):

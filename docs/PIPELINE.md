@@ -2,7 +2,11 @@
 
 실측 비교·환자 통계·학습형 GT-free gate 실행 방법: [품질 gate 평가 안내](QUALITY_GATE.md).
 
-> **현재 코드: 08-20 설정 + GT gate 수정.** Stage 2 임계값 0.80/0.80/0.50, CC 0/15/25, PPO 학습 300,000 스텝(rollout 1,024, 10 epochs, 에피소드 30스텝), 평가 15스텝, confidence skip OFF입니다. 기본 추론은 GT 없이 마지막 PPO 스텝을 사용하고 면적·MRI 에지 가드를 적용합니다. `--allow_oracle_gate`를 명시할 때만 GT 단조 게이트를 추가합니다. 아래 08-20 수치는 과거 GT 기반 스텝 선택·게이트 결과이며, 수정 코드의 성능을 뜻하지 않습니다. 새 성능은 재평가가 필요합니다.
+> **최신 권장:** 환자 풀 1251명, refinement profile **`ppo_v4`** (`configs/ppo_brats_v4.yaml`).
+> GT-free val 결과·폐기된 v5 요약은 [EXPERIMENT_RESULTS.md §0](EXPERIMENT_RESULTS.md).
+> **`ppo_v5`는 사용하지 마세요.**
+
+> **참고(08-20 설정):** Stage 2 임계값 0.80/0.80/0.50, CC 0/15/25. 기본 추론은 GT 없이 마지막 PPO 스텝을 사용합니다. `--allow_oracle_gate`를 명시할 때만 GT 단조 게이트를 추가합니다. 아래 08-20 수치는 과거 GT 기반 게이트 결과이며 1251명 GT-free와 직접 비교하지 마세요.
 
 3단계 동적 라우팅(분류 → 크기별 Expert 분할 → 크기별 경계 보정)과 4번째 평가 단계를 **코드 기준**으로 정리한 문서입니다.
 

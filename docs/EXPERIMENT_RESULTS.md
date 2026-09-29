@@ -1,20 +1,98 @@
 # RL-Refiner 실험 결과
 
-> **현재 코드: 08-20 설정 + GT gate 수정.** Stage 2 임계값 0.80/0.80/0.50, CC 0/15/25, PPO 학습 300,000 스텝(rollout 1,024, 10 epochs, 에피소드 30스텝), 평가 15스텝, confidence skip OFF입니다. 기본 추론은 GT 없이 마지막 PPO 스텝을 사용하고 면적·MRI 에지 가드를 적용합니다. `--allow_oracle_gate`를 명시할 때만 GT 단조 게이트를 추가합니다. 아래 08-20 수치는 과거 GT 기반 스텝 선택·게이트 결과이며, 수정 코드의 성능을 뜻하지 않습니다. 새 성능은 재평가가 필요합니다.
+> **최신(2026-09-29~30):** 환자 풀 **1251명** (train 875 / val 188 / test 188, seed 42).
+> Stage 2 임계값 0.80/0.80/0.50, CC 0/15/25, 모달리티 `t1ce+flair`, val·종양 슬라이스,
+> GT-free `heuristic` 평가. 권장 PPO 프로필은 **`ppo_v4`** (`checkpoints/ppo_v4`).
+> **`ppo_v5`는 폐기**했습니다(전체 DSC 0.7614로 Stage 2를 크게 하회).
 
-> 실험 이력과 최종 벤치마크를 한 파일로 정리한 문서입니다.
-> 이전 `EXPERIMENTS.md`, `final_models_report.md`, `technical_report.md`의 내용을 통합했습니다.
+> 아래 §1 이후의 08-20(210명) 수치는 과거 GT 게이트 포함 실험이며, 1251명 GT-free 결과와 직접 비교하지 마세요.
 
 - **데이터셋**: BraTS 2021 Task 1
 - **입력**: `t1ce+flair`, 128×128 2D 슬라이스
 - **지표**: DSC (↑), HD95 px (↓), Precision, Recall — 구현은 `src/utils/metrics.py`
-- **최신 실행**: 2026-08-20 `python run_pipeline.py batch_size=64` (seed 42, 결정적 모드 ON)
-- **비교 그림 표기**: 파이프라인 Stage 3(단조 DSC 게이트) = **TRIO**
-- **파이프라인 구조**: [PIPELINE.md](PIPELINE.md) / **베이스라인**: [baselines/README.md](../baselines/README.md)
+- **파이프라인 구조**: [PIPELINE.md](PIPELINE.md) / **프로필·게이트**: [QUALITY_GATE.md](QUALITY_GATE.md)
 
 ---
 
-## 1. 최종 결과 (2026-08-20, val hold-out)
+## 0. 최신 결과 — 1251명, GT-free (2026-09-29~30)
+
+### 0.1 설정
+
+| 항목 | 값 |
+|---|---|
+| 환자 풀 / 분할 | 1251 → train **875** / val **188** / test **188** (`checkpoints/patient_split.json`, seed 42) |
+| 평가 | val, `slice_selection=tumor`, 슬라이스 **11,073** |
+| Stage 1 | ResNet18 2.5D, margin 80, val acc **0.8602** (clear **0.9272**) |
+| Stage 2 Expert val DSC | CaraNet **0.7857** / UNet++ **0.8672** / SegResNet **0.8550** |
+| Stage 2 임계값 / CC | 0.80,0.80,0.50 / 0,15,25 |
+| Stage 3 PPO | 100k steps, n_envs=8, max_steps=15, `ent_coef=0.01` |
+| 평가 모드 | classifier routing + `heuristic` (GT-free). Confidence bypass OFF |
+| 산출물 | `results/eval_1251_val_tumor` (v2), `results/eval_1251_val_tumor_ppo_v4` (v4) |
+
+라우팅 분포(val): Small 4401 / Medium 4603 / Large 2069.
+
+### 0.2 종합 비교 (전체 평균 DSC)
+
+| 방법 | 전체 DSC | Small | Medium | Large | 비고 |
+|---|---:|---:|---:|---:|---|
+| Stage 2 only | **0.8344** | 0.7530 | 0.8792 | 0.9081 | Expert 이진화+CC |
+| PPO **v2** | 0.8306 | 0.7517 | 0.8804 | 0.8879 | Large 과소분할(Recall 0.942→0.894) |
+| PPO **v4** (권장) | **0.8345** | 0.7517 | 0.8805 | **0.9086** | Large 유지, Stage 2와 사실상 동일 |
+| PPO **v5** (폐기) | 0.7614 | 0.7372 | 0.7690 | 0.7957 | 게이트 해제 후 전 컴포넌트 자유 수정 → 붕괴 |
+
+전체 HD95 / Small HD95는 한쪽만 비는 슬라이스 때문에 `nan`이 섞일 수 있습니다(평가 `np.mean`).
+
+### 0.3 v4 클래스별 (GT-free heuristic)
+
+| 클래스 | n | Stage 2 DSC | v4 DSC | Stage 2→v4 P | Stage 2→v4 R | Medium/Large HD95 (px) |
+|---|---:|---:|---:|---|---|---|
+| Small | 4401 | 0.7530 | 0.7517 | 0.808→0.835 | 0.751→0.725 | nan |
+| Medium | 4603 | 0.8792 | 0.8805 | 0.902→0.900 | 0.871→0.876 | 3.92→4.03 |
+| Large | 2069 | 0.9081 | 0.9086 | 0.887→0.886 | 0.942→0.943 | 4.64→4.75 |
+
+### 0.4 프로필 요약
+
+| 프로필 | 요지 | 결과 |
+|---|---|---|
+| **ppo_v2** | 컴포넌트 단위, 8섹터, TTA 정렬 확률, selective shrink/expand | Stage 2 대비 −0.0038. Large 과수축 |
+| **ppo_v4** | MRI 전채널 관측, 섹터 16/24/32, 학습=추론 게이트(불확실 섹터·단방향), 보상=크기보정 ΔDSC+surface HD95 | Stage 2와 동등(0.8345). Large 과수축 완화 |
+| **ppo_v5** (폐기) | 게이트 없음, 부채꼴 자유 expand/shrink, 수정 부채꼴만 로컬 보상, 200k steps | 학습 중 ΔDSC 한 번도 + 아님. Medium/Large harm≈100%. 체크포인트·결과·설정 삭제함 |
+
+### 0.5 진단에서 확인한 한계 (v4 이후)
+
+컴포넌트 오라클(GT로 부채꼴별 최적 SDF shift)은 같은 제한 안에서도 DSC 상한이 높음(예: Large ~0.96).  
+실제 PPO는 부채꼴마다 늘릴/줄일 곳을 구분하지 못해 상한에 못 미침.  
+선택기(밝기 기반 shrink/expand) 정확도는 ~50%.  
+**다음 후보:** (1) Stage 2만 사용, (2) 보수적 수락 게이트, (3) 행동 단순화, (4) 경계 지도학습 헤더, (5) 오라클 shift 모방 후 PPO.
+
+### 0.6 Stage 1 변경 요약 (1251)
+
+- `ShapeDataset`: margin=80으로 300/700 경계 ±80px clear 샘플만 학습, 2.5D 6채널, augment
+- 분류기: label smoothing 0.05, Clear Acc 모니터링, early stop
+- 캐시: `BRATS_SKIP_CACHE_SAVE=1`로 대용량 pickle 저장 생략 가능
+
+### 0.7 재현 명령
+
+```bash
+# Stage 1–4 (Experts 포함). 자원: workers 8, OMP/MKL=1, parallel_stages 비권장
+python run_pipeline.py --config configs/ppo_brats_v4.yaml \
+  --max_train_patients 1251 --num_workers 8 \
+  --slice_selection tumor --no_deterministic \
+  --output_dir results/eval_1251_val_tumor_ppo_v4
+
+# PPO만 재학습 + 평가 (Experts 고정)
+python run_pipeline.py --config configs/ppo_brats_v4.yaml \
+  --skip_classifier --skip_experts \
+  --max_train_patients 1251 --num_workers 8 \
+  --slice_selection tumor --output_dir results/eval_1251_val_tumor_ppo_v4
+```
+
+체크포인트: `checkpoints/shape_classifier_best.pt`, `caranet_best.pt`, `unetplusplus_best.pt`,
+`segresnet_best.pt`, `checkpoints/ppo_v4/ppo_{small,medium,large}.zip`.
+
+---
+
+## 1. 과거 결과 (2026-08-20, val hold-out, 210명 풀)
 
 ### 1.1 평가 설정
 

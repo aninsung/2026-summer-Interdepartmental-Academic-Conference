@@ -64,5 +64,9 @@ def compute_dice(pred_binary: torch.Tensor, target: torch.Tensor, smooth: float 
     pred_flat = pred_binary.view(-1).float()
     target_flat = target.view(-1).float()
     intersection = (pred_flat * target_flat).sum()
-    dsc = (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
+    pred_sum = pred_flat.sum()
+    target_sum = target_flat.sum()
+    if intersection.item() == 0.0 and target_sum.item() > 0.0:
+        return 0.0
+    dsc = (2.0 * intersection + smooth) / (pred_sum + target_sum + smooth)
     return dsc.item()

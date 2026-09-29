@@ -369,7 +369,7 @@ class BraTS2020Dataset(Dataset):
             self._samples = samples
             self._sample_pids = pids
             self._sample_zs = zs
-            print(f"[BraTS Cache] loaded {len(samples)} slices: {path}")
+            print(f"[BraTS Cache] loaded {len(samples)} slices: {path}", flush=True)
             return True
         except Exception as exc:
             print(f"[BraTS Cache] ignoring invalid cache {path}: {exc}")
@@ -379,13 +379,16 @@ class BraTS2020Dataset(Dataset):
         path = self._cache_path()
         if path is None or not self._samples:
             return
+        if os.environ.get("BRATS_SKIP_CACHE_SAVE", "") == "1":
+            print(f"[BraTS Cache] save skipped ({len(self._samples)} slices)", flush=True)
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         with tmp.open("wb") as f:
             pickle.dump((self._samples, self._sample_pids, self._sample_zs), f,
                         protocol=pickle.HIGHEST_PROTOCOL)
         tmp.replace(path)
-        print(f"[BraTS Cache] saved {len(self._samples)} slices: {path}")
+        print(f"[BraTS Cache] saved {len(self._samples)} slices: {path}", flush=True)
 
     # ── 내부 빌더 ──────────────────────────────────────────
     def _build(self, max_patients: Optional[int]) -> None:
@@ -421,7 +424,7 @@ class BraTS2020Dataset(Dataset):
         total_slices = 0
         skipped = 0
         max_w = min(self.num_workers, len(jobs))
-        print(f"[BraTS Dataset] {len(jobs)}명 환자 병렬 로딩 중 (workers={max_w})...")
+        print(f"[BraTS Dataset] {len(jobs)}명 환자 병렬 로딩 중 (workers={max_w})...", flush=True)
 
         if max_w > 1:
             from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -429,8 +432,13 @@ class BraTS2020Dataset(Dataset):
             with ProcessPoolExecutor(max_workers=max_w, mp_context=multiprocessing.get_context("spawn")) as executor:
                 futures = {executor.submit(_process_single_patient_job, job): job[0].name for job in jobs}
                 completed = []
+                done = 0
                 for future in as_completed(futures):
-                    completed.append(future.result())
+                    pid, res, err_msg = future.result()
+                    completed.append((pid, res, err_msg))
+                    done += 1
+                    n_sl = 0 if res is None else len(res[0])
+                    print(f"[BraTS Dataset] {done}/{len(jobs)} {pid} 슬라이스 {n_sl}", flush=True)
                 for pid, res, err_msg in sorted(completed, key=lambda row: row[0]):
                     if err_msg or res is None:
                         skipped += 1
@@ -454,7 +462,7 @@ class BraTS2020Dataset(Dataset):
                     self._sample_zs.extend(p_zs)
                     total_slices += len(p_samples)
 
-        print(f"[BraTS Dataset] 완료: 총 {total_slices}개 유효 슬라이스 로드. (건너뜀: {skipped}명)")
+        print(f"[BraTS Dataset] 완료: 총 {total_slices}개 유효 슬라이스 로드. (건너뜀: {skipped}명)", flush=True)
 
     def _modal_slice(self, mod_vols: List[np.ndarray], z: int) -> np.ndarray:
         """모달리티 볼륨에서 z 슬라이스를 (C, H, W)로 반환. 범위 밖은 가장자리로 클램프."""

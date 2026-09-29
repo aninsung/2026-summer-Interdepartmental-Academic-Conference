@@ -105,6 +105,22 @@ python -m unittest discover -s tests -v
 테스트의 합성 마스크와 대체 모델은 기능 검증 전용이며 실측 성능 자료로 저장소에 포함하지 않습니다. 학습된 checkpoint가 없는 환경에서는 실제 성능 재평가와 실제 품질 모델 학습을 완료할 수 없습니다.
 
 
+## PPO v4: 경계 보정 개선 (권장)
+
+`configs/ppo_brats_v4.yaml`, 체크포인트 `checkpoints/ppo_v4/`.
+
+- 관측: 모든 MRI 채널(T1ce+FLAIR) + mask + prob + edge + 편집가능 섹터맵 + 방향 평면
+- 섹터: Small 16 / Medium 24 / Large 32
+- 학습=추론: 불확실 섹터만 편집, 에피소드당 shrink 또는 expand 단방향
+- 보상: 크기 보정 ΔDSC + surface HD95 개선항 (평가와 같은 surface HD95)
+- 선택: gate-eligible val 컴포넌트에서 selective 경로 ΔDSC로 best 저장
+- 1251명 val GT-free: 전체 DSC **0.8345** (Stage 2 0.8344와 동등). 상세는 [EXPERIMENT_RESULTS.md §0](EXPERIMENT_RESULTS.md)
+
+## PPO v5: 폐기
+
+게이트 없는 자유 부채꼴 수정 + 200k 학습은 Stage 2를 크게 하회(0.7614)하여 **폐기**했습니다.
+설정·체크포인트·평가 결과는 저장소에서 제거했습니다. 코드에 `ppo_v5` 분기가 남아 있어도 사용하지 마세요.
+
 ## PPO v3: 전체 슬라이스 보정 실험
 
 `configs/ppo_brats_v3.yaml`은 성능 향상이 검증된 모델이 아니라 새 학습 프로필입니다.

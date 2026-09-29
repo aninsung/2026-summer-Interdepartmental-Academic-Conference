@@ -1,0 +1,40 @@
+# PPO v4: 경계 보정 에이전트 개선 (ppo_brats.yaml 과 하이퍼파라미터 동일)
+#  - 보상: 크기 보정(sqrt(area/300)) ΔDSC + surface HD95 개선항
+#  - 관측: 모든 MRI 채널(T1ce+FLAIR) + mask, prob, edge, 편집 가능 섹터, 방향
+#  - 섹터: Small 16 / Medium 24 / Large 32
+#  - 학습도 추론 게이트와 같은 불확실 섹터·단방향(shrink/expand) 제한
+# 사용 예시: python run_pipeline.py --config configs/ppo_brats_v4.yaml --skip_classifier --skip_experts
+
+use_real_data: true
+train_root: "src/data/archive"
+modality: "t1ce+flair"
+image_size: 128
+max_train_patients: 1251
+
+max_steps: 15
+target_dsc: 1.0
+step_penalty: 0.001
+
+total_timesteps: 100000
+n_envs: 8
+n_steps: 1024
+batch_size: 256
+n_epochs: 4
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.01
+learning_rate: 0.0001
+net_arch: [512, 256, 128]
+
+stop_dsc_target: 0
+stop_plateau: false
+
+save_path: "checkpoints/ppo_v4/ppo_refiner"
+log_path: "logs/ppo_v4"
+unet_checkpoint: "checkpoints/segresnet_best.pt"
+model_type: "segresnet"
+
+refinement_profile: ppo_v4
+stage2_thresholds: "0.80,0.80,0.50"
+cc_min_sizes: "0,15,25"

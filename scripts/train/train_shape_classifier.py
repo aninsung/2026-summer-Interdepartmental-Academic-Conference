@@ -21,8 +21,10 @@ def main():
     parser.add_argument("--epochs", type=int, default=15, help="에폭 수")
     parser.add_argument("--modality", type=str, default="t1ce+flair", help="MRI 모달리티 ('t1ce', 't1ce+flair' 등)")
     parser.add_argument("--patient_split", type=str, default="checkpoints/patient_split.json")
-    parser.add_argument("--lr", type=float, default=1e-3, help="학습률")
+    parser.add_argument("--lr", type=float, default=3e-4, help="학습률")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="AdamW 가중치 감쇠")
+    parser.add_argument("--margin", type=float, default=80.0, help="학습에서 빼는 클래스 경계 폭(px)")
+    parser.add_argument("--patience", type=int, default=5, help="검증 정확도가 이 에폭 동안 안 오르면 중단")
     parser.add_argument("--no_pretrained", action="store_true",
                         help="ImageNet 사전학습 없이 무작위 초기화 (ablation용)")
     parser.add_argument("--seed", type=int, default=42, help="전역 시드")
@@ -50,30 +52,34 @@ def main():
         refinement_mode=None,
         simulate_rough=False,
     )
-    train_set = ShapeDataset(train_brats)
-    val_set = ShapeDataset(val_brats)
+    train_set = ShapeDataset(train_brats, margin=args.margin, drop_boundary=True, augment=True, use_25d=True)
+    val_set = ShapeDataset(val_brats, margin=args.margin, drop_boundary=False, augment=False, use_25d=True)
     train_size = len(train_set)
     val_size = len(val_set)
-    print(f"Total valid slices: {train_size + val_size} (train={train_size}, val={val_size})")
+    print(
+        f"Slices: train_clear={train_size}/{len(train_brats)}, "
+        f"val_all={val_size} (margin={args.margin:g}px, input=2.5D)"
+    )
     
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=max(0, args.num_workers), pin_memory=True, persistent_workers=(args.num_workers > 0))
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=max(0, args.num_workers), pin_memory=True, persistent_workers=(args.num_workers > 0))
     
     # 3. 모델 초기화
-    sample_img, _ = train_set[0]
+    sample_img, _, _ = train_set[0]
     in_channels = sample_img.shape[0] if sample_img.ndim == 3 else 1
     pretrained = not args.no_pretrained
     print(f"Building Shape Classifier (Input Channels: {in_channels}, Pretrained: {pretrained})...")
     model = build_shape_classifier(
         in_channels=in_channels, num_classes=3, pretrained=pretrained
     ).to(device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     # 4. 훈련 루프
     num_epochs = args.epochs
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     best_val_acc = 0.0
+    stale = 0
     os.makedirs("checkpoints", exist_ok=True)
     
     for epoch in range(num_epochs):
@@ -83,7 +89,7 @@ def main():
         model.train()
         train_loss = 0.0
         train_correct = 0
-        for inputs, labels in train_loader:
+        for inputs, labels, _ in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
             
@@ -103,18 +109,25 @@ def main():
         model.eval()
         val_loss = 0.0
         val_correct = 0
+        clear_correct = 0
+        clear_count = 0
         with torch.no_grad():
-            for inputs, labels in val_loader:
+            for inputs, labels, clear in val_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
+                clear = clear.to(device)
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
                 
                 val_loss += loss.item() * inputs.size(0)
                 _, preds = torch.max(outputs, 1)
                 val_correct += torch.sum(preds == labels.data)
+                if clear.any():
+                    clear_correct += torch.sum(preds[clear] == labels[clear])
+                    clear_count += int(clear.sum().item())
                 
         epoch_val_loss = val_loss / val_size
         epoch_val_acc = val_correct.double() / val_size
+        epoch_clear_acc = (clear_correct.double() / clear_count) if clear_count else epoch_val_acc
         
         cur_lr = optimizer.param_groups[0]["lr"]
         scheduler.step()
@@ -122,12 +135,19 @@ def main():
         elapsed = time.time() - start_time
         print(f"Epoch {epoch+1}/{num_epochs} [{elapsed:.1f}s] lr={cur_lr:.2e} "
               f"Train Loss: {epoch_train_loss:.4f} Acc: {epoch_train_acc:.4f} | "
-              f"Val Loss: {epoch_val_loss:.4f} Acc: {epoch_val_acc:.4f}")
+              f"Val Loss: {epoch_val_loss:.4f} Acc: {epoch_val_acc:.4f} "
+              f"Clear Acc: {epoch_clear_acc:.4f}")
               
         if epoch_val_acc > best_val_acc:
             best_val_acc = epoch_val_acc
+            stale = 0
             torch.save(model.state_dict(), "checkpoints/shape_classifier_best.pt")
             print(f"  -> Best model saved! (Val Acc: {best_val_acc:.4f})")
+        else:
+            stale += 1
+            if stale >= args.patience:
+                print(f"Early stop: val acc did not improve for {args.patience} epochs.")
+                break
             
     print(f"Training Complete! Best Val Acc: {best_val_acc:.4f}")
 

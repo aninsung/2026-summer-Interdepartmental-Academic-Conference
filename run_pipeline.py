@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--max_train_patients", type=int, default=400)
-    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3"], default=None)
+    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"], default=None)
     parser.add_argument("--slice_selection", choices=["tumor", "all"], default="all")
     parser.add_argument("--agent_dir", default=None)
     parser.add_argument("--eval_mode", choices=["stage2", "augmentation", "ppo_raw", "heuristic", "quality", "oracle", "compare"], default=None)
@@ -55,7 +55,7 @@ def main():
     with open(args.config, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
     args.refinement_profile = args.refinement_profile or config.get("refinement_profile", "ppo_v2")
-    if args.refinement_profile not in {"legacy", "ppo_v2", "ppo_v3"}:
+    if args.refinement_profile not in {"legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"}:
         parser.error("Unknown refinement_profile")
     args.agent_dir = args.agent_dir or ("checkpoints" if args.refinement_profile == "legacy"
                                        else f"checkpoints/{args.refinement_profile}")

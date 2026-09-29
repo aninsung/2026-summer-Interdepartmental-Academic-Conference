@@ -36,6 +36,8 @@ def set_seed(seed: int = 42, deterministic: bool = False) -> int:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     if deterministic:
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
@@ -44,6 +46,8 @@ def set_seed(seed: int = 42, deterministic: bool = False) -> int:
             torch.use_deterministic_algorithms(True, warn_only=True)
         except (AttributeError, RuntimeError) as e:
             log.warning("결정적 알고리즘 강제 실패 (%s). 시드만 적용됩니다.", e)
+    else:
+        torch.backends.cudnn.benchmark = True
 
     log.info("시드 고정: %d (deterministic=%s)", seed, deterministic)
     return seed

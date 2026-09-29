@@ -12,12 +12,12 @@ from src.data.brats2020_dataset import BraTS2020Dataset
 from src.data.patient_split import load_or_create_patient_split, DEFAULT_SPLIT_PATH
 from src.models.dynamic_router import AdaptivePipeline
 from src.utils.metrics import apply_monotonic_dsc_gate, dice, filter_small_components, hd95, precision, recall
-from src.envs.mask_refinement_env import MaskRefinementEnv
+from src.envs.mask_refinement_env import MaskRefinementEnv, V4_SECTORS, V5_SECTORS, sector_ids, uncertain_sectors
 from stable_baselines3 import PPO
 from src.utils.refinement_inputs import boundary_energy, component_inputs, stage2_mask
 from src.utils.quality_gate import QualityGate, pair_features
 from src.utils.evaluation_records import RecordWriter, measured_metrics
-from scipy.ndimage import sobel, binary_dilation, binary_erosion, binary_closing, binary_opening
+from scipy.ndimage import sobel, binary_dilation, binary_erosion, binary_closing, binary_opening, label
 
 def _compute_edge_map(img: np.ndarray) -> np.ndarray:
     if img.ndim == 3:
@@ -104,17 +104,92 @@ def _edge_accept(image: np.ndarray, rough: np.ndarray, refined: np.ndarray, marg
 
 
 def _guard_refinement(image, rough, refined, *, edge_gate=True, oracle_gt=None):
-    """TTA/PPO/closing 전체 후보를 원래 마스크와 비교한다. GT는 명시적 상한 평가 전용."""
-    if not _gt_free_accept(rough, refined):
-        return rough.copy()
-    if edge_gate and not _edge_accept(image, rough, refined):
-        return rough.copy()
     if oracle_gt is not None:
         return apply_monotonic_dsc_gate(rough, refined, oracle_gt)
     return refined.copy()
 
 
-def _refine_with_ppo(agent, image, init_mask, prob_map, refinement_mode, n_steps=15, clip_shrink=False, clip_shrink_threshold=35):
+def _sector_ids(mask):
+    return sector_ids(mask, 8)
+
+
+def _uncertain_sectors(mask, prob, n=8):
+    return uncertain_sectors(mask, prob, n)
+
+
+def _edit_action(action, uncertain, mode, direction):
+    action = np.array(action, copy=True)
+    keep = 0.0 if mode == "small" else 2
+    for i in range(8):
+        if not uncertain[i]:
+            action[i] = keep
+        elif mode == "small":
+            value = float(action[i])
+            action[i] = min(value, 0.0) if direction == "shrink" else max(value, 0.0)
+        else:
+            value = int(action[i])
+            action[i] = min(value, 2) if direction == "shrink" else max(value, 2)
+    return action
+
+
+def _representation_score(image, core, region):
+    img = np.mean(image, axis=0) if getattr(image, "ndim", 0) == 3 else image
+    if int(np.sum(core)) < 1 or int(np.sum(region)) < 1:
+        return None
+    mu_c = float(img[core].mean())
+    sigma = float(img[core].std())
+    mu = float(img[region].mean())
+    return float(np.exp(-0.5 * (abs(mu - mu_c) / (1.5 * (sigma + 1e-6))) ** 2))
+
+
+def selective_eligible(initial, prob, mode, profile):
+    """GT-free gate shared by training-data selection and inference."""
+    if profile == "ppo_v5":
+        # v5 always runs; the policy chooses expand/shrink/keep per sector from MRI.
+        return True
+    inside = initial > 0.5
+    if np.any(inside) and float(prob[inside].mean()) >= 0.9:
+        return False
+    n = V4_SECTORS[mode] if profile == "ppo_v4" else 8
+    return bool(np.any(_uncertain_sectors(initial, prob, n)))
+
+
+def _selective_refine(agent, image, initial, prob, mode, n_steps=15, clip_shrink=False):
+    profile = getattr(agent, "refinement_profile", "legacy")
+    if profile == "ppo_v5":
+        # Single free MRI-driven rollout; no confidence skip.
+        return _refine_with_ppo(agent, image, initial, prob, mode, n_steps=n_steps, clip_shrink=clip_shrink)
+    if not selective_eligible(initial, prob, mode, profile):
+        return initial.copy()
+    inside = initial > 0.5
+    if profile == "ppo_v4":
+        # The environment applies the sector/direction constraint, as in training.
+        shrink, expand = (_refine_with_ppo(agent, image, initial, prob, mode, n_steps=n_steps,
+                                           clip_shrink=clip_shrink, reset_options={"direction": d})
+                          for d in ("shrink", "expand"))
+    else:
+        uncertain = _uncertain_sectors(initial, prob)
+        shrink = _refine_with_ppo(
+            agent, image, initial, prob, mode, n_steps=n_steps, clip_shrink=clip_shrink,
+            action_edit=lambda action: _edit_action(action, uncertain, mode, "shrink"),
+        )
+        expand = _refine_with_ppo(
+            agent, image, initial, prob, mode, n_steps=n_steps, clip_shrink=clip_shrink,
+            action_edit=lambda action: _edit_action(action, uncertain, mode, "expand"),
+        )
+    core = inside & (prob > 0.8)
+    if not np.any(core):
+        core = inside
+    added = _representation_score(image, core, (expand > 0.5) & ~inside)
+    if added is not None and added > 0.95:
+        return expand
+    removed = _representation_score(image, core, inside & ~(shrink > 0.5))
+    if removed is not None and removed < 0.95:
+        return shrink
+    return initial.copy()
+
+
+def _refine_with_ppo(agent, image, init_mask, prob_map, refinement_mode, n_steps=15, clip_shrink=False, clip_shrink_threshold=35, action_edit=None, reset_options=None):
     """
     100% GT-Free 순수 자율 추론:
     정답(GT)을 보지 않고 입력 영상, 초기 마스크, 확률 맵만으로 PPO가 15스텝 동안 경계를 보정합니다.
@@ -131,9 +206,11 @@ def _refine_with_ppo(agent, image, init_mask, prob_map, refinement_mode, n_steps
         refinement_mode=refinement_mode,
         refinement_profile=getattr(agent, "refinement_profile", "legacy"),
     )
-    obs, _ = env.reset(seed=0)
+    obs, _ = env.reset(seed=0, options=reset_options)
     for _ in range(n_steps):
         action, _ = agent.predict(obs, deterministic=True)
+        if action_edit is not None:
+            action = action_edit(action)
         if clip_shrink and getattr(agent, "refinement_profile", "legacy") != "ppo_v3" and np.sum(env._current_mask) < clip_shrink_threshold:
             action = np.maximum(0.0, action)
         obs, _, terminated, truncated, _ = env.step(action)
@@ -187,10 +264,12 @@ def refinement_candidates(agents, image, rough, probability, slice_class, thresh
         if run_ppo and not bypass:
             if agents.get(ck) is None:
                 raise ValueError(f'Missing PPO agent for class {ck}')
-            observation_probability = (component_probability if getattr(agents[ck], 'refinement_profile', 'legacy') == 'ppo_v2'
+            observation_probability = (component_probability if getattr(agents[ck], 'refinement_profile', 'legacy') in {'ppo_v2', 'ppo_v4', 'ppo_v5'}
                                        else probability * initial)
-            refined = _refine_with_ppo(agents[ck], image, initial, observation_probability,
-                                      {0: 'small', 1: 'medium', 2: 'large'}[ck], clip_shrink=ck == 0)
+            refined = _selective_refine(
+                agents[ck], image, initial, observation_probability,
+                {0: 'small', 1: 'medium', 2: 'large'}[ck], clip_shrink=ck == 0,
+            )
             ppo_calls += 1
             refined = binary_closing(refined, np.ones((3, 3))).astype(np.float32)
         else:
@@ -228,7 +307,7 @@ def main():
     parser.add_argument("--deterministic", action="store_true", default=True)
     parser.add_argument("--no_deterministic", action="store_false", dest="deterministic")
     parser.add_argument("--eval_mode", choices=["stage2", "augmentation", "ppo_raw", "heuristic", "quality", "oracle", "compare"], default="heuristic")
-    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3"], default="legacy")
+    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"], default="legacy")
     parser.add_argument("--energy_gate", action="store_true", help="GT-free energy selector for PPO components")
     parser.add_argument("--energy_threshold", type=float, default=0.12)
     parser.add_argument("--energy_model", help="trained EnergyModel checkpoint (optional)")
@@ -473,8 +552,7 @@ def main():
             if quality_gate or args.energy_gate:
                 gate_score = quality_gate.predict_delta(features) if quality_gate else None
                 quality_accept = quality_gate.accept(features) if quality_gate else True
-                gate_accepted = (quality_accept and energy_accept
-                                 and _gt_free_accept(rough_mask_np, masks['ppo_raw']))
+                gate_accepted = quality_accept and energy_accept
                 masks['quality'] = masks['ppo_raw'].copy() if gate_accepted else rough_mask_np.copy()
             if args.eval_mode == 'oracle' or (args.eval_mode == 'compare' and args.allow_oracle_gate):
                 masks['oracle'] = apply_monotonic_dsc_gate(rough_mask_np, masks['ppo_raw'], gt_np)
@@ -556,8 +634,7 @@ def main():
         print(f"Monotonic DSC reverts (final < initial → keep Stage 2): {monotonic_reverts}")
     else:
         conf_str = f"Confidence Bypass (Small >= {args.small_confidence_threshold}, Med/Large >= {args.confidence_threshold})" if args.confidence_threshold is not None else "Confidence Bypass: OFF"
-        edge_str = "MRI Edge Physical Guard: ON" if not args.disable_edge_gate else "MRI Edge Physical Guard: OFF"
-        print(f"Unsupervised Safety Guards: {conf_str} | {edge_str} (guards use no GT)")
+        print(f"Unsupervised Safety Guards: {conf_str} | Area/Edge Guard: OFF")
     print(f"Class Distribution: Small: {class_counts[0]}, Medium: {class_counts[1]}, Large: {class_counts[2]}")
     print(f"Average Initial DSC  (Stage 2):        {np.mean(initial_dsc_list):.4f}")
     print(f"Average Final   DSC  (Stage 3 RL):     {np.mean(final_dsc_list):.4f}")
@@ -683,6 +760,7 @@ def _plot_one_sample(s: dict, title: str, save_path: str):
     overlay = np.zeros((*rough.shape, 4))
     overlay[rough > 0.5] = [1, 0, 0, 0.4]
     axes[1].imshow(overlay)
+    axes[1].contour(rough, levels=[0.5], colors="red", linewidths=2.0)
     axes[1].contour(gt, levels=[0.5], colors="lime", linewidths=1.2, linestyles="--")
     axes[1].set_title("Rough Mask", fontsize=11)
     axes[1].set_xlabel(f"Rough DSC={init_dsc:.3f}", fontsize=11, fontweight="bold")
@@ -761,6 +839,7 @@ def _plot_pipeline_results(pipeline_samples: dict, output_dir: str = "results"):
         overlay = np.zeros((*rough.shape, 4))
         overlay[rough > 0.5] = [1, 0, 0, 0.4]
         axes[1, col].imshow(overlay)
+        axes[1, col].contour(rough, levels=[0.5], colors="red", linewidths=2.0)
         axes[1, col].contour(gt, levels=[0.5], colors="lime", linewidths=1.2, linestyles="--")
         axes[1, col].set_xlabel(f"Rough DSC={init_dsc:.3f}", fontsize=12, fontweight="bold")
         axes[1, col].set_xticks([])
