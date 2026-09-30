@@ -6,7 +6,7 @@
 
 BraTS 2021 **851명**(가중치 학습에 쓰지 않은 환자)에서 2차원 슬라이스 DSC의 환자 평균이 **0.8337 → 0.8604**로 올랐습니다. 환자 짝 차이 +0.0267, 95% CI 0.0256–0.0278. 검증 60명으로 임계값을 다시 고른 Stage 2(0.8411)와 비교해도 **+0.0193** (95% CI 0.0184–0.0202)이 남습니다.
 
-[논문](docs/paper_draft_ko.md) · [파이프라인](docs/PIPELINE.md) · [실험 수치](docs/EXPERIMENT_RESULTS.md)
+[논문](docs/paper_miccai.pdf) · [파이프라인](docs/PIPELINE.md) · [실험 수치](docs/EXPERIMENT_RESULTS.md)
 
 ---
 
