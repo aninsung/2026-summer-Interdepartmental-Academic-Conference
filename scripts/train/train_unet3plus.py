@@ -58,11 +58,17 @@ def train_unet3plus(
         log.info("실제 BraTS2021 데이터 사용")
         from src.data.brats2020_dataset import BraTS2020Dataset
         import numpy as np
+        from src.data.patient_split import load_or_create_patient_split
+        split = load_or_create_patient_split(
+            train_root, max_train_patients, "checkpoints/patient_split.json"
+        )
+        pool = list(split["train"]) + list(split["val"])
         full_ds = BraTS2020Dataset(
             root_dir=train_root,
             modality=modality,
             target_size=target_size,
-            max_patients=max_train_patients,
+            max_patients=None,
+            patient_ids=pool,
             simulate_rough=False,
         )
         

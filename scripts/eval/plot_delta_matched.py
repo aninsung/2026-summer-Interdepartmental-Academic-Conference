@@ -29,11 +29,8 @@ PICKS = [
     ("large", "BraTS2021_00512", 75),
     ("large", "BraTS2021_01385", 79),
 ]
-TITLES = {
-    "small": "Small (CaraNet)",
-    "medium": "Medium (UNet++)",
-    "large": "Large (SegResNet)",
-}
+TITLES = {"small": "Small", "medium": "Medium", "large": "Large"}
+ROUTE_NAMES = {0: "CaraNet", 1: "UNet++", 2: "SegResNet"}
 THRESHOLDS = [0.80, 0.80, 0.50]
 CC_SIZES = [0, 15, 25]
 
@@ -124,7 +121,7 @@ def main():
         axes[0, col].imshow(sample["img"], cmap="gray", vmin=0, vmax=1)
         axes[0, col].contour(sample["gt"], levels=[0.5], colors="lime", linewidths=1.6)
         axes[0, col].set_title(
-            f"{TITLES[sample['cls']]}\nSample {col % 2 + 1}",
+            f"{TITLES[sample['cls']]} · {ROUTE_NAMES[sample['route']]}\nSample {col % 2 + 1}",
             fontsize=20, fontweight="bold", pad=10,
         )
         axes[1, col].imshow(sample["img"], cmap="gray", vmin=0, vmax=1)

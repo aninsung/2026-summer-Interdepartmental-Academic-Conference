@@ -81,7 +81,9 @@ def train_unet(
     )
 
     # ── 모델 ────────────────────────────────────────────────
-    model = build_unet().to(device)
+    sample = train_ds[0]["image"]
+    in_ch = int(sample.shape[0]) if sample.ndim == 3 else 1
+    model = build_unet(in_channels=in_ch).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = DiceLoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)

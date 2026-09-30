@@ -65,7 +65,8 @@ def predict_rows(model, dataset, device, batch_size: int, threshold: float) -> l
     for start in range(0, len(images), batch_size):
         stop = min(start + batch_size, len(images))
         batch = torch.from_numpy(np.ascontiguousarray(images[start:stop])).to(device)
-        prob = torch.sigmoid(model(batch).float()).squeeze(1).cpu().numpy()
+        with torch.no_grad():
+            prob = torch.sigmoid(model(batch).float()).squeeze(1).detach().cpu().numpy()
         for offset, index in enumerate(range(start, stop)):
             pred = (prob[offset] > threshold).astype(np.float32)
             metrics = measured_metrics(pred, gts[index])
@@ -104,7 +105,8 @@ def val_threshold(model, root, split_path, modality, target_size, device, batch_
     for start in range(0, len(images), batch_size):
         stop = min(start + batch_size, len(images))
         batch = torch.from_numpy(np.ascontiguousarray(images[start:stop])).to(device)
-        probs.append(torch.sigmoid(model(batch).float()).squeeze(1).cpu().numpy())
+        with torch.no_grad():
+            probs.append(torch.sigmoid(model(batch).float()).squeeze(1).detach().cpu().numpy())
     prob = np.concatenate(probs, axis=0)
     best_thr, best_dsc = 0.5, -1.0
     for thr in np.arange(0.30, 0.91, 0.05):

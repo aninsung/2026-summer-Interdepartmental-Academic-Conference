@@ -2,11 +2,14 @@
 
 분류 → 크기별 Expert → **경계 띠 PPO 하나** → 평가. 코드 기준 설명이다.
 
-논문 수치는 BraTS 2021 **1251명** 중 개발 400명(train 280 / val 60 / 방법 선택 test 60)을 뺀 **851명** 환자 평균이다. DSC 0.8359→**0.8607**, HD95 4.824→**4.557 px**. 상세는 [EXPERIMENT_RESULTS.md §0.11](EXPERIMENT_RESULTS.md), 초안은 [paper_draft_ko.md](paper_draft_ko.md).
+논문은 [paper_draft_ko.md](paper_draft_ko.md)다. 수치는 BraTS 2021 **1251명** 중 개발 400명(train 280 / val 60 / 방법 선택 test 60)을 뺀 **851명** 환자 평균이다. 고정 임계값 Stage 2 대비 DSC 0.8337→**0.8604** (짝 차이 +0.0267, 95% CI 0.0256–0.0278). 검증 60명으로 임계값을 0.45/0.80/0.20에 다시 고른 Stage 2(0.8411)와 비교해도 **+0.0193** (0.0184–0.0202)이 남는다. HD95 평균 4.888→4.609 px는 빈 마스크 제외가 달라 짝비교가 아니다. 상세는 [EXPERIMENT_RESULTS.md §0.11–0.13](EXPERIMENT_RESULTS.md). 2026-08-20 기록은 [history_2026-08-20.md](history_2026-08-20.md)다.
 
 `ppo_v5`는 폐기했다. 8방위 SDF 에이전트(`ppo_v2`, `ppo_v4`)와 2026-08-20 TRIO(단조 DSC 게이트)는 이전 구현이다. 수치는 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md) §0.1–0.4와 §1에만 두고, 이 문서의 본문과 섞지 않는다. 이전 품질 gate 절차는 [QUALITY_GATE.md](QUALITY_GATE.md) 아래쪽에 남아 있다.
 
-구조 그림: [`results/band_ppo_agent_internals.png`](../results/band_ppo_agent_internals.png).
+구조 그림: [`results/pipeline_overview.jpg`](../results/pipeline_overview.jpg), [`results/band_ppo_agent_internals.png`](../results/band_ppo_agent_internals.png).  
+Stage 2와 경계 띠 PPO: [`results/band_ppo_delta_matched/delta_matched_comparison.png`](../results/band_ppo_delta_matched/delta_matched_comparison.png).  
+KAIST·NVAUTO: [`results/method_comparison_current_3x6.png`](../results/method_comparison_current_3x6.png).  
+단일 백본: [`results/single_backbone_ppo_grid.png`](../results/single_backbone_ppo_grid.png).
 
 ---
 
@@ -114,7 +117,7 @@ python scripts/eval/evaluate_band_ppo_locked.py
 | 모델 | ResNet18. `conv1`은 2.5D 채널, `fc`는 3클래스 (`src/models/shape_classifier.py`) |
 | 레이블 | GT 면적 → 0/1/2. 경계 ±80px(`margin=80`)는 학습에서 제외 |
 | 손실 | CrossEntropy, label smoothing 0.05 |
-| 이번 개발 분할 | val acc **0.8114**. 851명 슬라이스에서 정답 크기와 맞는 비율 **0.8140** |
+| 이번 개발 분할 | val acc **0.8151**. 851명 슬라이스에서 정답 크기와 맞는 비율 **0.801** |
 
 `conv1`을 입력 채널 수에 맞출 때 ImageNet RGB 커널을 채널 축으로 합한 뒤 나눈다.
 
@@ -221,14 +224,14 @@ FLAIR 가드는 **마지막 스텝만**이다. 그 슬라이스 띠의 평균과
 - HD95는 128×128 격자에서 윤곽 사이 95% 거리, 단위는 픽셀이다. 한쪽 마스크가 비면 그 슬라이스는 HD95 평균에서 뺀다.
 - 크기 행은 환자군이 아니다. 그 정답 면적의 슬라이스가 있는 환자 수이며, 같은 환자가 두 행 이상에 들어간다.
 
-| 정답 크기 구간 | 해당 슬라이스가 있는 환자 | Stage 2 DSC | PPO DSC | Stage 2 HD95 | PPO HD95 |
-|---|---:|---:|---:|---:|---:|
-| 전체 | 851 | 0.8359 | **0.8607** | 4.824 | **4.557** |
-| 300px 미만 | 851 | 0.7588 | **0.7929** | 5.738 | **5.609** |
-| 300–700px | 757 | 0.8718 | **0.8947** | 4.327 | **3.888** |
-| 700px 이상 | 408 | 0.9038 | **0.9200** | 4.282 | **3.815** |
+| 정답 크기 구간 | 해당 슬라이스가 있는 환자 | Stage 2 DSC | PPO DSC | 환자 짝 차이 (95% CI) |
+|---|---:|---:|---:|---|
+| 전체 | 851 | 0.8337 | **0.8604** | +0.0267 (0.0256–0.0278) |
+| 300px 미만 | 851 | 0.7579 | **0.7933** | +0.0354 (0.0338–0.0370) |
+| 300–700px | 757 | 0.8700 | **0.8952** | +0.0252 (0.0239–0.0265) |
+| 700px 이상 | 408 | 0.8981 | **0.9169** | +0.0188 (0.0173–0.0205) |
 
-환자 짝 차이: DSC **+0.0248** (95% CI 0.0237–0.0259), HD95 **−0.267** px (95% CI −0.342–−0.194). 환자 평균 Precision 0.881→0.892, Recall 0.825→0.860. 슬라이스 14.3%, 환자 4.0%는 DSC가 내려간다. 주장은 이 고정 임계값의 Stage 2보다 낫다는 범위다.
+DSC 환자 짝 차이는 **+0.0267** (95% CI 0.0256–0.0278)이다. 검증 60명에서 크기별 임계값을 0.45/0.80/0.20으로 다시 고른 Stage 2는 0.8411이고, PPO와의 짝 차이는 **+0.0193** (0.0184–0.0202)이다. 재현은 `python scripts/eval/evaluate_stage2_retuned.py`, 파일은 `results/stage2_retuned.json`이다. HD95 평균은 전체 4.888→4.609 px로 `results/band_ppo_locked.json`에 있으나, 빈 마스크를 빼는 슬라이스가 Stage 2와 PPO에서 달라 본문 짝비교로 쓰지 않는다. 같은 집합의 KAIST·NVAUTO 비교는 [EXPERIMENT_RESULTS.md §0.12](EXPERIMENT_RESULTS.md)다. 단일 백본 다섯 개와 섹터 PPO는 [§0.14](EXPERIMENT_RESULTS.md)다. 학습은 같은 train 280명이고, 보고 숫자는 미사용 48명·슬라이스 2,754장의 슬라이스 평균이다. Small DSC는 TRIO 0.812, UNet++ 0.778, Attention U-Net 0.761, SegResNet 0.676, UNet+++ 0.543, U-Net 0.537이다. 그림은 `results/single_backbone_ppo_grid.png`다. 고정 임계값 0.80/0.80/0.50과 연결요소 기준은 이전 210명 풀에서 정했고, 그 풀의 148명이 이 851명에 들어 있다. 띠 설계는 이번 방법 선택 60명에서 정했고, 가중치는 이번 개발 400명으로 다시 학습했다. Stage 2와 PPO를 맞춘 여섯 슬라이스는 `results/band_ppo_delta_matched/delta_matched_comparison.png`다. 재현은 `python scripts/eval/plot_delta_matched.py`다. 열 제목의 뒤는 분류기가 고른 전문가이고, 중형 첫째는 CaraNet으로 라우팅되었다. 칸의 HD95는 그 장만의 값이며, 중형 첫째는 2.00에서 3.38 px로 늘었다.
 
 `run_pipeline.py`의 1251명 `ppo_raw` 평가는 같은 가중치를 쓰지만 집계가 다르다. 개발 환자가 포함된 슬라이스 평균이다.
 
@@ -260,6 +263,7 @@ scripts/train/train_band_refine.py       Medium 띠 지도학습 (PPO 초기 가
 scripts/train/train_band_ppo.py          Stage 3
 scripts/eval/evaluate_band_ppo_locked.py 851명 논문 표
 scripts/eval/evaluate_band_ppo.py        개발 test 60명
+scripts/eval/plot_delta_matched.py       Stage 2와 PPO 여섯 슬라이스
 scripts/eval/evaluate_pipeline.py        1251명 슬라이스 평균 (band_ppo 분기)
 
 src/models/band_refine.py                U-Net 행동/가치 머리
@@ -275,4 +279,4 @@ src/utils/metrics.py                     DSC, HD95, 크기 클래스
 
 2026-08-20과 `ppo_v2` / `ppo_v4`는 크기별 PPO 세 개(`ppo_small.zip`, `ppo_medium.zip`, `ppo_large.zip`)가 종양 중심 기준 8방위로 SDF를 평행 이동했다. 08-20 평가에는 GT 단조 DSC 게이트가 있어 그 DSC는 상한이다. `ppo_v4`의 1251명 val GT-free DSC는 0.8345로 Stage 2 0.8344와 같다. `ppo_v5`는 0.7614로 폐기했고 체크포인트를 지웠다.
 
-그 경로의 품질 gate·energy 모델·평가 모드는 [QUALITY_GATE.md](QUALITY_GATE.md)에 있다. 비교 그림의 **TRIO**는 이 예전 Stage 3다 (`results/method_comparison_3x6.png`). 현재 정책의 확정 정성 그림은 `results/band_ppo_heldout_samples/band_ppo_heldout_comparison.png`다.
+그 경로의 품질 gate·energy 모델·평가 모드는 [QUALITY_GATE.md](QUALITY_GATE.md)에 있다. `results/archive_2026-08-20/method_comparison_3x6.png`와 `results/archive_2026-08-20/pipeline_sample_comparison.png`는 이 예전 Stage 3다. 현재 비교 그림은 `results/method_comparison_current_3x6.png`와 `results/band_ppo_delta_matched/delta_matched_comparison.png`다.

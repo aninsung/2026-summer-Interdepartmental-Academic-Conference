@@ -73,13 +73,38 @@ class RunnerTests(unittest.TestCase):
         split_module = types.ModuleType('src.data.patient_split')
         split_module.load_or_create_patient_split = Mock(return_value={'train': ['a'], 'val': ['b'], 'seed': 42})
         for extra in ([], ['--allow_oracle_gate', '--disable_edge_gate', '--no_deterministic']):
-            argv = ['run_pipeline.py', '--skip_classifier', '--skip_experts', '--skip_agents', *extra]
+            argv = ['run_pipeline.py', '--refinement_profile', 'ppo_v2',
+                    '--skip_classifier', '--skip_experts', '--skip_agents', *extra]
             with patch.dict(sys.modules, {'src.data.patient_split': split_module}), patch.object(sys, 'argv', argv), patch.object(run_pipeline, 'run_command') as run:
                 run_pipeline.main()
             cmd = run.call_args.args[0]
             self.assertEqual(cmd[cmd.index('--stage2_thresholds') + 1], '0.80,0.80,0.50')
             self.assertEqual('--allow_oracle_gate' in cmd, bool(extra))
             self.assertIn('--no_deterministic' if extra else '--deterministic', cmd)
+
+    def test_default_band_ppo_trains_one_policy_then_locked_eval(self):
+        import run_pipeline
+        split_module = types.ModuleType('src.data.patient_split')
+        split_module.load_or_create_patient_split = Mock(return_value={'train': ['a'], 'val': ['b'], 'seed': 42})
+        argv = ['run_pipeline.py', '--skip_classifier', '--skip_experts']
+        with patch.dict(sys.modules, {'src.data.patient_split': split_module}), patch.object(sys, 'argv', argv), patch.object(run_pipeline, 'run_command') as run:
+            run_pipeline.main()
+        commands = [call.args[0] for call in run.call_args_list]
+        scripts = [cmd[1] for cmd in commands]
+        self.assertEqual(scripts, [
+            'scripts/train/train_band_refine.py',
+            'scripts/train/train_band_ppo.py',
+            'scripts/eval/evaluate_band_ppo_locked.py',
+        ])
+        refine, ppo, locked = commands
+        self.assertEqual(refine[refine.index('--classes') + 1], 'medium')
+        self.assertEqual(refine[refine.index('--epochs') + 1], '20')
+        self.assertEqual(refine[refine.index('--save_path') + 1], 'checkpoints/band_refine_medium.pt')
+        self.assertEqual(ppo[ppo.index('--pretrained') + 1], 'checkpoints/band_refine_medium.pt')
+        self.assertEqual(ppo[ppo.index('--epochs') + 1], '6')
+        self.assertEqual(ppo[ppo.index('--save_path') + 1], 'checkpoints/band_ppo.pt')
+        self.assertEqual(locked[locked.index('--checkpoint') + 1], 'checkpoints/band_ppo.pt')
+        self.assertNotIn('scripts/train/train_agent.py', scripts)
 
 
 if __name__ == '__main__':

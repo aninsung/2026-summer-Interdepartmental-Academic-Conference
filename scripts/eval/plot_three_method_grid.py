@@ -249,7 +249,7 @@ def main():
     p.add_argument("--shortlist", type=int, default=10, help="클래스당 Stage 3 후보 수")
     p.add_argument("--indices", type=str, default="",
                    help="고정 슬라이스 인덱스(쉼표). 있으면 선별을 건너뛴다.")
-    p.add_argument("--out", default="results/method_comparison_3x6.png")
+    p.add_argument("--out", default="results/archive_2026-08-20/method_comparison_3x6.png")
     args = p.parse_args()
 
     for path in (args.kaist, args.nvauto):

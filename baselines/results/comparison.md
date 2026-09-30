@@ -1,5 +1,7 @@
 # BraTS 2021 상위 입상 방법 베이스라인 비교
 
+이 파일의 표는 2026-08-20 val 42명 기록이다. 현재 851명 환자 평균은 [docs/paper_draft_ko.md](../../docs/paper_draft_ko.md)와 [docs/EXPERIMENT_RESULTS.md](../../docs/EXPERIMENT_RESULTS.md) §0.12다. 현재 비교 그림은 `results/method_comparison_current_3x6.png`다.
+
 베이스라인은 `checkpoints/patient_split.json`의 동일한 42명 검증 환자에서
 동일한 지표 구현(`src/utils/metrics.py`)으로 측정했다.
 3D/4모달리티/앙상블을 제외한 2D 각색 구현이므로 원 논문의 리더보드
@@ -26,6 +28,6 @@
 
 ## 같은 슬라이스 정성 비교
 
-`results/method_comparison_3x6.png`: 3행(TRIO / KAIST / NVAUTO) × 6열(Small 1–2, Medium 1–2, Large 1–2). 제목 영어. 고정 인덱스 113, 2286, 1121, 2295, 95, 1480.
+`results/archive_2026-08-20/method_comparison_3x6.png`: 3행(TRIO / KAIST / NVAUTO) × 6열(Small 1–2, Medium 1–2, Large 1–2). 제목 영어. 고정 인덱스 113, 2286, 1121, 2295, 95, 1480.
 
 그림용 베이스라인은 체크포인트 부재로 2026-08-20 재학습(학습 중 val DSC 0.9021 / 0.8999). 위 표의 0.8923 / 0.8971은 이 JSON의 08-19 평가값이다.

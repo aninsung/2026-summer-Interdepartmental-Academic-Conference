@@ -3,7 +3,7 @@
 적응형 파이프라인의 성능을 대회 상위 입상 방법과 비교하기 위한 독립 실험 폴더입니다.
 기존 `src/`, `scripts/` 는 건드리지 않고, 데이터 로딩과 지표 계산만 재사용합니다.
 
-파이프라인 본문과 최신 수치는 [README.md](../README.md), [docs/PIPELINE.md](../docs/PIPELINE.md), [docs/EXPERIMENT_RESULTS.md](../docs/EXPERIMENT_RESULTS.md)를 봅니다. 논문 수치는 851명 환자 평균(DSC 0.8607, HD95 4.557 px)이고, 이 폴더의 TRIO 행(DSC 0.9031)은 2026-08-20 단조 게이트 상한입니다. 비교 그림의 과거 Stage 3는 **TRIO**로 남아 있습니다.
+논문은 [docs/paper_draft_ko.md](../docs/paper_draft_ko.md), 최신 수치는 [README.md](../README.md)와 [docs/EXPERIMENT_RESULTS.md](../docs/EXPERIMENT_RESULTS.md) §0.12입니다. 851명 환자 평균 DSC는 TRIO **0.8604**, NVAUTO 0.8576(임계값 0.30, 탐색 하한), KAIST 0.8463(임계값 0.40)입니다. TRIO와 NVAUTO의 DSC 주변 구간은 겹치고, 반전 증강은 TRIO에만 있습니다. 정의된 슬라이스만의 HD95는 NVAUTO 4.184, KAIST 4.224, TRIO 4.608 px입니다. 아래 TRIO 행(DSC 0.9031)은 2026-08-20 단조 게이트 상한이며 [docs/history_2026-08-20.md](../docs/history_2026-08-20.md)에 정리되어 있습니다. `results/archive_2026-08-20/method_comparison_3x6.png`의 TRIO는 그 과거 Stage 3이고, 현재 그림은 `results/method_comparison_current_3x6.png`입니다. Stage 2와 경계 띠 PPO를 맞춘 그림은 `results/band_ppo_delta_matched/delta_matched_comparison.png`입니다.
 
 기준 정량 평가: 2026-08-19 `python baselines/run_comparison.py --epochs 20 --batch_size 32 --sweep` (seed 42, 2,373 슬라이스).
 같은 슬라이스 그리드용 재학습: 2026-08-20, 학습 중 val DSC KAIST **0.9021** / NVAUTO **0.8999** (원본 체크포인트 부재).
@@ -133,7 +133,7 @@ python baselines/plot_samples.py --pick median
 python baselines/plot_samples.py --pick worst
 
 # TRIO와 같은 슬라이스에서 비교 (파이프라인 평가 스크립트)
-python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/method_comparison_3x6.png
+python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/archive_2026-08-20/method_comparison_3x6.png
 ```
 
 ### 임계값에 대한 주의
@@ -150,7 +150,36 @@ python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,14
 | KAIST | 0.5 | 0.8923 | 0.30 | 0.8932 | +0.0009 |
 | NVAUTO | 0.5 | 0.8971 | 0.40 | 0.8972 | +0.0001 |
 
-## 이번 실행 결과
+## 확정 비교 (2026-09-30, 851명)
+
+개발 400명(학습 280 / 검증 60 / 방법 선택 60)을 뺀 851명, 종양 슬라이스 50,010장입니다. 집계는 슬라이스 지표의 환자 평균이고, 임계값은 검증 60명에서만 골랐습니다. TRIO는 분류기 라우팅, 임계값 0.80/0.80/0.50, `checkpoints/band_ppo.pt`입니다.
+
+| 방법 | 임계값 | DSC | HD95 (px) | Precision | Recall |
+|---|---:|---:|---:|---:|---:|
+| **TRIO** | 0.80 / 0.80 / 0.50 | **0.8604** | 4.608 | 0.8918 | 0.8600 |
+| NVAUTO | 0.30 | 0.8576 | **4.184** | 0.8836 | 0.8633 |
+| KAIST | 0.40 | 0.8463 | 4.224 | 0.8635 | 0.8642 |
+
+크기 행은 그 정답 면적의 슬라이스가 있는 환자 수입니다. 소형 851, 중형 757, 대형 408이며 같은 환자가 두 행 이상에 들어갑니다.
+
+| 클래스 | TRIO DSC | KAIST DSC | NVAUTO DSC |
+|---|---:|---:|---:|
+| 300px 미만 | **0.7933** | 0.7664 | 0.7821 |
+| 300–700px | 0.8952 | 0.8886 | **0.8980** |
+| 700px 이상 | 0.9170 | 0.9160 | **0.9198** |
+
+같은 학습 분할로 돌린 단일 백본+섹터 PPO는 이 851명 표와 집계가 다릅니다. 미사용 48명, 슬라이스 2,754장의 슬라이스 평균 Small DSC는 TRIO 0.812, UNet++ 0.778, Attention U-Net 0.761, SegResNet 0.676, UNet+++ 0.543, U-Net 0.537입니다. 상세는 [docs/EXPERIMENT_RESULTS.md §0.14](../docs/EXPERIMENT_RESULTS.md)이고 그림은 `results/single_backbone_ppo_grid.png`입니다.
+
+전체 DSC의 점추정은 TRIO가 조금 높지만 NVAUTO와 95% 구간이 겹칩니다. 300px 미만 DSC는 TRIO가 높고, 중형·대형 DSC와 전체 HD95 평균은 NVAUTO가 더 낮습니다. 방법 사이 짝 차이의 구간은 없습니다. 재현:
+
+```bash
+python baselines/eval_heldout.py --checkpoint baselines/checkpoints/kaist_best.pt --out baselines/results/kaist_heldout.json
+python baselines/eval_heldout.py --checkpoint baselines/checkpoints/nvauto_best.pt --out baselines/results/nvauto_heldout.json
+python scripts/eval/eval_three_by_size.py
+python scripts/eval/plot_current_three_method_grid.py --out results/method_comparison_current_3x6.png
+```
+
+## 과거 결과 (2026-08-19, val 42명)
 
 베이스라인은 2026-08-19, val 42명 **2,373 슬라이스**. 파이프라인은 2026-08-20, 같은 42명 **2,434 슬라이스**(분류기 라우팅). 슬라이스 수가 완전히 같지는 않습니다.
 
@@ -175,10 +204,10 @@ python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,14
 
 ### 같은 슬라이스 정성 비교
 
-`results/method_comparison_3x6.png`는 TRIO / KAIST / NVAUTO를 같은 val 슬라이스 6장에서 비교합니다. 행 이름은 TRIO, 제목은 영어입니다. 고정 인덱스 `113,2286,1121,2295,95,1480`.
+`results/archive_2026-08-20/method_comparison_3x6.png`는 TRIO / KAIST / NVAUTO를 같은 val 슬라이스 6장에서 비교합니다. 행 이름은 TRIO, 제목은 영어입니다. 고정 인덱스 `113,2286,1121,2295,95,1480`.
 
 ```bash
-python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/method_comparison_3x6.png
+python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/archive_2026-08-20/method_comparison_3x6.png
 ```
 
 그리드용 가중치는 원본이 없어 2026-08-20에 다시 학습했습니다. 정량 JSON(0.8923 / 0.8971)과 그림의 윤곽이 같은 모델이 아닙니다. 재학습 명령:
@@ -198,6 +227,7 @@ baselines/
 ├── models/nvauto_segresnet.py
 ├── train_baseline.py
 ├── eval_baseline.py
+├── eval_heldout.py           # 851명 환자 평균
 ├── run_comparison.py
 ├── plot_results.py           # 크기별 막대, 임계값 곡선
 ├── plot_samples.py           # 중앙값/최악 정성 표본
@@ -205,6 +235,7 @@ baselines/
 └── results/
     ├── comparison.md
     ├── {method}_metrics.json
+    ├── {method}_heldout.json     # 851명 환자 평균
     ├── baseline_by_size.png
     ├── baseline_threshold_sweep.png
     ├── baseline_samples_median.png
@@ -217,4 +248,5 @@ baselines/
 - `baselines/results/{method}_metrics.json` — 구간별 지표, 임계값 스윕, `best_threshold`
 - `baselines/results/comparison.md` — 비교 표
 - `baselines/results/baseline_*.png` — 정량·정성 그림
-- `results/method_comparison_3x6.png` — TRIO / KAIST / NVAUTO 같은 슬라이스 그리드
+- `results/method_comparison_current_3x6.png` — 현재 Stage 3 / KAIST / NVAUTO, 851명 표본
+- `results/archive_2026-08-20/method_comparison_3x6.png` — 2026-08-20 TRIO / KAIST / NVAUTO 같은 슬라이스 그리드

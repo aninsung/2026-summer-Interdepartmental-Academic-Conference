@@ -70,6 +70,16 @@ def make_collate(augment: bool):
     return collate
 
 
+def _translate_zero(x: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
+    """dy>0이면 아래로, dx>0이면 오른쪽으로 밀고 빈 자리는 0으로 채운다. 순환하지 않는다."""
+    if dy == 0 and dx == 0:
+        return x
+    height, width = x.shape[-2:]
+    padded = F.pad(x, (max(dx, 0), max(-dx, 0), max(dy, 0), max(-dy, 0)))
+    y0, x0 = max(-dy, 0), max(-dx, 0)
+    return padded[..., y0:y0 + height, x0:x0 + width]
+
+
 def perturb_view(
     img: torch.Tensor, gt: torch.Tensor, max_shift: int = 8
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -77,6 +87,7 @@ def perturb_view(
 
     논문은 공유 미러 플립 이후 사본마다 강도/공간 변환을 독립적으로 적용한다.
     평행이동은 프로젝션 전 16배 average pooling 이 흡수할 수 있는 범위로 제한한다.
+    이동은 샘플마다 따로 뽑고, 밀려난 자리는 0이다.
     """
     # 강도 변환: 밝기, 대비, 가우시안 노이즈
     b = img.shape[0]
@@ -86,11 +97,10 @@ def perturb_view(
     out = out + 0.01 * torch.randn_like(out)
 
     # 공간 변환: 정수 픽셀 평행이동(마스크에도 같이 적용해 정답 정합을 유지)
-    dy = int(torch.randint(-max_shift, max_shift + 1, (1,)).item())
-    dx = int(torch.randint(-max_shift, max_shift + 1, (1,)).item())
-    if dy or dx:
-        out = torch.roll(out, shifts=(dy, dx), dims=(-2, -1))
-        gt = torch.roll(gt, shifts=(dy, dx), dims=(-2, -1))
+    dys = torch.randint(-max_shift, max_shift + 1, (b,))
+    dxs = torch.randint(-max_shift, max_shift + 1, (b,))
+    out = torch.stack([_translate_zero(out[i], int(dys[i]), int(dxs[i])) for i in range(b)])
+    gt = torch.stack([_translate_zero(gt[i], int(dys[i]), int(dxs[i])) for i in range(b)])
     return out, gt
 
 

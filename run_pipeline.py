@@ -54,17 +54,15 @@ def main():
     import yaml
     with open(args.config, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
-    args.refinement_profile = args.refinement_profile or config.get("refinement_profile", "ppo_v2")
+    # 기본 config의 ppo_v2는 예전 크기별 에이전트다. 프로필을 지정하지 않으면
+    # 경계 띠 PPO 하나를 학습하고 851명 평가를 한다.
+    if args.refinement_profile is None:
+        from_config = config.get("refinement_profile", "ppo_v2")
+        args.refinement_profile = "band_ppo" if from_config == "ppo_v2" else from_config
     if args.refinement_profile not in {"legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5", "band_ppo"}:
         parser.error("Unknown refinement_profile")
-    if args.refinement_profile == "band_ppo":
-        if not os.path.exists("checkpoints/band_ppo.pt"):
-            parser.error("band_ppo는 checkpoints/band_ppo.pt 가 필요합니다")
-        args.skip_classifier = True
-        args.skip_experts = True
-        args.skip_agents = True
-        args.eval_mode = args.eval_mode or "ppo_raw"
-        log.info("band_ppo: 학습된 분류기, Expert, checkpoints/band_ppo.pt 로 평가만 실행합니다")
+    if args.refinement_profile == "band_ppo" and args.auto_tegda:
+        parser.error("band_ppo는 TEGDA·품질 gate를 쓰지 않습니다")
     args.agent_dir = args.agent_dir or ("checkpoints" if args.refinement_profile == "legacy"
                                        else f"checkpoints/{args.refinement_profile}")
     args.eval_mode = args.eval_mode or ("compare" if args.refinement_profile == "ppo_v3" else "heuristic")
@@ -125,9 +123,22 @@ def main():
                 run_command(c, d)
 
     # 3. Stage 3
-    if not args.skip_agents:
+    if not args.skip_agents and args.refinement_profile == "band_ppo":
+        band_data = ["--train_root", "src/data/archive", "--max_train_patients", str(n_patients),
+                     "--patient_split", split_path, "--modality", args.modality, "--seed", str(args.seed)]
+        run_command(
+            [python_exec, "scripts/train/train_band_refine.py", "--classes", "medium", "--epochs", "20",
+             "--num_workers", str(args.num_workers), "--save_path", "checkpoints/band_refine_medium.pt"] + band_data,
+            "Stage 3: Medium 경계 띠 지도학습",
+        )
+        run_command(
+            [python_exec, "scripts/train/train_band_ppo.py", "--epochs", "6",
+             "--pretrained", "checkpoints/band_refine_medium.pt",
+             "--save_path", "checkpoints/band_ppo.pt"] + band_data,
+            "Stage 3: 경계 띠 PPO",
+        )
+    elif not args.skip_agents:
         agent_base = [python_exec, "scripts/train/train_agent.py", "--config", args.config, "--refinement_profile", args.refinement_profile, "--stage2_thresholds", args.stage2_thresholds, "--cc_min_sizes", args.cc_min_sizes] + agent_data_args
-        cmds = []
         cmds = [
             (agent_base + ["--model_type", "caranet", "--refinement_mode", "small", "--save_path", os.path.join(args.agent_dir, "ppo_small.zip")], "Stage 3 (Small)"),
             (agent_base + ["--model_type", "unetplusplus", "--refinement_mode", "medium", "--save_path", os.path.join(args.agent_dir, "ppo_medium.zip")], "Stage 3 (Medium)"),
@@ -153,7 +164,15 @@ def main():
         run_command([python_exec, "scripts/train/train_quality_gate.py", "--records", "results/gate_train", "--output", "checkpoints/quality_gate.json"], "Quality Gate 학습")
 
     # 4. Stage 4
-    if not args.skip_eval:
+    if not args.skip_eval and args.refinement_profile == "band_ppo":
+        cmd_eval = [python_exec, "scripts/eval/evaluate_band_ppo_locked.py",
+                    "--train_root", "src/data/archive", "--patient_split", split_path,
+                    "--checkpoint", "checkpoints/band_ppo.pt", "--seed", str(args.seed)]
+        if args.output_dir:
+            os.makedirs(args.output_dir, exist_ok=True)
+            cmd_eval += ["--out", os.path.join(args.output_dir, "band_ppo_locked.json")]
+        run_command(cmd_eval, "Stage 4: 851명 환자 평균 평가")
+    elif not args.skip_eval:
         cmd_eval = [python_exec, "scripts/eval/evaluate_pipeline.py", "--max_patients", str(n_patients), "--patient_split", split_path, "--split_role", args.split_role, "--slice_selection", args.slice_selection, "--refinement_profile", args.refinement_profile, "--agent_dir", args.agent_dir]
         cmd_eval += ["--eval_mode", args.eval_mode, "--stage2_thresholds", args.stage2_thresholds,
                      "--cc_min_sizes", args.cc_min_sizes, "--seed", str(args.seed),

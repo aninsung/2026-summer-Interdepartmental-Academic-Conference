@@ -1,6 +1,6 @@
 # 평가와 품질 gate
 
-현재 Stage 3는 경계 띠 PPO 하나(`checkpoints/band_ppo.pt`)다. 논문 표는 개발 400명을 뺀 851명 환자 평균이다. DSC 0.8359→0.8607, HD95 4.824→4.557 px. 절차는 [PIPELINE.md](PIPELINE.md), 숫자는 [EXPERIMENT_RESULTS.md §0.11](EXPERIMENT_RESULTS.md).
+현재 Stage 3는 경계 띠 PPO 하나(`checkpoints/band_ppo.pt`)다. 논문은 [paper_draft_ko.md](paper_draft_ko.md)다. 표는 개발 400명을 뺀 851명 환자 평균이다. 고정 임계값 Stage 2 대비 DSC 0.8337→0.8604 (짝 차이 +0.0267, 95% CI 0.0256–0.0278). 검증에서 고른 임계값 Stage 2(0.8411) 대비 +0.0193 (0.0184–0.0202). HD95 평균 4.888→4.609 px는 빈 마스크 제외가 달라 짝비교가 아니다. 절차는 [PIPELINE.md](PIPELINE.md), 숫자는 [EXPERIMENT_RESULTS.md §0.11–0.13](EXPERIMENT_RESULTS.md). 단일 백본+섹터 PPO는 §0.14다. 그 표는 미사용 48명, 슬라이스 2,754장의 슬라이스 평균이고 Small DSC는 TRIO 0.812, U-Net+PPO 0.537이다. 851명 환자 평균 gate가 아니다. 2026-08-20 게이트 수치는 [history_2026-08-20.md](history_2026-08-20.md)다. 고정 임계값과 연결요소 기준은 그 210명 풀에서 정했고, 띠 설계는 이후 방법 선택 60명에서 정했다. Stage 2와 경계 띠 PPO의 여섯 슬라이스는 `results/band_ppo_delta_matched/delta_matched_comparison.png`다.
 
 ```bash
 python scripts/eval/evaluate_band_ppo_locked.py
