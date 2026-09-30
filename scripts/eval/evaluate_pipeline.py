@@ -307,7 +307,7 @@ def main():
     parser.add_argument("--deterministic", action="store_true", default=True)
     parser.add_argument("--no_deterministic", action="store_false", dest="deterministic")
     parser.add_argument("--eval_mode", choices=["stage2", "augmentation", "ppo_raw", "heuristic", "quality", "oracle", "compare"], default="heuristic")
-    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"], default="legacy")
+    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5", "band_ppo"], default="legacy")
     parser.add_argument("--energy_gate", action="store_true", help="GT-free energy selector for PPO components")
     parser.add_argument("--energy_threshold", type=float, default=0.12)
     parser.add_argument("--energy_model", help="trained EnergyModel checkpoint (optional)")
@@ -350,11 +350,13 @@ def main():
         energy_model.eval()
     run_ppo = args.eval_mode not in {"stage2", "augmentation"}
     required = ["shape_classifier_best.pt", "caranet_best.pt", "unetplusplus_best.pt", "segresnet_best.pt"]
-    if run_ppo:
+    if run_ppo and args.refinement_profile == "band_ppo":
+        required.append("band_ppo.pt")
+    elif run_ppo:
         required += ["ppo_small.zip", "ppo_medium.zip", "ppo_large.zip"]
     checkpoint_hashes = {}
     for name in required:
-        path = Path(args.agent_dir if name.startswith("ppo_") else "checkpoints") / name
+        path = Path(args.agent_dir if name.startswith("ppo_") and name.endswith(".zip") else "checkpoints") / name
         if not path.is_file():
             raise FileNotFoundError(f"Evaluation requires trained checkpoint: {path}")
         with path.open("rb") as f:
@@ -415,7 +417,7 @@ def main():
         'gt_selected_slices': args.slice_selection == 'tumor',
         'distance_definition': '2D surface HD95 in resized pixels; one-empty is null',
         'quality_gate_artifact': quality_gate.artifact if quality_gate else None,
-        'ppo_unit': 'slice' if args.refinement_profile == 'ppo_v3' else 'component',
+        'ppo_unit': 'band' if args.refinement_profile == 'band_ppo' else ('slice' if args.refinement_profile == 'ppo_v3' else 'component'),
         'augmentation_note': ('TTA probability input only; mask equals Stage 2'
                               if args.refinement_profile == 'ppo_v3' else 'TTA rethreshold + closing'),
     })
@@ -427,9 +429,19 @@ def main():
     in_ch = images.shape[1] if images.ndim == 4 else 1
     pipeline = AdaptivePipeline(device, in_channels=in_ch, strict_checkpoints=True)
     
-    # 3. Stage 3: RL Refiner (Multi-Agent)
+    # 3. Stage 3: RL Refiner (Multi-Agent 또는 경계 띠 PPO 하나)
     print("Loading PPO Refiners...")
     agents = {}
+    band_actor = None
+    band_cfg = None
+    if args.refinement_profile == "band_ppo" and run_ppo:
+        from src.models.band_refine import build_band_refine
+        band_ckpt = torch.load("checkpoints/band_ppo.pt", map_location=device, weights_only=False)
+        band_cfg = band_ckpt["config"]
+        band_actor = build_band_refine(in_channels=band_cfg["in_channels"], width=band_cfg["width"]).to(device)
+        band_actor.load_state_dict(band_ckpt["model"])
+        band_actor.eval()
+        print("Loading band PPO: checkpoints/band_ppo.pt")
     agent_name_map = {
         "small": "ppo_small.zip",
         "medium": "ppo_medium.zip",
@@ -437,7 +449,7 @@ def main():
     }
     for mode, class_idx in zip(["small", "medium", "large"], [0, 1, 2]):
         agent_path = os.path.join(args.agent_dir, agent_name_map[mode])
-        if not run_ppo:
+        if not run_ppo or args.refinement_profile == "band_ppo":
             agents[class_idx] = None
         elif os.path.exists(agent_path):
             print(f"Loading PPO Agent: {agent_path}")
@@ -472,6 +484,8 @@ def main():
     
     print("\nStarting Evaluation...")
     for i in range(len(images)):
+        if i % 500 == 0:
+            print(f"평가 {i}/{len(images)}", flush=True)
         if device.type == "cuda":
             torch.cuda.synchronize()
         started = time.perf_counter()
@@ -507,6 +521,10 @@ def main():
         class_counts[c] += 1
         
         rough_prob_np = rough_mask_t.squeeze().cpu().numpy()
+        prob_tta_np = rough_prob_np
+        if args.refinement_profile == "band_ppo" and run_ppo:
+            prob_tta_np = _tta_probability(pipeline, img_t, rough_mask_t, class_pred)
+            rough_prob_np = prob_tta_np
         
         # ── Micro Fragment 임계값 완화 (Small 전용) ──
         # 클래스 임계값에서 조각이 지나치게 작아지면 소실을 막기 위해 임계값을
@@ -524,6 +542,21 @@ def main():
             masks, ppo_calls = {'stage2': rough_mask_np.copy()}, 0
             prob_tta_np = rough_prob_np
             energy_scores = []
+        elif args.refinement_profile == "band_ppo":
+            from src.models.band_refine import refine_batch
+            center_t = torch.from_numpy(np.ascontiguousarray(center_np, dtype=np.float32)).unsqueeze(0).to(device)
+            if center_t.ndim == 3:
+                center_t = center_t.unsqueeze(0)
+            mask_t = torch.from_numpy(rough_mask_np.astype(np.float32)).view(1, 1, *rough_mask_np.shape).to(device)
+            prob_t = torch.from_numpy(prob_tta_np.astype(np.float32)).view(1, 1, *prob_tta_np.shape).to(device)
+            flair = center_t[:, band_cfg["flair_index"]:band_cfg["flair_index"] + 1]
+            refined = refine_batch(
+                band_actor, center_t, prob_t, mask_t, flair, int(band_cfg["n_steps"]),
+                float(band_cfg["prob_lo"]), float(band_cfg["prob_hi"]), int(band_cfg["radius"]),
+                guard_last=True,
+            )[0, 0].detach().cpu().numpy()
+            masks = {"stage2": rough_mask_np.copy(), "ppo_raw": refined, "heuristic": refined}
+            ppo_calls, energy_scores = 1, []
         else:
             prob_tta_np = _tta_probability(pipeline, img_t, rough_mask_t, class_pred)
             masks, ppo_calls, energy_scores = refinement_candidates(
@@ -536,7 +569,7 @@ def main():
             )
         features, gate_score, gate_accepted = None, None, None
         energy_before, energy_after = None, None
-        if run_ppo:
+        if run_ppo and args.refinement_profile != "band_ppo":
             features = pair_features(center_np, rough_prob_np, prob_tta_np, rough_mask_np, masks['ppo_raw'])
             # Learned energy is a GT-free safety layer for accepting PPO output.
             if args.energy_gate and energy_model is not None:

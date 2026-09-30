@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -156,7 +157,15 @@ def train(
 
     # 파이프라인과 동일한 환자 분할을 재사용한다.
     # 설정이 어긋나면 분할 파일이 덮어써지므로 그 전에 멈춘다.
-    check_split_compatibility(train_root, max_train_patients, patient_split, seed=42)
+    with open(patient_split, encoding="utf-8") as f:
+        split_meta = json.load(f)
+    check_split_compatibility(
+        train_root,
+        max_train_patients,
+        patient_split,
+        val_ratio=float(split_meta.get("val_ratio", 0.2)),
+        seed=int(split_meta.get("seed", 42)),
+    )
 
     from src.data.patient_split import load_split_brats_datasets
 
@@ -172,12 +181,12 @@ def train(
     log.info(f"학습 슬라이스 {len(train_ds)} | 검증 슬라이스 {len(val_ds)}")
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=0,
-        pin_memory=True, collate_fn=make_collate(augment),
+        train_ds, batch_size=batch_size, shuffle=True, num_workers=4,
+        pin_memory=True, persistent_workers=True, collate_fn=make_collate(augment),
     )
     val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False, num_workers=0,
-        pin_memory=True, collate_fn=make_collate(False),
+        val_ds, batch_size=batch_size, shuffle=False, num_workers=2,
+        pin_memory=True, persistent_workers=True, collate_fn=make_collate(False),
     )
 
     in_channels = train_ds[0]["image"].shape[0]

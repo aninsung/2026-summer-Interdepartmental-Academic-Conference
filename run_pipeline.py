@@ -31,11 +31,11 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--max_train_patients", type=int, default=400)
-    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"], default=None)
+    parser.add_argument("--refinement_profile", choices=["legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5", "band_ppo"], default=None)
     parser.add_argument("--slice_selection", choices=["tumor", "all"], default="all")
     parser.add_argument("--agent_dir", default=None)
     parser.add_argument("--eval_mode", choices=["stage2", "augmentation", "ppo_raw", "heuristic", "quality", "oracle", "compare"], default=None)
-    parser.add_argument("--split_role", choices=["val", "test"], default="val")
+    parser.add_argument("--split_role", choices=["val", "test", "all"], default="val")
     parser.add_argument("--output_dir")
     parser.add_argument("--no_plots", action="store_true")
     parser.add_argument("--allow_oracle_gate", action="store_true")
@@ -55,8 +55,16 @@ def main():
     with open(args.config, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
     args.refinement_profile = args.refinement_profile or config.get("refinement_profile", "ppo_v2")
-    if args.refinement_profile not in {"legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5"}:
+    if args.refinement_profile not in {"legacy", "ppo_v2", "ppo_v3", "ppo_v4", "ppo_v5", "band_ppo"}:
         parser.error("Unknown refinement_profile")
+    if args.refinement_profile == "band_ppo":
+        if not os.path.exists("checkpoints/band_ppo.pt"):
+            parser.error("band_ppo는 checkpoints/band_ppo.pt 가 필요합니다")
+        args.skip_classifier = True
+        args.skip_experts = True
+        args.skip_agents = True
+        args.eval_mode = args.eval_mode or "ppo_raw"
+        log.info("band_ppo: 학습된 분류기, Expert, checkpoints/band_ppo.pt 로 평가만 실행합니다")
     args.agent_dir = args.agent_dir or ("checkpoints" if args.refinement_profile == "legacy"
                                        else f"checkpoints/{args.refinement_profile}")
     args.eval_mode = args.eval_mode or ("compare" if args.refinement_profile == "ppo_v3" else "heuristic")
@@ -75,7 +83,9 @@ def main():
 
     from src.data.patient_split import load_or_create_patient_split
     split_path = "checkpoints/patient_split.json"
-    split = load_or_create_patient_split("src/data/archive", n_patients, split_path)
+    training = not (args.skip_classifier and args.skip_experts and args.skip_agents)
+    if training:
+        load_or_create_patient_split("src/data/archive", n_patients, split_path)
     
     seed_args = ["--seed", str(args.seed)]
     if deterministic:

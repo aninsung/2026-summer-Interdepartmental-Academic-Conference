@@ -204,7 +204,7 @@ def train_caranet(
         criterion = FocalTverskyLoss(alpha=tversky_alpha, beta=tversky_beta, gamma=2.0)
         log.info(f"손실 함수: FocalTverskyLoss (alpha={tversky_alpha}, beta={tversky_beta}, gamma=2.0)")
     elif use_bce_dice:
-        criterion = BCEDiceLoss(bce_weight=0.5, balance_pos=True)
+        criterion = BCEDiceLoss(bce_weight=0.5)
         log.info("손실 함수: BCEDiceLoss (BCE 0.5 + Dice 0.5, 전경 균형)")
     else:
         criterion = DiceLoss()

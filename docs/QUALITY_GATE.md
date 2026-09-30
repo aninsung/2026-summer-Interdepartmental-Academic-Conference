@@ -1,8 +1,18 @@
-# 실측 평가와 GT-free 품질 gate
+# 평가와 품질 gate
 
-8월 20일 학습 설정과 초기 임계값은 유지합니다. 새로운 Stage 3 성능은 재평가 대상입니다. 과거 GT gate 수치와 새 결과를 섞지 않습니다.
+현재 Stage 3는 경계 띠 PPO 하나(`checkpoints/band_ppo.pt`)다. 논문 표는 개발 400명을 뺀 851명 환자 평균이다. DSC 0.8359→0.8607, HD95 4.824→4.557 px. 절차는 [PIPELINE.md](PIPELINE.md), 숫자는 [EXPERIMENT_RESULTS.md §0.11](EXPERIMENT_RESULTS.md).
 
-## 평가 모드
+```bash
+python scripts/eval/evaluate_band_ppo_locked.py
+```
+
+`run_pipeline.py --refinement_profile band_ppo`는 같은 가중치로 1251명 전체의 슬라이스 평균을 만든다. 개발 환자가 포함되므로 논문 본문 성능이 아니다. 평가 모드는 `ppo_raw`이고, 면적·에지 gate와 GT 단조 게이트를 쓰지 않는다. 마지막 스텝의 FLAIR 가드만 있다.
+
+필수 파일은 `checkpoints/shape_classifier_best.pt`, `caranet_best.pt`, `unetplusplus_best.pt`, `segresnet_best.pt`, `band_ppo.pt`다. 없으면 평가를 중단한다.
+
+아래 평가 모드·Energy·품질 gate·`ppo_v2`/`ppo_v3`/`ppo_v4`는 **이전 섹터 PPO** 절차다. 08-20 GT 게이트 수치와 851명 표를 섞지 않는다. `ppo_v5`는 폐기했다.
+
+## 이전 프로필의 평가 모드
 
 | `--eval_mode` | 최종 출력 |
 |---|---|
@@ -18,7 +28,7 @@
 
 `augmentation`과 `ppo_raw`의 차이가 PPO 효과입니다. `quality`는 보정 후 **수락/거절** 모듈입니다. 학습된 Energy Model을 함께 사용하면 PPO 전후 energy가 증가한 후보를 거절하고, `--quality_gate`를 함께 주면 TEGDA-style 품질 예측도 통과한 후보만 수락합니다. 판정 입력은 영상, 모델 확률, flip 평균 확률, 보정 전후 마스크입니다. 실제 GT나 GT 기반 지표는 추론 특징에 포함하지 않습니다.
 
-체크포인트가 없으면 평가를 중단합니다. 무작위 모델/부분 로드 모델로 결과를 만들지 않습니다. 필수 파일은 `checkpoints/shape_classifier_best.pt`, `caranet_best.pt`, `unetplusplus_best.pt`, `segresnet_best.pt`, PPO 모드에서는 `ppo_small.zip`, `ppo_medium.zip`, `ppo_large.zip`입니다.
+섹터 PPO(`legacy`, `ppo_v2`, `ppo_v4`)는 `ppo_small.zip`, `ppo_medium.zip`, `ppo_large.zip`이 더 필요하다. 무작위 모델이나 부분 로드로 결과를 만들지 않는다.
 
 ## 학습된 Energy Model
 
@@ -105,7 +115,17 @@ python -m unittest discover -s tests -v
 테스트의 합성 마스크와 대체 모델은 기능 검증 전용이며 실측 성능 자료로 저장소에 포함하지 않습니다. 학습된 checkpoint가 없는 환경에서는 실제 성능 재평가와 실제 품질 모델 학습을 완료할 수 없습니다.
 
 
-## PPO v4: 경계 보정 개선 (권장)
+## Stage 3 목적 (2026-09-30)
+
+채택한 구현은 위의 경계 띠 PPO다. 외곽선을 한 값만큼 안팎으로 밀지 않는다.
+
+- 편집 범위: 확률 0.35–0.65 또는 현재 마스크 경계 ±2px. 슬라이스 전체 재분할은 하지 않는다.
+- 행동: 띠 픽셀마다 끄기·유지·켜기. 정책은 클래스 공통 하나다.
+- 가드: 마지막 스텝만. 그 슬라이스 띠의 FLAIR가 평균보다 밝을 때만 켜고, 어두울 때만 끈다.
+- 채택: 개발 test 60명에서 Small·Medium·Large 모두 DSC와 HD95가 Stage 2보다 나았다. 논문 숫자는 그 뒤 851명 환자 평균이다.
+- 아래 `ppo_v4`는 그 이전 1251명 val GT-free 기록이다. 권장 프로필이 아니다.
+
+## PPO v4: 이전 1251명 GT-free 기록
 
 `configs/ppo_brats_v4.yaml`, 체크포인트 `checkpoints/ppo_v4/`.
 

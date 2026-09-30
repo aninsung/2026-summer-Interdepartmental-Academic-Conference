@@ -3,7 +3,7 @@
 적응형 파이프라인의 성능을 대회 상위 입상 방법과 비교하기 위한 독립 실험 폴더입니다.
 기존 `src/`, `scripts/` 는 건드리지 않고, 데이터 로딩과 지표 계산만 재사용합니다.
 
-파이프라인 본문과 최신 수치는 [README.md](../README.md), [docs/PIPELINE.md](../docs/PIPELINE.md), [docs/EXPERIMENT_RESULTS.md](../docs/EXPERIMENT_RESULTS.md)를 봅니다. 비교 그림에서 파이프라인 Stage 3는 **TRIO**로 표기합니다.
+파이프라인 본문과 최신 수치는 [README.md](../README.md), [docs/PIPELINE.md](../docs/PIPELINE.md), [docs/EXPERIMENT_RESULTS.md](../docs/EXPERIMENT_RESULTS.md)를 봅니다. 논문 수치는 851명 환자 평균(DSC 0.8607, HD95 4.557 px)이고, 이 폴더의 TRIO 행(DSC 0.9031)은 2026-08-20 단조 게이트 상한입니다. 비교 그림의 과거 Stage 3는 **TRIO**로 남아 있습니다.
 
 기준 정량 평가: 2026-08-19 `python baselines/run_comparison.py --epochs 20 --batch_size 32 --sweep` (seed 42, 2,373 슬라이스).
 같은 슬라이스 그리드용 재학습: 2026-08-20, 학습 중 val DSC KAIST **0.9021** / NVAUTO **0.8999** (원본 체크포인트 부재).

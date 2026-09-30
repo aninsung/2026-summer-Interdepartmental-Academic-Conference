@@ -2,17 +2,44 @@
 
 실측 비교·환자 통계·학습형 GT-free gate 실행 방법: [품질 gate 평가 안내](docs/QUALITY_GATE.md).
 
-> **현재 코드: 08-20 설정 + GT gate 수정.** Stage 2 임계값 0.80/0.80/0.50, CC 0/15/25, PPO 학습 300,000 스텝(rollout 1,024, 10 epochs, 에피소드 30스텝), 평가 15스텝, confidence skip OFF입니다. 기본 추론은 GT 없이 마지막 PPO 스텝을 사용하고 면적·MRI 에지 가드를 적용합니다. `--allow_oracle_gate`를 명시할 때만 GT 단조 게이트를 추가합니다. 아래 08-20 수치는 과거 GT 기반 스텝 선택·게이트 결과이며, 수정 코드의 성능을 뜻하지 않습니다. 새 성능은 재평가가 필요합니다.
+> **논문에 쓸 수치 (2026-09-30):** BraTS 2021 **1251명** 중 개발 400명(학습 280 / 검증 60 / 방법 선택 test 60)을 뺀 **851명** 환자 평균. 분류기가 Expert를 고르고, Stage 3는 클래스 공통 경계 띠 PPO(`checkpoints/band_ppo.pt`)입니다. DSC **0.8359 → 0.8607** (차이 +0.0248, 95% CI 0.0237–0.0259), HD95 **4.824 → 4.557 px** (차이 −0.267, 95% CI −0.342–−0.194). HD95는 128×128 픽셀 좌표의 경계 거리입니다. 상세는 [실험 결과 §0.11](docs/EXPERIMENT_RESULTS.md).
+>
+> 아래 2026-08-20 표는 210명 풀·val 42명·단조 DSC 게이트 상한이며, 이 확정 수치와 섞지 않습니다. `run_pipeline.py`로 1251명 전체를 잰 슬라이스 평균(DSC 0.8503→0.8758)은 개발 400명이 포함되므로 논문 본문 성능이 아닙니다.
 
 2026 컴공&인지 연합학술제 연구트랙
 
 **강화학습 기반 뇌종양 MRI 분할 경계 보정 시스템**
 
-딥러닝 모델이 만든 초기 분할(Rough Mask)의 경계 오차를, 종양 크기별 전용 PPO 에이전트가 순차적으로 보정합니다. 비교 그림·표에서는 이 3단계 파이프라인(분류 → 크기별 Expert → PPO + 단조 DSC 게이트)을 **TRIO**로 표기합니다.
+딥러닝 모델이 만든 초기 분할의 경계 띠에서, 클래스 공통 PPO가 픽셀을 켜거나 끕니다. 비교 그림의 과거 Stage 3(단조 DSC 게이트)는 **TRIO**로 남아 있습니다.
 
 ---
 
-## 한눈에 보는 최종 결과 (2026-08-20)
+## 확정 결과 (2026-09-30, 851명)
+
+| 정답 크기 구간 | 해당 슬라이스가 있는 환자 | Stage 2 DSC | 경계 띠 PPO DSC | Stage 2 HD95 | PPO HD95 |
+|---|---:|---:|---:|---:|---:|
+| 전체 | 851 | 0.8359 | **0.8607** | 4.824 | **4.557** |
+| 300px 미만 | 851 | 0.7588 | **0.7929** | 5.738 | **5.609** |
+| 300–700px | 757 | 0.8718 | **0.8947** | 4.327 | **3.888** |
+| 700px 이상 | 408 | 0.9038 | **0.9200** | 4.282 | **3.815** |
+
+크기 행은 서로 다른 환자군이 아닙니다. 그 면적의 슬라이스가 있는 환자 평균이라 같은 환자가 두 행 이상에 들어갑니다. 주장은 임계값 0.80/0.80/0.50인 Stage 2보다 낫다는 범위입니다. 환자 평균 정밀도 0.881→0.892, 재현율 0.825→0.860. 슬라이스 14.3%, 환자 4.0%는 DSC가 내려갑니다. 초안은 [docs/paper_draft_ko.md](docs/paper_draft_ko.md)입니다.
+
+논문 표 재현:
+
+```bash
+python scripts/eval/evaluate_band_ppo_locked.py
+```
+
+결과는 `results/band_ppo_locked.json`입니다. 아래 명령은 개발 400명을 포함한 1251명 슬라이스 평균(DSC 0.8503→0.8758)이라 논문 본문 성능이 아닙니다.
+
+```bash
+python run_pipeline.py --refinement_profile band_ppo --max_train_patients 1251 \
+  --split_role all --slice_selection tumor --no_deterministic \
+  --output_dir results/band_ppo_pipeline_1251 --no_plots
+```
+
+## 과거 결과 (2026-08-20, val 42명)
 
 `t1ce+flair` 2채널, BraTS 2021 환자 210명 중 **val 42명(2,434 슬라이스) hold-out** 평가입니다. 라우팅은 Stage 1 분류기 예측을 쓰고(Oracle 아님), Stage 2 임계값은 **0.80 / 0.80 / 0.50**, CC는 **0 / 15 / 25**, GT-free 면적 게이트와 Monotonic DSC 게이트를 적용했습니다. Confidence skip은 기본으로 꺼져 있습니다.
 
@@ -74,13 +101,10 @@
 |:---:|---|---|
 | **1** | 종양 면적으로 Small / Medium / Large 분류 | `shape_classifier_best.pt` |
 | **2** | 클래스별 Expert가 확률 맵 생성 → 클래스별 임계값으로 이진화 | `caranet_best.pt`, `unetplusplus_best.pt`, `segresnet_best.pt` |
-| **3** | 클래스별 PPO가 8방위 경계를 SDF로 미세 조정 | `ppo_small.zip`, `ppo_medium.zip`, `ppo_large.zip` |
+| **3** | 경계 띠(확률 0.35–0.65 또는 경계 ±2px)에서 켜기·끄기·유지. 마지막 스텝만 FLAIR 가드 | `band_ppo.pt` |
 | **4** | DSC / HD95 / Precision / Recall 평가 및 시각화 | `results/pipeline_sample_*.png` |
 
-Stage 3의 크기별 동작 차이:
-
-- **Small**: CaraNet이 `z-1, z, z+1` 2.5D 입력을 쓰고, 종양 중심 64×64 crop, 4채널(영상·마스크·확률·에지), 연속 행동 `[-2, 2]⁸`
-- **Medium / Large**: 전체 128×128, 3채널(영상·마스크·확률), 이산 5단계×8섹터. Large Expert는 ED/TC 2채널을 WT로 합친다. Large PPO는 보상에서 HD95 가중치를 더 크게 둠
+Stage 3는 크기마다 에이전트를 두지 않습니다. 하나의 정책이 띠 안 픽셀만 고칩니다. Small Expert만 `z-1, z, z+1` 2.5D와 64×64 zoom을 쓰고, Large Expert는 ED/TC 2채널을 WT로 합칩니다. 예전의 8방위 SDF PPO(`ppo_small.zip` 등)는 `ppo_v4` 기록으로 남아 있습니다.
 
 관측에는 GT가 들어가지 않습니다. GT는 학습 시 보상 계산과 평가 시 게이트·지표에만 쓰입니다.
 
@@ -100,7 +124,7 @@ Stage 3의 크기별 동작 차이:
 
 \* 2026-08-20 숫자는 **분류기 라우팅** 분포입니다. GT 면적 기준 구간과 다릅니다.
 
-분할 파일 `checkpoints/patient_split.json`(seed 42)을 Stage 1–4와 베이스라인이 모두 공유합니다.
+현재 개발 분할은 `checkpoints/patient_split.json`(seed 42, **400명** = train 280 / val 60 / test 60)입니다. 1251명 중 이 400명에 없는 **851명**이 확정 평가 집합입니다. 위 168/42 표는 2026-08-20 풀입니다.
 
 ---
 
@@ -186,7 +210,8 @@ BraTS 2021 데이터는 `src/data/archive`에 둡니다.
 ### 2. 실행
 
 ```bash
-python run_pipeline.py batch_size=64
+python run_pipeline.py --refinement_profile band_ppo --skip_classifier --skip_experts \
+  --max_train_patients 1251 --split_role all --slice_selection tumor --no_plots
 ```
 
 `key=value` 형태를 `--key value`로 자동 변환하므로 `--batch_size 64`와 같습니다.

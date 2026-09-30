@@ -1,9 +1,7 @@
 # RL-Refiner 실험 결과
 
-> **최신(2026-09-29~30):** 환자 풀 **1251명** (train 875 / val 188 / test 188, seed 42).
-> Stage 2 임계값 0.80/0.80/0.50, CC 0/15/25, 모달리티 `t1ce+flair`, val·종양 슬라이스,
-> GT-free `heuristic` 평가. 권장 PPO 프로필은 **`ppo_v4`** (`checkpoints/ppo_v4`).
-> **`ppo_v5`는 폐기**했습니다(전체 DSC 0.7614로 Stage 2를 크게 하회).
+> **논문 수치 (2026-09-30):** 환자 풀 **1251명** 중 개발 400명 제외, 평가 **851명** 환자 평균. Stage 3는 **경계 띠 PPO** (`checkpoints/band_ppo.pt`, `run_pipeline.py --refinement_profile band_ppo`). DSC 0.8359→**0.8607**, HD95 4.824→**4.557 px**. 상세는 [§0.11](#011-확정-평가--파이프라인-전체-미사용-851명-2026-09-30).
+> **`ppo_v4`**(DSC 0.8345)는 그 이전 GT-free val 기록이고, **`ppo_v5`는 폐기**(0.7614)입니다. §0.1–0.4의 train 875 / val 188 분할은 그 기록의 설정이며 이번 400/851 분할과 다릅니다.
 
 > 아래 §1 이후의 08-20(210명) 수치는 과거 GT 게이트 포함 실험이며, 1251명 GT-free 결과와 직접 비교하지 마세요.
 
@@ -14,7 +12,9 @@
 
 ---
 
-## 0. 최신 결과 — 1251명, GT-free (2026-09-29~30)
+## 0. 2026-09-29~30 기록
+
+논문에 쓰는 표는 [§0.11](#011-확정-평가--파이프라인-전체-미사용-851명-2026-09-30)이다. §0.1–0.4는 그 이전 섹터 PPO(`ppo_v2`/`ppo_v4`)의 1251명 val 기록이다. 현재 Stage 3는 §0.9 이후의 경계 띠 PPO다.
 
 ### 0.1 설정
 
@@ -37,7 +37,7 @@
 |---|---:|---:|---:|---:|---|
 | Stage 2 only | **0.8344** | 0.7530 | 0.8792 | 0.9081 | Expert 이진화+CC |
 | PPO **v2** | 0.8306 | 0.7517 | 0.8804 | 0.8879 | Large 과소분할(Recall 0.942→0.894) |
-| PPO **v4** (권장) | **0.8345** | 0.7517 | 0.8805 | **0.9086** | Large 유지, Stage 2와 사실상 동일 |
+| PPO **v4** (이전 기록) | **0.8345** | 0.7517 | 0.8805 | **0.9086** | Large 유지, Stage 2와 사실상 동일. 현재 Stage 3 아님 |
 | PPO **v5** (폐기) | 0.7614 | 0.7372 | 0.7690 | 0.7957 | 게이트 해제 후 전 컴포넌트 자유 수정 → 붕괴 |
 
 전체 HD95 / Small HD95는 한쪽만 비는 슬라이스 때문에 `nan`이 섞일 수 있습니다(평가 `np.mean`).
@@ -63,7 +63,64 @@
 컴포넌트 오라클(GT로 부채꼴별 최적 SDF shift)은 같은 제한 안에서도 DSC 상한이 높음(예: Large ~0.96).  
 실제 PPO는 부채꼴마다 늘릴/줄일 곳을 구분하지 못해 상한에 못 미침.  
 선택기(밝기 기반 shrink/expand) 정확도는 ~50%.  
-**다음 후보:** (1) Stage 2만 사용, (2) 보수적 수락 게이트, (3) 행동 단순화, (4) 경계 지도학습 헤더, (5) 오라클 shift 모방 후 PPO.
+**목적 변경 (2026-09-30):** Stage 3는 외곽선 평행 이동이 아니라 경계 띠의 영역·경계 보정이다. 편집은 마스크 ±수 픽셀 또는 확률 0.35–0.65로 제한하고, 띠 픽셀을 켜거나 끈다. 채택은 HD95가 Stage 2보다 줄 때다. 윤곽선 이동과 전역 재분할(v5)은 이 목적의 구현이 아니다.
+
+### 0.8 윤곽 표현 타당성 (MARL-MambaContour 선검증, 2026-09-30)
+
+- 환자 400, seed 42. Medium/Large만, GT 면적 라우팅, TTA. 모델은 컴포넌트당 128점 닫힌 윤곽을 3회 이동(순환 1D conv, 1.14M). 학습 val 컴포넌트 DSC 0.8864→**0.8942**.
+- test 60명 / 2170슬라이스 (`results/contour_probe.json`):
+
+| | Stage 2 | 윤곽 회귀 | 윤곽 상한 |
+|---|---:|---:|---:|
+| DSC | 0.9102 | **0.9178** | 0.9890 |
+| HD95 px | **3.847** | 3.957 | 1.571 |
+
+- Medium 0.9035→0.9117, Large 0.9223→0.9290. 슬라이스의 80%에서 윤곽 DSC가 더 높음. Recall 0.898→0.910.
+- 호 길이 점 대응 목표는 마스크를 못 바꿈(val 0.8858 < 초기 0.8864). 최근접 경계점 목표만 유효.
+- 판정: 컴포넌트별 닫힌 윤곽은 Medium/Large에서 Stage 2를 DSC로 넘김. HD95는 아직 Stage 2보다 나쁨. 상한(DSC 0.989, HD95 1.57)까지 여유가 있어 MARL은 HD95를 직접 노릴 때만 의미 있음. Small은 다중 컴포넌트 비율이 높아 단일 윤곽으로는 상한이 0.94대.
+- 표면 손실을 처음부터 가중치 0.5로 학습하면 DSC가 깨지고 HD95도 악화되어 저장하지 않음.
+- 최근접점 모델을 HD95 상위 5% 양방향 거리로 12 epoch 미세조정(`contour_evolve_surface.pt`). test 2170장 (`results/contour_probe_surface.json`): DSC 0.9102→**0.9180**, HD95 3.847→**3.882**. 최근접점만 썼을 때(0.9178 / 3.957)보다 HD95는 줄었지만 Stage 2보다는 크다. Medium HD95만 3.592→3.544로 개선, Large는 4.312→4.500으로 악화.
+
+### 0.9 경계 띠 보정 (Medium, 2026-09-30)
+
+확률 0.35–0.65 또는 마스크 경계 ±2px만 켜기/유지/끄기. 손실은 전체 Dice + 띠 경계거리. 추론 가드는 띠 안 FLAIR 상대 밝기. 체크포인트 `checkpoints/band_refine_medium.pt`. test 60명 / Medium 1402장 (`results/band_refine_medium.json`):
+
+| | Stage 2 | raw | FLAIR 가드 |
+|---|---:|---:|---:|
+| DSC | 0.9035 | **0.9053** | 0.9048 |
+| HD95 px | 3.592 | 3.312 | **3.311** |
+
+가드는 슬라이스의 99.7%를 바꾸고, DSC가 더 높은 비율은 54.8%. Precision 0.920→0.915, Recall 0.896→0.903. val 가드 DSC 0.9177→0.9186, HD95 2.535→2.424. HD95는 윤곽 surface(Medium 3.544)보다 낮다. DSC 이득은 0.0013.
+
+### 0.10 클래스 공통 경계 띠 PPO (2026-09-30)
+
+정책은 하나(`checkpoints/band_ppo.pt`). 시작 가중치는 Medium 지도학습. 5스텝, 마지막 스텝만 FLAIR 가드. 보상은 뒤집힌 픽셀의 GT 일치와 HD95 감소. Small Expert는 이번 400명 분할에서 학습한 CaraNet(val DSC 0.8159). test 60명 / 3495장, GT 면적 라우팅 (`results/band_ppo.json`):
+
+| | Stage 2 DSC | PPO DSC | Stage 2 HD95 | PPO HD95 |
+|---|---:|---:|---:|---:|
+| Small | 0.7500 | **0.7846** | 6.640 | **6.393** |
+| Medium | 0.9035 | **0.9215** | 3.592 | **2.885** |
+| Large | 0.9223 | **0.9330** | 4.312 | **4.073** |
+| 전체 | 0.8494 | **0.8721** | 4.905 | **4.474** |
+
+세 클래스 모두 DSC·HD95가 Stage 2보다 나아서 전부 채택. 저장된 검증 모델은 5 epoch, macro DSC 0.8972 / HD95 3.558 (Stage 2 0.8741 / 3.838). 이 표는 GT 면적 라우팅의 개발 test이며 논문 확정 수치가 아니다. 확정 수치는 §0.11이다.
+
+### 0.11 확정 평가 — 파이프라인 전체, 미사용 851명 (2026-09-30)
+
+1251명 중 개발 400명(train 280 / val 60 / 방법 선택 test 60)은 제외. 남은 851명, 종양 슬라이스 50010장. 분류기(val acc 0.8114, 이 집합 슬라이스 정확도 0.8140)가 Expert를 고르고 TTA·임계값 0.80/0.80/0.50 후 `band_ppo.pt`가 보정. 집계는 슬라이스 DSC의 환자 평균이고, HD95는 128px 경계 거리이며 한쪽이 빈 슬라이스는 뺀다. 결과는 `results/band_ppo_locked.json`. 재현은 `python scripts/eval/evaluate_band_ppo_locked.py`.
+
+크기 행은 환자군이 아니다. 그 정답 면적의 슬라이스가 있는 환자 수이며, 같은 환자가 두 행 이상에 들어간다. 슬라이스 수는 소형 19077, 중형 19907, 대형 11026이다.
+
+| 정답 크기 구간 | 해당 슬라이스가 있는 환자 | Stage 2 DSC | PPO DSC | Stage 2 HD95 | PPO HD95 |
+|---|---:|---:|---:|---:|---:|
+| 전체 | 851 | 0.8359 | **0.8607** | 4.824 | **4.557** |
+| 300px 미만 | 851 | 0.7588 | **0.7929** | 5.738 | **5.609** |
+| 300–700px | 757 | 0.8718 | **0.8947** | 4.327 | **3.888** |
+| 700px 이상 | 408 | 0.9038 | **0.9200** | 4.282 | **3.815** |
+
+환자 짝 차이: DSC **+0.0248** (95% CI 0.0237–0.0259), HD95 **−0.267** px (95% CI −0.342–−0.194). 환자 평균 Precision 0.881→0.892, Recall 0.825→0.860. 슬라이스 14.3%, 환자 4.0%는 DSC가 내려간다. 주장은 이 고정 임계값의 Stage 2보다 낫다는 범위다. 임계값을 다시 고른 대조는 없다. 이 표가 논문 확정 수치다. 앞의 400명 test 표(정답 면적 라우팅, DSC 0.8721)는 방법 선택 결과다.
+
+`run_pipeline.py --refinement_profile band_ppo --max_train_patients 1251 --split_role all --slice_selection tumor` 결과(`results/band_ppo_pipeline_1251`)는 개발 400명을 포함한 슬라이스 평균이다. DSC 0.8503→0.8758. HD95는 한쪽이 빈 슬라이스를 빼면 4.441→4.085 px (Small 6.348→5.904, Medium 3.467→3.109, Large 2.929→2.730). 논문 확정 표는 위 851명 환자 평균이다.
 
 ### 0.6 Stage 1 변경 요약 (1251)
 
@@ -73,22 +130,28 @@
 
 ### 0.7 재현 명령
 
+현재 파이프라인. 논문 표는 첫 명령이다. 둘째는 개발 400명이 포함된 슬라이스 평균이다.
+
 ```bash
-# Stage 1–4 (Experts 포함). 자원: workers 8, OMP/MKL=1, parallel_stages 비권장
+python scripts/eval/evaluate_band_ppo_locked.py
+
+python run_pipeline.py --refinement_profile band_ppo \
+  --max_train_patients 1251 --split_role all --slice_selection tumor \
+  --no_deterministic --output_dir results/band_ppo_pipeline_1251 --no_plots
+```
+
+체크포인트: `checkpoints/shape_classifier_best.pt`, `caranet_best.pt`, `unetplusplus_best.pt`, `segresnet_best.pt`, `band_ppo.pt`.
+
+이전 `ppo_v4` 기록(§0.1–0.4)을 다시 만들 때만 아래를 쓴다. 논문 표가 아니다.
+
+```bash
 python run_pipeline.py --config configs/ppo_brats_v4.yaml \
   --max_train_patients 1251 --num_workers 8 \
   --slice_selection tumor --no_deterministic \
   --output_dir results/eval_1251_val_tumor_ppo_v4
-
-# PPO만 재학습 + 평가 (Experts 고정)
-python run_pipeline.py --config configs/ppo_brats_v4.yaml \
-  --skip_classifier --skip_experts \
-  --max_train_patients 1251 --num_workers 8 \
-  --slice_selection tumor --output_dir results/eval_1251_val_tumor_ppo_v4
 ```
 
-체크포인트: `checkpoints/shape_classifier_best.pt`, `caranet_best.pt`, `unetplusplus_best.pt`,
-`segresnet_best.pt`, `checkpoints/ppo_v4/ppo_{small,medium,large}.zip`.
+그때의 에이전트는 `checkpoints/ppo_v4/ppo_{small,medium,large}.zip`이다.
 
 ---
 
@@ -280,7 +343,9 @@ KAIST axial attention 역전파가 비결정적이라 재학습은 `--no_determi
 
 ---
 
-## 3. 이번 실행의 단계별 학습
+## 3. 2026-08-20 실행의 단계별 학습
+
+이 절부터 §7까지는 210명 풀·8방위 SDF PPO·단조 DSC 게이트 기록이다. 현재 파이프라인(경계 띠 PPO, 851명)이 아니다. 현재 설명은 [PIPELINE.md](PIPELINE.md)다.
 
 | 단계 | 환자 | 학습 슬라이스 | 검증 슬라이스 |
 |---|---:|---:|---:|
