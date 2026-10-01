@@ -65,13 +65,20 @@ def crop_box(gt: np.ndarray, margin: int = 15):
 
 
 def render(rows, out_path: str) -> None:
-    fig, axes = plt.subplots(3, 6, figsize=(22, 12.5))
+    # 영상 칸과 DSC 칸을 나눈다. imshow 의 equal aspect 가 세로로 긴 크롭을
+    # 셀 높이에 맞춰 키우면, 축 밖에 둔 글자가 다음 행 영상에 가려진다.
+    fig = plt.figure(figsize=(22, 16.2))
+    outer = fig.add_gridspec(
+        3, 6,
+        left=0.055, right=0.992, top=0.90, bottom=0.015,
+        hspace=0.16, wspace=0.07,
+    )
     fig.suptitle(
         "Representative slices near class-mean DSC  ·  dashed green = GT",
         fontsize=22,
         fontweight="bold",
         color="black",
-        y=0.98,
+        y=0.965,
     )
     keys = ["pipe", "kaist", "nvauto"]
     dkeys = ["d_pipe", "d_kaist", "d_nvauto"]
@@ -81,7 +88,9 @@ def render(rows, out_path: str) -> None:
         x0, x1, y0, y1 = crop_box(gt)
         sample_i = 1 if col % 2 == 0 else 2
         for row in range(3):
-            ax = axes[row, col]
+            inner = outer[row, col].subgridspec(2, 1, height_ratios=[7.6, 1.15], hspace=0.06)
+            ax = fig.add_subplot(inner[0])
+            label_ax = fig.add_subplot(inner[1])
             mask = sample[keys[row]]
             ax.imshow(img, cmap="gray", vmin=0, vmax=1)
             overlay = np.zeros((*mask.shape, 4))
@@ -101,13 +110,14 @@ def render(rows, out_path: str) -> None:
                     color="black",
                     pad=10,
                 )
-            ax.text(
+            label_ax.axis("off")
+            label_ax.text(
                 0.5,
-                -0.06,
+                0.55,
                 f"DSC={sample[dkeys[row]]:.3f}",
-                transform=ax.transAxes,
+                transform=label_ax.transAxes,
                 ha="center",
-                va="top",
+                va="center",
                 fontsize=18,
                 fontweight="bold",
                 color="black",
@@ -122,9 +132,8 @@ def render(rows, out_path: str) -> None:
                     color="black",
                     labelpad=14,
                 )
-    fig.tight_layout(rect=[0.02, 0.04, 1, 0.96])
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    fig.savefig(out_path, dpi=180, bbox_inches="tight", facecolor="white")
+    fig.savefig(out_path, dpi=180, bbox_inches="tight", facecolor="white", pad_inches=0.15)
     plt.close(fig)
     print(f"저장: {out_path}", flush=True)
 

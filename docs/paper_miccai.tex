@@ -112,6 +112,15 @@ The reward uses ground truth only during training. A flipped pixel scores $+1$ i
 
 The saved epoch is the one whose macro DSC under ground-truth-area routing is at least that of Stage~2 and whose macro HD95 is the lowest. The saved model is epoch 5, with validation macro DSC 0.8972 and HD95 3.558. Stage~2 on the same validation set has DSC 0.8741 and HD95 3.838.
 
+Figure~\ref{fig:ppo-route} is the internal route. Inference takes the four-channel observation, defines the edit band, applies the FLAIR guard only at the last step, and updates the mask for five steps by argmax. Training uses ground truth only in the reward. A batch of 16 runs the five-step route, and GAE--PPO updates the action and value heads.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{ppo_internal_route.jpg}
+\caption{Internal route of the boundary-band PPO. The upper path is five-step argmax inference. The lower path is training: reward, GAE--PPO loss, and the AdamW update of the action and value heads. The table at the bottom is the locked evaluation on 851 patients with classifier routing.}
+\label{fig:ppo-route}
+\end{figure}
+
 \subsection{Metrics}
 The primary metric is the patient mean of slice DSC. Slices within a patient are averaged with equal weight, and patients are averaged with equal weight. Slices with tumor-pixel fraction below 0.2\% are excluded. This is not the BraTS 3D volume Dice. Comparisons with Stage~2 use the interval of the paired patient difference, the 2.5--97.5 percentiles of 2{,}000 patient-level bootstrap resamples.
 
