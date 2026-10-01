@@ -3,7 +3,20 @@
 \documentclass[runningheads]{llncs}
 
 \usepackage{kotex}
-\setmainhangulfont{Malgun Gothic}
+% Tectonic's bundled ICU has no Korean break rules, so keep hangul spacing
+% and use the root line-break iterator.
+\makeatletter
+\protected\def\enablehangulspacingandlinebreak{%
+  \XeTeXinterchartokenstate\@ne
+  \XeTeXlinebreaklocale""%
+}
+\makeatother
+\enablehangulspacingandlinebreak
+\IfFileExists{C:/Windows/Fonts/malgun.ttf}{%
+  \setmainhangulfont[Path=C:/Windows/Fonts/,Extension=.ttf,BoldFont=malgunbd,ItalicFont=malgun,BoldItalicFont=malgunbd]{malgun}%
+}{%
+  \setmainhangulfont[Path=/mnt/c/Windows/Fonts/,Extension=.ttf,BoldFont=malgunbd,ItalicFont=malgun,BoldItalicFont=malgunbd]{malgun}%
+}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath}
@@ -13,6 +26,7 @@
 \renewcommand{\figurename}{그림}
 \renewcommand{\tablename}{표}
 \renewcommand{\refname}{참고문헌}
+\renewcommand{\andname}{·}
 
 \begin{document}
 
@@ -271,7 +285,8 @@ KAIST 각색 & 0.7664 & 0.8886 & 0.9160 \\
 \label{tab:single}
 \centering
 \footnotesize
-\setlength{\tabcolsep}{4pt}
+\setlength{\tabcolsep}{3pt}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lcccccc}
 \toprule
 방법 & 소형 DSC & 중형 DSC & 대형 DSC & 소형 HD95 & 중형 HD95 & 대형 HD95 \\
@@ -283,10 +298,10 @@ UNet+++ + PPO & 0.543 & 0.828 & 0.900 & 10.308 & 5.087 & 4.345 \\
 Attention U-Net + PPO & 0.761 & 0.884 & 0.904 & 6.660 & 3.821 & 4.606 \\
 SegResNet + PPO & 0.676 & 0.871 & 0.912 & 8.821 & 4.240 & 4.319 \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \end{table}
 
-이 표본에서 소형 DSC는 TRIO 0.812, UNet++ 0.778, Attention U-Net 0.761 순이다. U-Net과 UNet+++의 소형 DSC는 0.537, 0.543이고 HD95는 12.126, 10.308픽셀이다. 중형과 대형에서는 UNet++가 DSC 0.894, 0.926으로 TRIO 0.904, 0.916과 같은 자리다. 재현은 \texttt{python scripts/eval/plot\_single\_backbone\_grid.py}이고, 파일은 \texttt{results/single\_backbone\_ppo\_grid\_metrics.json}이다.
+이 표본에서 소형 DSC는 TRIO 0.812, UNet++ 0.778, Attention U-Net 0.761 순이다. U-Net과 UNet+++의 소형 DSC는 0.537, 0.543이고 HD95는 12.126, 10.308픽셀이다. 중형과 대형에서는 UNet++가 DSC 0.894, 0.926으로 TRIO 0.904, 0.916과 같은 자리다. 재현 스크립트는 \texttt{plot\_single\_backbone\_grid.py}이고, 집계 파일은 \texttt{single\_backbone\_ppo\_grid\_metrics.json}이다.
 
 \begin{figure}[t]
 \centering

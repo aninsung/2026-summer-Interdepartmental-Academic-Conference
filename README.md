@@ -11,7 +11,8 @@
 
 <p align="center">
   <a href="https://aninsung.github.io/2026-summer-Interdepartmental-Academic-Conference/"><strong>연구 페이지</strong></a> &nbsp; · &nbsp;
-  <a href="docs/paper_miccai.pdf"><strong>논문 원고</strong></a> &nbsp; · &nbsp;
+  <a href="docs/paper_miccai.pdf"><strong>논문 · 영어</strong></a> &nbsp; · &nbsp;
+  <a href="docs/paper_miccai_ko.pdf"><strong>논문 · 한국어</strong></a> &nbsp; · &nbsp;
   <a href="#02--pipeline">Pipeline</a> &nbsp; · &nbsp;
   <a href="#03--results">Results</a> &nbsp; · &nbsp;
   <a href="#04--reproduce">Reproduce</a> &nbsp; · &nbsp;
@@ -54,6 +55,12 @@ Whole Tumor의 단면 크기는 슬라이스마다 다릅니다. 작은 단면�
 | 4 | 환자 평균 DSC로 채점 | `results/band_ppo_locked.json` |
 
 Small은 인접 슬라이스 2.5D, Large는 부종과 종양핵을 Whole Tumor로 합칩니다. 정책은 크기마다 나누지 않습니다. 추론 관측에는 정답이 없고, 정답은 학습 보상에만 씁니다. 마지막 스텝의 행동만 그 슬라이스 FLAIR 밝기 제약을 받습니다.
+
+<p align="center">
+  <img src="results/ppo_internal_route.jpg" width="100%" alt="경계 띠 PPO 내부 경로. 위는 다섯 스텝 argmax 추론, 아래는 보상과 GAE-PPO 학습, 맨 아래는 851명 확정 평가" />
+</p>
+
+위는 네 채널 관측으로 띠를 정하고, FLAIR 제약을 마지막 스텝에만 건 뒤 argmax로 다섯 스텝 마스크를 갱신합니다. 아래는 정답을 보상에만 쓰고, 배치 16이 다섯 스텝을 돌아 GAE–PPO로 행동 머리와 가치 머리를 갱신합니다. 맨 아래 표는 분류기 라우팅 851명의 확정 평가이며, 숫자는 [크기별 표](#크기별-분할-성능)와 같습니다.
 
 > **평가 범위**
 >
@@ -107,7 +114,7 @@ DSC 환자 평균은 TRIO와 NVAUTO가 비슷합니다. 점추정은 TRIO가 조
 
 ![TRIO, KAIST, NVAUTO on the same held-out slices](results/method_comparison_current_3x6.png)
 
-행은 TRIO / KAIST / NVAUTO, 열은 Small · Medium · Large입니다. 초록 점선은 정답입니다.
+행은 TRIO / KAIST / NVAUTO, 열은 Small · Medium · Large입니다. 각 칸은 그 구간 평균 DSC에 가까운 단면이고, 칸 아래 숫자는 그 슬라이스 DSC입니다. 초록 점선은 정답입니다.
 
 </details>
 
@@ -166,7 +173,8 @@ checkpoints/             가중치와 patient_split.json
 
 | 문서 | 내용 |
 |:---|:---|
-| [논문 원고 · PDF](docs/paper_miccai.pdf) | 연구 방법과 실험 결과 |
+| [논문 · 영어](docs/paper_miccai.pdf) | 영문 원고 PDF. 연구 방법과 실험 결과 |
+| [논문 · 한국어](docs/paper_miccai_ko.pdf) | 같은 내용의 한글 원고 PDF |
 | [파이프라인 상세](docs/PIPELINE.md) | 단계별 입력·출력과 학습·평가 흐름 |
 | [실험 결과](docs/EXPERIMENT_RESULTS.md) | 실험 수치와 기록 |
 | [과거 실험 기록](docs/history_2026-08-20.md) | 2026-08-20 평가 · 210명 풀, val 42명, GT 기반 단조 DSC 게이트 |
