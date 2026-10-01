@@ -10,6 +10,11 @@
 </p>
 
 <p align="center">
+  가천대학교 컴퓨터공학과 · 202135993 · <strong>안인성</strong><br />
+  가천대학교 인공지능학과 · 202634031 · <strong>한수진</strong>
+</p>
+
+<p align="center">
   <a href="https://aninsung.github.io/2026-summer-Interdepartmental-Academic-Conference/"><strong>연구 페이지</strong></a> &nbsp; · &nbsp;
   <a href="docs/paper_miccai.pdf"><strong>논문 · 영어</strong></a> &nbsp; · &nbsp;
   <a href="docs/paper_miccai_ko.pdf"><strong>논문 · 한국어</strong></a> &nbsp; · &nbsp;
@@ -183,3 +188,4 @@ checkpoints/             가중치와 patient_split.json
   <strong>TRIO · 2026 컴공 &amp; 인지 연합학술제</strong><br />
   Medical Image Segmentation · Deep Learning · Reinforcement Learning
 </p>
+
