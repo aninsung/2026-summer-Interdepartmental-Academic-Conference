@@ -16,6 +16,7 @@
 
 <p align="center">
   <a href="https://aninsung.github.io/2026-summer-Interdepartmental-Academic-Conference/"><strong>연구 페이지</strong></a> &nbsp; · &nbsp;
+  <a href="연구_야호_PPT(09.30).pdf"><strong>ppt</strong></a> &nbsp; · &nbsp;
   <a href="docs/paper_miccai.pdf"><strong>논문 · 영어</strong></a> &nbsp; · &nbsp;
   <a href="docs/paper_miccai_ko.pdf"><strong>논문 · 한국어</strong></a> &nbsp; · &nbsp;
   <a href="#02--pipeline">Pipeline</a> &nbsp; · &nbsp;
