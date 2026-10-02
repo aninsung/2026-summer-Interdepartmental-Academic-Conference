@@ -102,6 +102,12 @@ Probabilities are the mean of the original and of horizontal and vertical flips.
 Expert selection during training differs from inference. Policy training and checkpoint selection route by ground-truth area. On 19.9\% of the 851 evaluation slices, the policy refines a mask from an expert other than the one that was trained for that ground-truth size.
 
 \subsection{Boundary-Band PPO}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{그림1.png}
+\caption{Internal route of the boundary-band PPO. The upper path is five-step argmax inference. The lower path is training: reward, GAE--PPO loss, and the AdamW update of the action and value heads. The table at the bottom is the locked evaluation on 851 patients with classifier routing.}
+\label{fig:ppo-route}
+\end{figure}
 There is one policy. Its initialization is a band-refinement network trained by supervision on medium slices only. The network is a small U-Net of width 32. The four input channels are T1ce, FLAIR, the current mask, and the expert probability. Ground truth is not an observation. At the end of the decoder an action head and a value head split. The action head emits three logits per pixel (off, keep, on), and inference takes the argmax. The value head is used only in training. Outside the band, the off and on logits are masked so the action is keep.
 
 Editable pixels are those whose expert probability is in $[0.35,0.65]$, or those within 2 pixels of the current mask boundary. Outside the band the Stage~2 label is kept. A pixel inside the probability interval can change even if it is far from the boundary, so the editable set is not only the $\pm2$-pixel rim. Over five steps the probability map stays fixed and only the mask is passed to the next observation.
@@ -113,13 +119,6 @@ The reward uses ground truth only during training. A flipped pixel scores $+1$ i
 The saved epoch is the one whose macro DSC under ground-truth-area routing is at least that of Stage~2 and whose macro HD95 is the lowest. The saved model is epoch 5, with validation macro DSC 0.8972 and HD95 3.558. Stage~2 on the same validation set has DSC 0.8741 and HD95 3.838.
 
 Figure~\ref{fig:ppo-route} is the internal route. Inference takes the four-channel observation, defines the edit band, applies the FLAIR guard only at the last step, and updates the mask for five steps by argmax. Training uses ground truth only in the reward. A batch of 16 runs the five-step route, and GAE--PPO updates the action and value heads.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\textwidth]{ppo_internal_route.jpg}
-\caption{Internal route of the boundary-band PPO. The upper path is five-step argmax inference. The lower path is training: reward, GAE--PPO loss, and the AdamW update of the action and value heads. The table at the bottom is the locked evaluation on 851 patients with classifier routing.}
-\label{fig:ppo-route}
-\end{figure}
 
 \subsection{Metrics}
 The primary metric is the patient mean of slice DSC. Slices within a patient are averaged with equal weight, and patients are averaged with equal weight. Slices with tumor-pixel fraction below 0.2\% are excluded. This is not the BraTS 3D volume Dice. Comparisons with Stage~2 use the interval of the paired patient difference, the 2.5--97.5 percentiles of 2{,}000 patient-level bootstrap resamples.
@@ -182,6 +181,15 @@ $\geq700$ px & 408 & 0.8981 & \textbf{0.9169} & $+0.0188$ (0.0173--0.0205) \\
 The difference is largest in the small range. Those 851 patients are not small-tumor patients; they are every patient with at least one slice below 300 pixels. The large-range difference is the smallest, at $+0.0188$. The initial DSC there is already 0.8981, so the band has less room to raise overlap.
 
 Mean HD95 recorded in the same file falls from 4.888 to 4.609 pixels overall, and by range from 5.801 to 5.697, from 4.364 to 3.887, and from 4.484 to 3.924 pixels. Because the slices dropped for empty masks differ between Stage~2 and PPO, we do not report these gaps as a paired improvement.
+
+Figure~\ref{fig:delta} shows six slices from patients outside the development 400. The front of each column title is the ground-truth area, and the back is the expert selected by the classifier. The first medium column has a medium ground-truth area routed to CaraNet. Rows are the ground truth, Stage~2, and the boundary-band PPO. DSC and HD95 under each cell are for that slice, not the patient means in Table~\ref{tab:locked}. DSC rises on all six slices. HD95 falls on the second small slice, the second medium slice, and both large slices. It stays at 4.24 pixels on the first small slice and rises from 2.00 to 3.38 pixels on the first medium slice. The quantitative claim is Table~\ref{tab:locked}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{band_ppo_delta_matched/delta_matched_comparison.png}
+\caption{Six slices from unused patients. Top: ground truth (green). Middle: Stage~2 (red). Bottom: boundary-band PPO (cyan). DSC and HD95 under each cell are for that slice.}
+\label{fig:delta}
+\end{figure}
 
 \subsection{Threshold Reselection Control}
 \label{sec:retune}
@@ -289,21 +297,7 @@ On this sample, small DSC ranks TRIO 0.812, UNet++ 0.778, and Attention U-Net 0.
 \end{figure}
 
 \subsection{Scope of the Claims}
-Table~\ref{tab:locked} is the paired comparison against Stage~2 at fixed thresholds, and Table~\ref{tab:retune} is the paired comparison against Stage~2 with thresholds reselected on the 60 validation patients. Both tables use the same classifier and the same experts. Tables~\ref{tab:baselines} and~\ref{tab:bysize} compare patient means against 2D adaptations whose thresholds were chosen on validation, and they have no interval for a paired difference between methods. None of the four tables is a 3D BraTS score, a result on a cohort of small-tumor-only patients, or a paired HD95 improvement. Table~\ref{tab:single} is a slice mean over 2{,}754 slices from a 48-patient sample, not the 851-patient mean of the same weights, and the PPO in that table shifts sectors rather than editing a boundary band. Stage~2 predictions on the 280 training patients are outputs of experts that already trained on those patients. The policy was not retrained on out-of-fold predictions. The experts did not train on the 851 patients, so Table~\ref{tab:locked} itself is a paired comparison on the same initial mask.
-
-\section{Discussion}
-
-After the editable set was restricted to a boundary band, the patient mean of DSC rose. The policy keeps expert labels outside the band and edits only ambiguous probabilities and the boundary neighborhood. The size of the difference depends on the range. Small cross-sections start from the lowest initial DSC, 0.7579, and have the largest paired difference, $+0.0354$, which remains the largest against the reselected Stage~2 at $+0.0251$. Large cross-sections start from a high initial DSC, so the band has less room to help.
-
-The external comparison does not point one way. DSC on small cross-sections is higher for the proposed method, while overall DSC overlaps the NVAUTO adaptation and is similar. Medium and large DSC, and mean HD95 after dropping empty masks, favor the NVAUTO adaptation. Against the fixed Stage~2, PPO raises recall from 0.820 to 0.860 and precision from 0.883 to 0.892. The overlap gain is likely to come mostly from decisions that turn on missed tumor pixels inside the band. This reading does not replace a pixel-level error breakdown.
-
-The FLAIR constraint exists only at the last step and encodes the prior that a pixel brighter than the band mean is tumor. That prior can fit a bright edema boundary and can fail on dark necrosis. Pixels changed in earlier steps are not all reversed by this rule. On the 19.9\% of slices where the classifier and the ground-truth size disagree, the policy corrects errors of an expert different from the one seen in training. A better classifier could shrink this fraction; this experiment did not measure that effect.
-
-Reselecting thresholds alone accounts for about 28\% of the Table~\ref{tab:locked} gain, and it buys recall by giving up precision. PPO raises both on the same probability map and remains $+0.0193$ above the reselected Stage~2. Most of the gain therefore comes from per-pixel decisions inside the band, not from where the threshold sits.
-
-The five single backbones were trained on the same 280 patients but do not use size-specific experts or the boundary band. On the slice mean of the 48-patient sample, small DSC falls from TRIO at 0.812 to 0.537 for U-Net and 0.543 for UNet+++. UNet++ at medium 0.894 and large 0.926 sits with TRIO on this sample. This comparison is not an 851-patient mean, so it is not placed on the same line as 0.8604 in Table~\ref{tab:locked}.
-
-Several omissions should stay explicit. The fixed thresholds 0.80/0.80/0.50 were chosen on an earlier pool of 210 patients, and 148 of that pool are in the locked evaluation. Weights and the band design were chosen on the current development set of 400, but these thresholds were set after those 148 patients had been seen. The reselected thresholds in Table~\ref{tab:retune} were chosen only on the 60 validation patients, and the PPO gain remains in that comparison. The PPO was trained only on fixed-threshold masks; a policy retrained on the reselected masks was not evaluated. Flip augmentation is used only by the proposed method. The baselines are single-seed 2D adaptations, not the ensembles submitted to the challenge. HD95 is in pixels and was not converted to millimetres at the original spacing or to a 3D surface distance. Policy training is a single run.
+Table~\ref{tab:locked} is the paired comparison against Stage~2 at fixed thresholds, and Table~\ref{tab:retune} is the paired comparison against Stage~2 with thresholds reselected on the 60 validation patients. Both tables use the same classifier and the same experts. Tables~\ref{tab:baselines} and~\ref{tab:bysize} compare patient means against 2D adaptations whose thresholds were chosen on validation, and they have no interval for a paired difference between methods. None of the four tables is a 3D BraTS score, a result on a cohort of small-tumor-only patients, or a paired HD95 improvement. The DSC and HD95 on Figure~\ref{fig:delta} are the six slices in that figure, not the patient means in Table~\ref{tab:locked}. One medium slice there was routed to CaraNet, and its HD95 rose. Table~\ref{tab:single} is a slice mean over 2{,}754 slices from a 48-patient sample, not the 851-patient mean of the same weights, and the PPO in that table shifts sectors rather than editing a boundary band. Stage~2 predictions on the 280 training patients are outputs of experts that already trained on those patients. The policy was not retrained on out-of-fold predictions. The experts did not train on the 851 patients, so Table~\ref{tab:locked} itself is a paired comparison on the same initial mask.
 
 \section{Conclusion}
 
