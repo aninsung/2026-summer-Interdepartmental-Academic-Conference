@@ -62,7 +62,7 @@ Whole Tumor의 단면 크기는 슬라이스마다 다릅니다. 작은 단면�
 Small은 인접 슬라이스 2.5D, Large는 부종과 종양핵을 Whole Tumor로 합칩니다. 정책은 크기마다 나누지 않습니다. 추론 관측에는 정답이 없고, 정답은 학습 보상에만 씁니다. 마지막 스텝의 행동만 그 슬라이스 FLAIR 밝기 제약을 받습니다.
 
 <p align="center">
-  <img src="results/ppo_internal_route.jpg" width="100%" alt="경계 띠 PPO 내부 경로. 위는 다섯 스텝 argmax 추론, 아래는 보상과 GAE-PPO 학습, 맨 아래는 851명 확정 평가" />
+  <img src="results/fig2_ppo_internal_route.jpg" width="100%" alt="경계 띠 PPO 내부 경로. 위는 다섯 스텝 argmax 추론, 아래는 보상 계산과 GAE-PPO 손실 및 AdamW 업데이트" />
 </p>
 
 위는 네 채널 관측으로 띠를 정하고, FLAIR 제약을 마지막 스텝에만 건 뒤 argmax로 다섯 스텝 마스크를 갱신합니다. 아래는 정답을 보상에만 쓰고, 배치 16이 다섯 스텝을 돌아 GAE–PPO로 행동 머리와 가치 머리를 갱신합니다. 맨 아래 표는 분류기 라우팅 851명의 확정 평가이며, 숫자는 [크기별 표](#크기별-분할-성능)와 같습니다.

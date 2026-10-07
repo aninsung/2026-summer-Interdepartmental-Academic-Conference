@@ -8,7 +8,7 @@
 
 → **[실험 결과](EXPERIMENT_RESULTS.md)** §0.11–0.15
 
-구조 그림: [`results/band_ppo_agent_internals.png`](../results/band_ppo_agent_internals.png)
+구조 그림: [`results/fig2_ppo_internal_route.jpg`](../results/fig2_ppo_internal_route.jpg)
 
 2026-08-20의 8방위 SDF와 TRIO 그림(`results/archive_2026-08-20/method_comparison_3x6.png`)은 이전 Stage 3다. 숫자는 [history_2026-08-20.md](history_2026-08-20.md)와 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md) §1에 둔다. Stage 2와 경계 띠 PPO를 맞춘 여섯 슬라이스는 `results/band_ppo_delta_matched/delta_matched_comparison.png`다. 파이프라인 개요는 `results/pipeline_overview.jpg`다.
 

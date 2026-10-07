@@ -2,11 +2,11 @@
 
 분류 → 크기별 Expert → **경계 띠 PPO 하나** → 평가. 코드 기준 설명이다.
 
-논문은 [paper_draft_ko.md](paper_draft_ko.md)다. 수치는 BraTS 2021 **1251명** 중 개발 400명(train 280 / val 60 / 방법 선택 test 60)을 뺀 **851명** 환자 평균이다. 고정 임계값 Stage 2 대비 DSC 0.8337→**0.8604** (짝 차이 +0.0267, 95% CI 0.0256–0.0278). 검증 60명으로 임계값을 0.45/0.80/0.20에 다시 고른 Stage 2(0.8411)와 비교해도 **+0.0193** (0.0184–0.0202)이 남는다. HD95 평균 4.888→4.609 px는 빈 마스크 제외가 달라 짝비교가 아니다. 상세는 [EXPERIMENT_RESULTS.md §0.11–0.13](EXPERIMENT_RESULTS.md). 2026-10-07 재학습 시드 42·7·123의 PPO DSC는 0.8597, 0.8620, 0.8609(평균 0.8609, 범위 0.0023)이고 Stage 2는 0.8339, 0.8370, 0.8352, 대형 전 슬라이스는 0.8503, 0.8540, 0.8500이다. 시드 42의 빈 슬라이스 거짓 양성은 Stage 2 0.567, PPO 0.521, 대형 0.930이고 3D Dice는 0.779, 0.813, 0.799, PPO 공통 HD95는 10.73 mm이다. 시드 7은 거짓 양성 0.532, 0.497, 0.821과 3D Dice 0.786, 0.811, 0.796이다. 시드 123은 0.601, 0.571, 0.829와 0.771, 0.809, 0.759이다. 추론 ablation은 5스텝 0.8597, 1스텝 0.8460, 지도학습 1스텝 0.8383, 대형+띠 0.8676, 정답 라우팅 0.8698, 독립 703명 0.8579, 반경 0은 0.8427, 스텝·가드·띠 폭은 0.8575–0.8601이다. 단일 U-Net DSC 0.8156, HD95 6.939 px, 바닐라 PPO DSC 0.8133, HD95 6.955 px, 짝 차이 −0.0023이다. 크기별 DSC는 0.7215→0.7197, 0.8758→0.8736, 0.8973→0.8939이다. 가중치는 `checkpoints/seeds/{42,7,123}/`와 `checkpoints/single_backbone/unet.pt`, `ppo_unet_vanilla.zip`이다. 파일은 `results/protocol_gaps/seed_{42,7,123}.json`, `results/vanilla_unet_851.json`, `results/ablation_review/summary.json`이다. 로그는 [§0.15](EXPERIMENT_RESULTS.md)다. 2026-08-20 기록은 [history_2026-08-20.md](history_2026-08-20.md)다.
+논문은 [paper_draft_ko.md](paper_draft_ko.md)다. 수치는 BraTS 2021 **1251명** 중 개발 400명(train 280 / val 60 / 방법 선택 test 60)을 뺀 **851명** 환자 평균이다. 고정 임계값 Stage 2 대비 DSC 0.8337→**0.8604** (짝 차이 +0.0267, 95% CI 0.0256–0.0278). 검증 60명으로 임계값을 0.45/0.80/0.20에 다시 고른 Stage 2(0.8411)와 비교해도 **+0.0193** (0.0184–0.0202)이 남는다. HD95 평균 4.888→4.609 px는 빈 마스크 제외가 달라 짝비교가 아니다. 이 0.8337→0.8604는 **2026-09-30** 잠금 가중치다. 상세는 [EXPERIMENT_RESULTS.md §0.11–0.13](EXPERIMENT_RESULTS.md). 2026-10-07에 같은 분할로 다시 학습한 시드 42·7·123의 PPO DSC는 0.8597, 0.8620, 0.8609(평균 0.8609, 범위 0.0023, 0.003보다 좁다)이고 Stage 2는 0.8339, 0.8370, 0.8352, 대형 전 슬라이스는 0.8503, 0.8540, 0.8500이다. 빈 슬라이스를 포함한 131,905장에서 시드 42의 거짓 양성은 Stage 2 0.567, PPO 0.521, 대형 0.930이다. 양쪽 마스크가 있는 공통 슬라이스의 HD95 환자 평균은 Stage 2 6.072 px(11.536 mm), PPO 5.649 px(10.734 mm)이고, z를 쌓은 3D Dice는 0.779, 0.813, 0.799이다. mm는 픽셀×1.9이다. 시드 7은 거짓 양성 0.532, 0.497, 0.821과 3D Dice 0.786, 0.811, 0.796이다. 시드 123은 0.601, 0.571, 0.829와 0.771, 0.809, 0.759이다. 시드 7·123의 PPO 공통 HD95는 10.351 mm, 10.731 mm이다. 추론 ablation은 5스텝 0.8597, 1스텝 0.8460, 지도학습 1스텝 0.8383, 대형+띠 0.8676, 정답 라우팅 0.8698, 이전 풀 148명을 뺀 703명 0.8579, 반경 0은 0.8427, 스텝 3·가드 해제·띠 폭은 0.8575–0.8601이다. 단일 U-Net을 같은 280명으로 20에폭 학습하고 임계값 0.5로 평가하면 DSC 0.8156(95% CI 0.8067–0.8243), HD95 6.939 px이다. 전역 1픽셀 수축·유지·팽창 바닐라 PPO 15스텝은 DSC 0.8133(0.8046–0.8220), HD95 6.955 px, 짝 차이 −0.0023(95% CI −0.0029–−0.0017)이다. 정답 크기별 DSC는 소형 0.7215→0.7197, 중형 0.8758→0.8736(757명), 대형 0.8973→0.8939(408명)이다. 가중치는 `checkpoints/seeds/{42,7,123}/`와 `checkpoints/single_backbone/unet.pt`, `ppo_unet_vanilla.zip`이다. 파일은 `results/protocol_gaps/seed_{42,7,123}.json`, `results/vanilla_unet_851.json`, `results/ablation_review/summary.json`이다. 로그는 [§0.15](EXPERIMENT_RESULTS.md)다. 2026-08-20 기록은 [history_2026-08-20.md](history_2026-08-20.md)다.
 
 `ppo_v5`는 폐기했다. 8방위 SDF 에이전트(`ppo_v2`, `ppo_v4`)와 2026-08-20 TRIO(단조 DSC 게이트)는 이전 구현이다. 수치는 [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md) §0.1–0.4와 §1에만 두고, 이 문서의 본문과 섞지 않는다. 이전 품질 gate 절차는 [QUALITY_GATE.md](QUALITY_GATE.md) 아래쪽에 남아 있다.
 
-구조 그림: [`results/pipeline_overview.jpg`](../results/pipeline_overview.jpg), [`results/band_ppo_agent_internals.png`](../results/band_ppo_agent_internals.png).  
+구조 그림: [`results/pipeline_overview.jpg`](../results/pipeline_overview.jpg), [`results/fig2_ppo_internal_route.jpg`](../results/fig2_ppo_internal_route.jpg).  
 Stage 2와 경계 띠 PPO: [`results/band_ppo_delta_matched/delta_matched_comparison.png`](../results/band_ppo_delta_matched/delta_matched_comparison.png).  
 단일 백본: [`results/single_backbone_ppo_grid.png`](../results/single_backbone_ppo_grid.png).
 
@@ -233,6 +233,22 @@ FLAIR 가드는 **마지막 스텝만**이다. 그 슬라이스 띠의 평균과
 DSC 환자 짝 차이는 **+0.0267** (95% CI 0.0256–0.0278)이다. 검증 60명에서 크기별 임계값을 0.45/0.80/0.20으로 다시 고른 Stage 2는 0.8411이고, PPO와의 짝 차이는 **+0.0193** (0.0184–0.0202)이다. 재현은 `python scripts/eval/evaluate_stage2_retuned.py`, 파일은 `results/stage2_retuned.json`이다. HD95 평균은 전체 4.888→4.609 px로 `results/band_ppo_locked.json`에 있으나, 빈 마스크를 빼는 슬라이스가 Stage 2와 PPO에서 달라 본문 짝비교로 쓰지 않는다.  단일 백본 다섯 개와 섹터 PPO는 [§0.14](EXPERIMENT_RESULTS.md)다. 학습은 같은 train 280명이고, 보고 숫자는 미사용 48명·슬라이스 2,754장의 슬라이스 평균이다. Small DSC는 TRIO 0.812, UNet++ 0.778, Attention U-Net 0.761, SegResNet 0.676, UNet+++ 0.543, U-Net 0.537이다. 그림은 `results/single_backbone_ppo_grid.png`다. 고정 임계값 0.80/0.80/0.50과 연결요소 기준은 이전 210명 풀에서 정했고, 그 풀의 148명이 이 851명에 들어 있다. 띠 설계는 이번 방법 선택 60명에서 정했고, 가중치는 이번 개발 400명으로 다시 학습했다. Stage 2와 PPO를 맞춘 여섯 슬라이스는 `results/band_ppo_delta_matched/delta_matched_comparison.png`다. 재현은 `python scripts/eval/plot_delta_matched.py`다. 열 제목의 뒤는 분류기가 고른 전문가이고, 중형 첫째는 CaraNet으로 라우팅되었다. 칸의 HD95는 그 장만의 값이며, 중형 첫째는 2.00에서 3.38 px로 늘었다.
 
 `run_pipeline.py`의 1251명 `ppo_raw` 평가는 같은 가중치를 쓰지만 집계가 다르다. 개발 환자가 포함된 슬라이스 평균이다.
+
+### 2026-10-07 재학습
+
+위 표의 0.8337→0.8604는 2026-09-30 잠금 가중치다. 2026-10-07 재학습은 환자 분할 파일을 그대로 두고 시드만 42, 7, 123으로 다시 학습한 다른 가중치다.
+
+| 시드 | Stage 2 DSC | 경계 띠 PPO | 대형 전문가 전 슬라이스 |
+|---:|---:|---:|---:|
+| 42 | 0.8339 | 0.8597 | 0.8503 |
+| 7 | 0.8370 | 0.8620 | 0.8540 |
+| 123 | 0.8352 | 0.8609 | 0.8500 |
+
+PPO DSC 범위는 0.0023이고 세 시드 평균은 0.8609이다. 시드 42 추론 ablation은 5스텝 0.8597, 1스텝 0.8460, 중형 지도학습 초기화 1스텝 0.8383, 대형+띠 0.8676, 정답 크기 라우팅 0.8698, 이전 210명 풀과 겹치는 148명을 뺀 703명 0.8579, 반경 0은 0.8427, 스텝 3·가드 해제·띠 폭 변경은 0.8575–0.8601이다. 파일은 `results/ablation_review/summary.json`이다.
+
+빈 슬라이스를 포함한 131,905장에서 거짓 양성은 시드 42가 Stage 2 0.567, PPO 0.521, 대형 0.930이다. 시드 7은 0.532, 0.497, 0.821이고 시드 123은 0.601, 0.571, 0.829이다. Stage 2와 PPO가 함께 마스크를 가진 슬라이스의 HD95 환자 평균은 시드 42에서 Stage 2 6.072 px(11.536 mm), PPO 5.649 px(10.734 mm)이다. 시드 7·123의 PPO 공통 HD95는 10.351 mm, 10.731 mm이다. mm는 픽셀×1.9이다. z를 쌓은 3D Dice 환자 평균은 시드 42가 0.779, 0.813, 0.799, 시드 7이 0.786, 0.811, 0.796, 시드 123이 0.771, 0.809, 0.759이다. 파일은 `results/protocol_gaps/seed_{42,7,123}.json`이다.
+
+단일 U-Net은 같은 280명으로 20에폭 학습하고 임계값 0.5로 851명, 종양 슬라이스 50,010장을 평가한다. 환자 평균 DSC는 0.8156(95% CI 0.8067–0.8243), HD95는 6.939 px이다. 그 마스크에 전역 1픽셀 수축·유지·팽창 바닐라 PPO를 15스텝 적용하면 DSC 0.8133(0.8046–0.8220), HD95 6.955 px, 환자 짝 차이 −0.0023(95% CI −0.0029–−0.0017)이다. 정답 크기별 DSC는 소형 0.7215→0.7197, 중형 0.8758→0.8736(757명), 대형 0.8973→0.8939(408명)이다. 파일은 `results/vanilla_unet_851.json`이다. 가중치는 `checkpoints/seeds/{42,7,123}/`, `checkpoints/single_backbone/unet.pt`, `ppo_unet_vanilla.zip`이다.
 
 ---
 
