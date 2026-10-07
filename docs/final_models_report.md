@@ -8,14 +8,20 @@
 | Small / Medium / Large | `caranet_best.pt`, `unetplusplus_best.pt`, `segresnet_best.pt` |
 | Stage 3 | `checkpoints/band_ppo.pt` |
 
-851명 환자 평균이다. 고정 임계값 Stage 2 대비 DSC 0.8337→0.8604 (짝 차이 +0.0267, 95% CI 0.0256–0.0278). 검증에서 고른 0.45/0.80/0.20 Stage 2(0.8411) 대비 +0.0193 (0.0184–0.0202). HD95 평균 4.888→4.609 px는 빈 마스크 제외가 달라 짝비교가 아니다.
+851명 환자 평균이다. 2026-09-30 잠금 가중치의 고정 임계값 Stage 2 대비 DSC 0.8337→0.8604 (짝 차이 +0.0267, 95% CI 0.0256–0.0278). 검증에서 고른 0.45/0.80/0.20 Stage 2(0.8411) 대비 +0.0193 (0.0184–0.0202). HD95 평균 4.888→4.609 px는 빈 마스크 제외가 달라 짝비교가 아니다.
+
+2026-10-07 재학습 여섯 가중치는 `checkpoints/seeds/{42,7,123}/`이다. 시드 123 학습이 끝난 뒤 작업 디렉터리의 `checkpoints/band_ppo.pt`는 시드 123 배우다. 종양 슬라이스 DSC 환자 평균은 시드 42에서 Stage 2 0.8339, PPO 0.8597, 대형 전 슬라이스 0.8503이다. 시드 7은 0.8370, 0.8620, 0.8540이고 시드 123은 0.8352, 0.8609, 0.8500이다. PPO 평균은 0.8609, 범위는 0.0023이다. 시드 42의 빈 슬라이스 거짓 양성은 0.567, 0.521, 0.930이고 3D Dice는 0.779, 0.813, 0.799이다. 시드 7은 0.532, 0.497, 0.821과 0.786, 0.811, 0.796이다. 시드 123은 0.601, 0.571, 0.829와 0.771, 0.809, 0.759이다. PPO 공통 HD95는 10.73 mm, 10.35 mm, 10.73 mm이다.
+
+같은 시드 42 가중치의 추론 ablation은 5스텝 0.8597, 1스텝 0.8460, 중형 지도학습 1스텝 0.8383, 대형+경계 띠 PPO 0.8676, 정답 크기 라우팅 0.8698, 독립 703명 0.8579, 반경 0은 0.8427, 스텝·가드·띠 폭은 0.8575–0.8601이다.
+
+단일 U-Net과 바닐라 PPO는 `checkpoints/single_backbone/unet.pt`, `ppo_unet_vanilla.zip`이다. 851명 DSC는 0.8156(95% CI 0.8067–0.8243)과 0.8133(0.8046–0.8220)이고 HD95는 6.939 px, 6.955 px이다. 짝 차이는 −0.0023(95% CI −0.0029–−0.0017)이다. 크기별 DSC는 소형 0.7215→0.7197, 중형 0.8758→0.8736, 대형 0.8973→0.8939이다.
 
 ```bash
 python scripts/eval/evaluate_band_ppo_locked.py
 python scripts/eval/evaluate_stage2_retuned.py
 ```
 
-KAIST·NVAUTO는 [EXPERIMENT_RESULTS.md §0.12](EXPERIMENT_RESULTS.md)다. 임계값 재선택은 §0.13이다.
+임계값 재선택은 [EXPERIMENT_RESULTS.md §0.13](EXPERIMENT_RESULTS.md), 2026-10-07 재학습은 §0.15이다.
 
 단일 백본 다섯 개와 각각의 섹터 PPO는 `checkpoints/single_backbone/`에 있다. TRIO 전문가와 `band_ppo.pt`와 다른 가중치다. 48명 표본(슬라이스 2,754장)의 슬라이스 평균 DSC는 Small 기준 TRIO 0.812, UNet++ 0.778, Attention U-Net 0.761, SegResNet 0.676, UNet+++ 0.543, U-Net 0.537이다. 이 집계는 851명 환자 평균이 아니다. 표는 [EXPERIMENT_RESULTS.md §0.14](EXPERIMENT_RESULTS.md), 그림은 `results/single_backbone_ppo_grid.png`다. Stage 2와 경계 띠 PPO의 여섯 슬라이스는 `results/band_ppo_delta_matched/delta_matched_comparison.png`다.
 

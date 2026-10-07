@@ -13,13 +13,14 @@ class AdaptivePipeline(nn.Module):
     Small Expert는 2.5D(prev/center/next) 입력을 쓰고,
     Large Expert는 ED/TC 2채널 출력을 WT로 합친다.
     """
-    def __init__(self, device, in_channels=1, strict_checkpoints=False):
+    def __init__(self, device, in_channels=1, strict_checkpoints=False, checkpoint_dir="checkpoints"):
         super().__init__()
         self.strict_checkpoints = strict_checkpoints
         self.device = device
         self.base_in_channels = in_channels
+        self.checkpoint_dir = checkpoint_dir
         
-        cls_ckpt = 'checkpoints/shape_classifier_best.pt'
+        cls_ckpt = os.path.join(checkpoint_dir, 'shape_classifier_best.pt')
         cls_in_channels = in_channels
         if os.path.exists(cls_ckpt):
             state_dict = torch.load(cls_ckpt, map_location=device, weights_only=True)
@@ -32,9 +33,9 @@ class AdaptivePipeline(nn.Module):
         self.classifier.eval()
         
         self.expert_small = self._load_expert(
-            'checkpoints/caranet_best.pt',
+            os.path.join(checkpoint_dir, 'caranet_best.pt'),
             build_caranet,
-            'checkpoints/attention_unet_best.pt',
+            os.path.join(checkpoint_dir, 'attention_unet_best.pt'),
             build_attention_unet,
             fallback_fn=build_caranet,
             device=device,
@@ -49,9 +50,9 @@ class AdaptivePipeline(nn.Module):
         self.small_zoom_patch = 64
         
         self.expert_medium = self._load_expert(
-            'checkpoints/unetplusplus_best.pt',
+            os.path.join(checkpoint_dir, 'unetplusplus_best.pt'),
             build_unetplusplus,
-            'checkpoints/unet3plus_best.pt',
+            os.path.join(checkpoint_dir, 'unet3plus_best.pt'),
             build_unet3plus,
             fallback_fn=build_unetplusplus,
             device=device,

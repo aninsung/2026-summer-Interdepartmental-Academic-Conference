@@ -77,6 +77,9 @@ def routed_arrow(ax, points, color, label, label_xy):
 
 
 def main() -> None:
+    from plot_paper_figures import main as draw_paper_figures
+    draw_paper_figures()
+    return
     fig = plt.figure(figsize=(22.4, 14.4), dpi=150, facecolor="white")
     ax = fig.add_axes([0.012, 0.012, 0.976, 0.976])
     ax.set_xlim(0, 224)

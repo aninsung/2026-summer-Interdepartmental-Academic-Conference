@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 from src.data.brats2020_dataset import BraTS2020Dataset
 from src.data.patient_split import list_patient_ids
-from src.envs.mask_refinement_env import MaskRefinementEnv
+from src.envs.vanilla_refine_env import VanillaRefineEnv
 from src.models.attention_unet import build_attention_unet
 from src.models.segresnet import build_segresnet
 from src.models.unet import build_unet
@@ -60,9 +60,9 @@ def predict_prob(model, images: np.ndarray, device: torch.device, batch_size: in
 
 
 def rl_mask(agent, image, rough, gt, prob, max_steps: int) -> np.ndarray:
-    env = MaskRefinementEnv(
-        images=image[None], gt_masks=gt[None], rough_masks=rough[None], uncertainty_maps=prob[None],
-        max_steps=max_steps, model_type="unetplusplus", refinement_mode="medium",
+    env = VanillaRefineEnv(
+        images=image[None], gt_masks=gt[None], rough_masks=rough[None], probability_maps=prob[None],
+        max_steps=max_steps,
     )
     obs, _ = env.reset(seed=0)
     for _ in range(max_steps):

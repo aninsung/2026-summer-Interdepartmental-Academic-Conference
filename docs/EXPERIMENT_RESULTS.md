@@ -1,6 +1,6 @@
 # RL-Refiner 실험 결과
 
-> **논문:** [paper_draft_ko.md](paper_draft_ko.md). 환자 풀 **1251명** 중 개발 400명 제외, 평가 **851명** 환자 평균. Stage 3는 **경계 띠 PPO** (`checkpoints/band_ppo.pt`). 고정 임계값 Stage 2 대비 DSC 0.8337→**0.8604** (짝 차이 +0.0267, 95% CI 0.0256–0.0278). 검증에서 고른 임계값 0.45/0.80/0.20의 Stage 2(0.8411) 대비 **+0.0193** (0.0184–0.0202). HD95 평균 4.888→4.609 px는 빈 마스크 제외가 방법마다 달라 짝비교가 아니다. 상세는 [§0.11](#011-확정-평가--파이프라인-전체-미사용-851명-2026-09-30)–[§0.13](#013-임계값-재선택-2026-09-30). 단일 백본+섹터 PPO 다섯 세트는 [§0.14](#014-단일-백본--단일-섹터-ppo-2026-09-30)이고, 48명 표본의 슬라이스 평균이라 851명 표와 집계가 다르다. 2026-08-20 표는 [history_2026-08-20.md](history_2026-08-20.md)다.
+> **논문:** [paper_draft_ko.md](paper_draft_ko.md). 환자 풀 **1251명** 중 개발 400명 제외, 평가 **851명** 환자 평균. Stage 3는 **경계 띠 PPO** (`checkpoints/band_ppo.pt`). 고정 임계값 Stage 2 대비 DSC 0.8337→**0.8604** (짝 차이 +0.0267, 95% CI 0.0256–0.0278). 검증에서 고른 임계값 0.45/0.80/0.20의 Stage 2(0.8411) 대비 **+0.0193** (0.0184–0.0202). HD95 평균 4.888→4.609 px는 빈 마스크 제외가 방법마다 달라 짝비교가 아니다. 상세는 [§0.11](#011-확정-평가--파이프라인-전체-미사용-851명-2026-09-30)–[§0.13](#013-임계값-재선택-2026-09-30). 2026-10-07 재학습·프로토콜·U-Net 바닐라 PPO는 [§0.15](#015-2026-10-07-재학습)다. 단일 백본+섹터 PPO 다섯 세트는 [§0.14](#014-단일-백본--단일-섹터-ppo-2026-09-30)이고, 48명 표본의 슬라이스 평균이라 851명 표와 집계가 다르다. 2026-08-20 표는 [history_2026-08-20.md](history_2026-08-20.md)다.
 > **`ppo_v4`**(DSC 0.8345)는 그 이전 GT-free val 기록이고, **`ppo_v5`는 폐기**(0.7614)입니다. §0.1–0.4의 train 875 / val 188 분할은 그 기록의 설정이며 이번 400/851 분할과 다릅니다.
 
 > 아래 §1 이후의 08-20(210명) 수치는 과거 GT 게이트 포함 실험이며, 1251명 GT-free 결과와 직접 비교하지 마세요.
@@ -131,18 +131,6 @@ HD95는 128px 경계 거리이고, 예측과 정답 중 한쪽이 비면 그 슬
 
 `run_pipeline.py --refinement_profile band_ppo --max_train_patients 1251 --split_role all --slice_selection tumor` 결과(`results/band_ppo_pipeline_1251`)는 개발 400명을 포함한 슬라이스 평균이다. DSC 0.8503→0.8758. HD95는 한쪽이 빈 슬라이스를 빼면 4.441→4.085 px (Small 6.348→5.904, Medium 3.467→3.109, Large 2.929→2.730). 논문 확정 표는 위 851명 환자 평균이다.
 
-### 0.12 같은 851명의 KAIST·NVAUTO (2026-09-30)
-
-2차원 각색 베이스라인이다. 임계값은 검증 60명의 슬라이스 평균 DSC로만 골랐고, 851명 점수로 고르지 않았다. KAIST 0.40, NVAUTO 0.30. 집계는 §0.11과 같은 환자 평균이다. 파일은 `baselines/results/kaist_heldout.json`, `baselines/results/nvauto_heldout.json`, `results/three_by_size.json`. 재현은 `python baselines/eval_heldout.py`와 `python scripts/eval/eval_three_by_size.py`.
-
-| 방법 | 전체 DSC | 300px 미만 | 300–700px | 700px 이상 | 전체 HD95 | Precision | Recall |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| TRIO | **0.8604** | **0.7933** | 0.8952 | 0.9170 | 4.608 | **0.8918** | 0.8600 |
-| NVAUTO | 0.8576 | 0.7821 | **0.8980** | **0.9198** | **4.184** | 0.8836 | 0.8633 |
-| KAIST | 0.8463 | 0.7664 | 0.8886 | 0.9160 | 4.224 | 0.8635 | **0.8642** |
-
-DSC 환자 평균의 주변 구간은 TRIO 0.8535–0.8672, NVAUTO 0.8510–0.8642, KAIST 0.8398–0.8529이다. TRIO와 NVAUTO의 구간은 겹친다. 방법 사이 짝 차이는 계산하지 않았다. NVAUTO 임계값 0.30은 탐색 하한이다. 반전 테스트 시점 증강은 TRIO에만 있다. 정의된 슬라이스만의 HD95 평균은 NVAUTO와 KAIST가 TRIO보다 낮다. 정성 그림은 `results/method_comparison_current_3x6.png`다. 08-20의 DSC 0.90대 표는 [history_2026-08-20.md](history_2026-08-20.md)에 있고 이 표와 섞지 않는다.
-
 ### 0.13 임계값 재선택 (2026-09-30)
 
 검증 60명에서 분류기 라우팅 기준 크기별 임계값 세 개를 환자 평균 DSC로 함께 골랐다. 탐색은 0.10–0.90, 0.05 간격이고 연결요소 기준은 그대로다. 고른 값은 소형 0.45, 중형 0.80, 대형 0.20이다. 검증 DSC는 0.8588에서 0.8650이 되었다. 그 임계값을 851명에 한 번 적용했다. PPO 가중치는 고정 임계값 마스크로 학습한 것을 그대로 썼다. 파일은 `results/stage2_retuned.json`. 재현은 `python scripts/eval/evaluate_stage2_retuned.py`.
@@ -155,6 +143,36 @@ DSC 환자 평균의 주변 구간은 TRIO 0.8535–0.8672, NVAUTO 0.8510–0.86
 | 700px 이상 | 0.8981 | 0.9014 | **0.9169** | +0.0156 (0.0143–0.0169) |
 
 재선택만의 짝 차이는 +0.0074 (0.0066–0.0082)로, 고정 임계값 대비 +0.0267의 약 28%이다. 전체 정밀도/재현율은 고정 Stage 2 0.883/0.820, 재선택 Stage 2 0.863/0.849, PPO 0.892/0.860이다. 재선택 마스크에서 PPO를 시작해도 전체 DSC는 0.8604이다.
+
+### 0.15 2026-10-07 재학습
+
+9월 30일 잠금 표(0.8337→0.8604)와 다른 가중치다. 환자 분할은 `checkpoints/patient_split.json` 그대로 두고 시드 42, 7, 123만 바꿨다. 집계는 종양 슬라이스 DSC의 환자 평균이다. 파일은 `results/protocol_gaps/three_seeds.json`이다.
+
+| 시드 | Stage 2 | 경계 띠 PPO | 대형 전문가 전 슬라이스 |
+|---|---:|---:|---:|
+| 42 | 0.8339 | 0.8597 | 0.8503 |
+| 7 | 0.8370 | 0.8620 | 0.8540 |
+| 123 | 0.8352 | 0.8609 | 0.8500 |
+
+PPO DSC 평균은 0.8609이고 범위는 0.0023(0.8597–0.8620)이다. 가중치는 `checkpoints/seeds/{42,7,123}/`이다. 시드 123 학습이 끝난 뒤 작업 디렉터리의 `checkpoints/band_ppo.pt`는 시드 123 배우다.
+
+빈 슬라이스를 포함한 851×155=131,905장. 종양 비율 0.2% 미만이면서 예측이 있는 비율, z를 쌓은 3D Dice 환자 평균, 양쪽 마스크가 있는 슬라이스의 HD95 환자 평균이다. mm는 픽셀×1.9이다. HD95는 양쪽이 비면 0으로 넣지 않고, 한쪽만 비면 정의하지 않는다. Stage 2와 PPO의 HD95는 둘 다 마스크가 있는 슬라이스 집합이다. 대형 행의 HD95는 Stage 2·PPO·대형이 모두 있는 슬라이스 집합이라 위 두 행과 분모가 다르다. 원본은 `results/protocol_gaps/seed_{42,7,123}.json`이다.
+
+| 시드 | 방법 | 빈 슬라이스 거짓 양성 | 3D Dice | 공통 HD95 (px) | 공통 HD95 (mm) |
+|---|---|---:|---:|---:|---:|
+| 42 | Stage 2 | 0.567 | 0.779 | 6.072 | 11.536 |
+| 42 | 경계 띠 PPO | 0.521 | 0.813 | 5.649 | 10.734 |
+| 42 | 대형 전 슬라이스 | 0.930 | 0.799 | 5.569 | 10.581 |
+| 7 | Stage 2 | 0.532 | 0.786 | 5.779 | 10.979 |
+| 7 | 경계 띠 PPO | 0.497 | 0.811 | 5.448 | 10.351 |
+| 7 | 대형 전 슬라이스 | 0.821 | 0.796 | 5.491 | 10.433 |
+| 123 | Stage 2 | 0.601 | 0.771 | 6.061 | 11.516 |
+| 123 | 경계 띠 PPO | 0.571 | 0.809 | 5.648 | 10.731 |
+| 123 | 대형 전 슬라이스 | 0.829 | 0.759 | 5.994 | 11.388 |
+
+같은 시드 42 가중치의 추론 ablation(`results/ablation_review/summary.json`)에서 5스텝 PPO는 0.8597, 1스텝 0.8460, 중형 지도학습 초기화 1스텝 0.8383, 대형 전문가에 경계 띠 PPO 0.8676, 정답 크기 라우팅 PPO 0.8698이다. 독립 703명에서 5스텝 PPO는 0.8579이다. 반경 0은 0.8427이고 스텝 3, 가드 해제, 띠 0.45–0.55, 띠 0.25–0.75는 0.8575–0.8601이다.
+
+단일 U-Net(`checkpoints/single_backbone/unet.pt`)을 같은 280명으로 학습하고 임계값 0.5, TTA 없이 851명 종양 슬라이스 50,010장에 적용하면 DSC 0.8156(95% CI 0.8067–0.8243), HD95 6.939 px이다. 전역 1픽셀 수축·유지·팽창 바닐라 PPO 15스텝(`ppo_unet_vanilla.zip`)은 DSC 0.8133(0.8046–0.8220), HD95 6.955 px이다. 환자 짝 차이는 −0.0023(95% CI −0.0029–−0.0017)이다. 정답 크기별 DSC는 소형 0.7215→0.7197(851명), 중형 0.8758→0.8736(757명), 대형 0.8973→0.8939(408명)이다. 파일은 `results/vanilla_unet_851.json`이다. 재현은 `python scripts/eval/evaluate_vanilla_unet.py`이다.
 
 ### 0.14 단일 백본 + 단일 섹터 PPO (2026-09-30)
 
@@ -296,106 +314,6 @@ PPO는 슬라이스 3분의 1 이상에서 DSC를 떨어뜨렸고, 보고된 최
 | `pipeline_sample_large_2.png` | 0.9520 | 0.9583 | +0.0063 |
 
 통합 그림: [`results/archive_2026-08-20/pipeline_sample_comparison.png`](../results/archive_2026-08-20/pipeline_sample_comparison.png). 원본 MRI는 `*_original.png`.
-
----
-
-## 2. 베이스라인 비교 (BraTS 2021 상위 입상 방법)
-
-같은 42명 val 환자, 같은 지표 구현으로 측정했습니다. 베이스라인은 2,373장, 이번 파이프라인은 2,434장이라 슬라이스 수가 완전히 같지는 않습니다. 구현은 `baselines/`에 있습니다.
-
-### 2.1 전체 비교
-
-| 방법 | DSC | HD95 (px) | Precision | Recall |
-|---|---:|---:|---:|---:|
-| TRIO Stage 2 (게이트 없음) | 0.8948 | 1.7336 | — | — |
-| **TRIO** Stage 3 (Monotonic DSC Gate, **GT 사용**) | **0.9031** | **1.6060** | — | — |
-| Extending nnU-Net (KAIST, 최종 테스트 1위) | 0.8923 | 1.9591 | 0.9215 | 0.8893 |
-| SegResNet + 중복 감소 (NVAUTO, 최종 2위) | 0.8971 | 1.9022 | 0.9077 | 0.9029 |
-
-**Stage 2(0.8948)는 KAIST(0.8923)를 넘고 NVAUTO(0.8971)에 근접합니다.** Stage 3(TRIO)는 더 높지만 GT 게이트 상한입니다.
-
-### 2.2 크기별 비교
-
-베이스라인은 GT 크기 구간(942 / 847 / 584)으로, 파이프라인은 분류기 라우팅 결과(897 / 1,152 / 385)로 집계했습니다.
-
-| 클래스 | 파이프라인 초기 → 최종 | KAIST | NVAUTO |
-|---|---|---:|---:|
-| Small | 0.8286 → **0.8429** | 0.8278 | 0.8377 |
-| Medium | 0.9264 → **0.9314** | 0.9165 | 0.9200 |
-| Large | 0.9546 → **0.9582** | **0.9614** | 0.9594 |
-
-HD95 (px):
-
-| 클래스 | KAIST | NVAUTO |
-|---|---:|---:|
-| Small | 3.8017 | **3.3599** |
-| Medium | **1.0619** | 1.2052 |
-| Large | **0.2881** | 0.5618 |
-
-Medium은 계속 앞섭니다. Small 최종 0.8429는 NVAUTO 0.8377을 넘습니다. **Large 격차는 −0.027에서 약 −0.003으로 줄었고**, HD95 0.29는 KAIST 0.29와 같습니다.
-
-### 2.3 임계값 스윕
-
-베이스라인만 0.5로 두고 파이프라인은 조정하면 불공정하므로 양쪽 모두 스윕했습니다.
-
-| 방법 | 최적 임계값 | 최적 DSC | 0.5에서의 DSC | 이득 |
-|---|---:|---:|---:|---:|
-| KAIST | 0.30 | 0.8932 | 0.8923 | +0.0009 |
-| NVAUTO | 0.40 | 0.8972 | 0.8971 | +0.0001 |
-
-두 베이스라인은 임계값에 거의 둔감합니다(전 구간 변동 0.001 내외). Small·Medium Expert는 0.5에서 0.8로 올릴 때 이득이 컸고, Large는 ED/TC 이후 과소분할이라 0.50을 유지합니다.
-
-### 2.4 각색에 대한 주의
-
-두 베이스라인은 원 논문의 재현이 아니라 **2D 각색**입니다. 3D 패치·4모달리티·5-fold 앙상블·BraTS 후처리를 모두 제외했으므로 대회 리더보드 점수(예: NVAUTO의 WT DSC 0.9265)와 직접 비교할 수 없습니다. 상세 차이표는 [baselines/README.md](../baselines/README.md)에 있습니다.
-
-### 2.5 산출 그림
-
-| 파일 | 내용 |
-|---|---|
-| `baselines/results/baseline_by_size.png` | 크기 구간별 DSC / HD95 막대그래프 |
-| `baselines/results/baseline_threshold_sweep.png` | 임계값별 DSC / Precision / Recall 곡선 |
-| `baselines/results/baseline_samples_median.png` | 중앙값 DSC 부근 정성 표본 |
-| `baselines/results/baseline_samples_worst.png` | 최악 사례 정성 표본 |
-
-정성 표본은 체리피킹을 피하려고 최고 사례가 아니라 **중앙값 부근**과 **최악**을 골랐습니다.
-
-### 2.6 같은 슬라이스 정성 비교 (TRIO / KAIST / NVAUTO)
-
-2026-08-20에 세 방법을 **같은 val 슬라이스**에서 그리는 3행×6열 그리드를 추가했습니다.
-
-| 항목 | 값 |
-|---|---|
-| 산출 파일 | `results/archive_2026-08-20/method_comparison_3x6.png` |
-| 스크립트 | `scripts/eval/plot_three_method_grid.py` |
-| 레이아웃 | 행: **TRIO**, KAIST, NVAUTO · 열: Small 1, Small 2, Medium 1, Medium 2, Large 1, Large 2 |
-| 제목 | `Representative slices near class-mean DSC  ·  dashed green = GT` |
-| TRIO 행 | 파이프라인 Stage 3 + Monotonic DSC 게이트 (임계값 0.80 / 0.80 / 0.50, CC 0 / 15 / 25) |
-| 선택 기준 | 클래스 평균 DSC에 가깝고, 세 방법 DSC를 같은 장에서 비교 |
-| 고정 인덱스 | **113, 2286, 1121, 2295, 95, 1480** |
-
-그림에 찍힌 슬라이스 DSC:
-
-| | Small 1 | Small 2 | Medium 1 | Medium 2 | Large 1 | Large 2 |
-|---|---:|---:|---:|---:|---:|---:|
-| TRIO | 0.840 | 0.849 | 0.930 | 0.931 | 0.959 | 0.957 |
-| KAIST | 0.825 | 0.835 | 0.915 | 0.923 | 0.962 | 0.960 |
-| NVAUTO | 0.839 | 0.850 | 0.914 | 0.923 | 0.956 | 0.958 |
-
-**정량 표와 그림의 베이스라인 가중치는 다릅니다.** 08-19 비교 표(DSC 0.8923 / 0.8971)는 `baselines/results/{kaist,nvauto}_metrics.json`(2,373장)입니다. 비교 그리드를 그릴 때 체크포인트가 없어서 같은 분할·20 epoch·seed 42로 **다시 학습**했고, 학습 중 val DSC는 KAIST **0.9021**, NVAUTO **0.8999**였습니다. 그림의 KAIST/NVAUTO 윤곽은 이 재학습 가중치입니다.
-
-```bash
-python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/archive_2026-08-20/method_comparison_3x6.png
-```
-
-베이스라인 가중치가 없으면 먼저:
-
-```bash
-python baselines/train_baseline.py --method kaist  --epochs 20 --batch_size 32 --seed 42 --no_deterministic
-python baselines/train_baseline.py --method nvauto --epochs 20 --batch_size 32 --seed 42 --no_deterministic
-```
-
-KAIST axial attention 역전파가 비결정적이라 재학습은 `--no_deterministic`을 썼습니다.
 
 ---
 
@@ -566,7 +484,7 @@ Large 에이전트 상세: 27m56s, eval 보상 120K **606.76** → 240K **639.43
 | 12 | 08-19 | 210명 **전수** 12,241장, Oracle 라우팅, Dual Gate | 0.8775 → 0.8880 | 1.8416 → 1.6843 px |
 | 13 | 08-19 | val 42명 hold-out 2,373장, 분류기 라우팅, 임계값 0.8/0.8/0.6 | 0.8672 → 0.8752 | 2.3365 → 2.2897 px |
 | **14 (현재 정량)** | **08-20** | **2.5D CaraNet, Large ED/TC, 임계값 0.8/0.8/0.5, val 2,434장** | **0.8948 → 0.9031** | **1.7336 → 1.6060 px** |
-| 15 | 08-20 | TRIO/KAIST/NVAUTO **같은 슬라이스** 3×6 그리드. 행 이름 TRIO, 제목 영어. 베이스라인 재학습(학습 중 val DSC 0.9021 / 0.8999) | 그림만 | — |
+| 15 | 08-20 | 같은 슬라이스 3×6 그리드. 행 이름 TRIO, 제목 영어 | 그림만 | — |
 
 **실험 12와 13은 직접 비교할 수 없습니다.** 프로토콜이 세 군데에서 바뀌었습니다.
 
@@ -600,15 +518,15 @@ Large 에이전트 상세: 27m56s, eval 보상 120K **606.76** → 240K **639.43
 | 재현성 | 시드 미고정 | seed 42 + 결정적 모드 기본 ON | 동일 |
 | 분류기 | scratch ResNet18 + Adam | ImageNet 사전학습 + AdamW + Cosine | 동일 |
 | 시각화 표본 | ΔDSC 최대 | — | **클래스 평균 Final DSC + Final > Initial** |
-| 방법 비교 그리드 | 없음 | — | **TRIO vs KAIST vs NVAUTO, 같은 슬라이스 3×6, 제목 영어** |
+| 방법 비교 그리드 | 없음 | — | **같은 슬라이스 3×6, 제목 영어** |
 
 ---
 
 ## 6. 해석
 
 1. **Stage 3 이득은 +0.83%p DSC, HD95 −0.13 px.** 게이트가 858장(35.3%)을 Stage 2로 되돌리므로 최종 DSC는 상한입니다.
-2. **Stage 2가 베이스라인과 경쟁한다.** 0.8948은 KAIST 0.8923을 넘고 NVAUTO 0.8971에 근접합니다. 공정 비교는 게이트 없는 Stage 2입니다.
-3. **Large 격차가 거의 닫혔다.** 최종 0.9582 vs KAIST 0.9614 / NVAUTO 0.9594. ED/TC 헤드와 임계값 0.50이 과소분할(이전 P 0.97 / R 0.93)을 균형으로 돌렸습니다.
+2. **게이트 없는 Stage 2 DSC는 0.8948이다.**
+3. **Large 최종 DSC는 0.9582이다.** ED/TC 헤드와 임계값 0.50이 과소분할(이전 P 0.97 / R 0.93)을 균형으로 돌렸습니다.
 4. **Small은 2.5D 이후 0.83까지 올랐지만 과소분할이 남습니다** (P 0.92 / R 0.80).
 5. **분류기가 라우팅 상한을 제한한다.** Val Acc 0.8512이므로 슬라이스 약 15%가 엉뚱한 Expert로 갑니다.
 6. **시각화 표본은 클래스 평균 Final DSC에 가깝고 실제로 개선된 슬라이스**입니다. 예전처럼 ΔDSC 최대 이상치를 고르지 않습니다.
@@ -638,7 +556,7 @@ python scripts/eval/sweep_threshold.py --split_role val --plot results/archive_2
 # 베이스라인
 python baselines/run_comparison.py --epochs 20 --batch_size 32 --sweep
 
-# TRIO / KAIST / NVAUTO 같은 슬라이스 그리드
+# 같은 슬라이스 그리드
 python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,1480 --out results/archive_2026-08-20/method_comparison_3x6.png
 ```
 
@@ -657,8 +575,5 @@ python scripts/eval/plot_three_method_grid.py --indices 113,2286,1121,2295,95,14
 | `results/archive_2026-08-20/pipeline_sample_comparison.png` | 6장 통합 시각화 |
 | `results/archive_2026-08-20/pipeline_sample_{small,medium,large}_{1,2}.png` | 클래스 평균에 가까운 개선 샘플 |
 | `results/archive_2026-08-20/pipeline_sample_*_original.png` | 해당 슬라이스 원본 MRI |
-| `results/archive_2026-08-20/method_comparison_3x6.png` | TRIO / KAIST / NVAUTO 같은 슬라이스 3×6 그리드 |
+| `results/archive_2026-08-20/method_comparison_3x6.png` | 같은 슬라이스 3×6 그리드 |
 | `results/archive_2026-08-20/threshold_sweep.png` | 임계값 스윕 곡선 |
-| `baselines/results/comparison.md` | 베이스라인 비교 표 |
-| `baselines/results/{kaist,nvauto}_metrics.json` | 구간별 지표 + 스윕 |
-| `baselines/results/baseline_*.png` | 베이스라인 정량·정성 그림 |

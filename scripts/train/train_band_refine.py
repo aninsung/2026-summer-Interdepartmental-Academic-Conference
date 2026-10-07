@@ -110,6 +110,7 @@ def main() -> None:
     parser.add_argument("--no_tta", action="store_true")
     parser.add_argument("--no_augment", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--pretrained", type=str, default="", help="이어서 지도학습할 가중치")
     parser.add_argument("--save_path", type=str, default="checkpoints/band_refine_medium.pt")
     args = parser.parse_args()
 
@@ -160,6 +161,10 @@ def main() -> None:
 
     sample_in = train_set[0]["image"].shape[0]
     model = build_band_refine(in_channels=sample_in, width=args.width).to(device)
+    if args.pretrained:
+        pack = torch.load(args.pretrained, map_location=device, weights_only=False)
+        model.load_state_dict(pack["model"])
+        log.info("지도학습 초기 가중치 로드: %s", args.pretrained)
     log.info("모델 파라미터: %.2fM | 입력 채널 %d",
              sum(p.numel() for p in model.parameters()) / 1e6, sample_in)
 

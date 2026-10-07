@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import argparse
 import subprocess
 import logging
@@ -20,7 +21,35 @@ def run_command(cmd, desc, wait=True):
     else:
         return subprocess.Popen(cmd)
 
+def wait_for_external_seed_train():
+    """오케스트레이터가 시드 123을 또 학습하지 않게, 밖에서 겹쳐 돌린 학습이 끝나길 기다린다."""
+    if os.environ.get("EXTERNAL_SEED_TRAIN") == "1":
+        return
+    if "--seed" not in sys.argv:
+        return
+    seed_arg = sys.argv[sys.argv.index("--seed") + 1]
+    if seed_arg != "123":
+        return
+    root = os.path.dirname(os.path.abspath(__file__))
+    gap = os.path.join(root, "results", "protocol_gaps")
+    lock = os.path.join(gap, "seed123_external.lock")
+    done = os.path.join(gap, "seed123_external.done")
+    fail = os.path.join(gap, "seed123_external.fail")
+    if not os.path.exists(lock):
+        return
+    log.info("시드 123 학습은 평가와 겹쳐 이미 실행 중이다. 끝날 때까지 대기한다.")
+    while not (os.path.exists(done) or os.path.exists(fail)):
+        time.sleep(5)
+    if os.path.exists(fail):
+        os.remove(fail)
+        os.remove(lock)
+        log.info("겹친 시드 123 학습이 실패해서 이 프로세스에서 다시 학습한다.")
+        return
+    sys.exit(0)
+
+
 def main():
+    wait_for_external_seed_train()
     parser = argparse.ArgumentParser(description="RL-Refiner Dynamic Routing 파이프라인 실행 스크립트")
     parser.add_argument("--skip_classifier", action="store_true")
     parser.add_argument("--skip_experts", action="store_true")
