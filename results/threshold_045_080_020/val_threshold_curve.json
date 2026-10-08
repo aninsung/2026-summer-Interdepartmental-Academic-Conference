@@ -1,0 +1,370 @@
+{
+  "grid": [
+    0.1,
+    0.15,
+    0.2,
+    0.25,
+    0.3,
+    0.35,
+    0.4,
+    0.45,
+    0.5,
+    0.55,
+    0.6,
+    0.65,
+    0.7,
+    0.75,
+    0.8,
+    0.85,
+    0.9
+  ],
+  "per_class_patient_mean": {
+    "small": {
+      "patient_mean_dsc": [
+        0.767096417976794,
+        0.7736109861694946,
+        0.7776623920789716,
+        0.7810209684779107,
+        0.7830570243727187,
+        0.784463012865317,
+        0.7853623539817159,
+        0.7857644215544543,
+        0.7858420682881555,
+        0.7853210593814192,
+        0.7844522498394085,
+        0.7827498596358043,
+        0.7803956876893088,
+        0.7782413790446935,
+        0.7751831105878417,
+        0.7708582932028285,
+        0.7647080714928992
+      ],
+      "n_slices": 1258,
+      "n_patients": 60,
+      "best_threshold": 0.5,
+      "best_dsc": 0.7858420682881555
+    },
+    "medium": {
+      "patient_mean_dsc": [
+        0.09743917658483764,
+        0.8231157923904435,
+        0.8496850180180088,
+        0.8627315893852502,
+        0.870841495538876,
+        0.8767473379624202,
+        0.8811821728688719,
+        0.8849921764479836,
+        0.8879111543293347,
+        0.8904665219237283,
+        0.8925870384536571,
+        0.8943968987487665,
+        0.895879477444246,
+        0.8963175310437512,
+        0.8953929012858745,
+        0.8927844943346925,
+        0.8865511324194442
+      ],
+      "n_slices": 1420,
+      "n_patients": 54,
+      "best_threshold": 0.75,
+      "best_dsc": 0.8963175310437512
+    },
+    "large": {
+      "patient_mean_dsc": [
+        0.9281090481030658,
+        0.9294939147322978,
+        0.9304275007293507,
+        0.9308060035504933,
+        0.930758027690457,
+        0.9289565664936769,
+        0.928400258142445,
+        0.9277116594008707,
+        0.9266744142506536,
+        0.9256805130158418,
+        0.9242744190457264,
+        0.9216847102548947,
+        0.918196266329476,
+        0.9156878581274105,
+        0.9120922493672494,
+        0.906158334634279,
+        0.8951466480912236
+      ],
+      "n_slices": 864,
+      "n_patients": 36,
+      "best_threshold": 0.25,
+      "best_dsc": 0.9308060035504933
+    }
+  },
+  "joint_best": [
+    0.45,
+    0.75,
+    0.25
+  ],
+  "joint_best_dsc": 0.8620046842653405,
+  "second_best_dsc": 0.8619737564279448,
+  "fixed": [
+    0.8,
+    0.8,
+    0.5
+  ],
+  "fixed_dsc": 0.856322523550173,
+  "neighbors": [
+    {
+      "varied_class": "small",
+      "threshold": 0.1,
+      "patient_mean_dsc": 0.8554024742999824
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.15,
+      "patient_mean_dsc": 0.8578717757622398
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.2,
+      "patient_mean_dsc": 0.8594161360077809
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.25,
+      "patient_mean_dsc": 0.8606243057243523
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.3,
+      "patient_mean_dsc": 0.8612643169242812
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.35,
+      "patient_mean_dsc": 0.8616056620711562
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.4,
+      "patient_mean_dsc": 0.8619195665789646
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.45,
+      "patient_mean_dsc": 0.8620046842653405
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.5,
+      "patient_mean_dsc": 0.8619367649721165
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.55,
+      "patient_mean_dsc": 0.8616537490396152
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.6,
+      "patient_mean_dsc": 0.8611913890706056
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.65,
+      "patient_mean_dsc": 0.8605515539627472
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.7,
+      "patient_mean_dsc": 0.8595775633733813
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.75,
+      "patient_mean_dsc": 0.8586763662723043
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.8,
+      "patient_mean_dsc": 0.8574639623124124
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.85,
+      "patient_mean_dsc": 0.8558246166236707
+    },
+    {
+      "varied_class": "small",
+      "threshold": 0.9,
+      "patient_mean_dsc": 0.853413193944809
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.1,
+      "patient_mean_dsc": 0.5580449005059481
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.15,
+      "patient_mean_dsc": 0.8354133873332213
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.2,
+      "patient_mean_dsc": 0.8451078813169166
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.25,
+      "patient_mean_dsc": 0.8498601661604339
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.3,
+      "patient_mean_dsc": 0.8528260194572321
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.35,
+      "patient_mean_dsc": 0.8549861514465825
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.4,
+      "patient_mean_dsc": 0.8566218872746015
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.45,
+      "patient_mean_dsc": 0.8579354867530032
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.5,
+      "patient_mean_dsc": 0.8589851518780297
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.55,
+      "patient_mean_dsc": 0.8599529879040217
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.6,
+      "patient_mean_dsc": 0.860753812878963
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.65,
+      "patient_mean_dsc": 0.8613971741711789
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.7,
+      "patient_mean_dsc": 0.8618630714796693
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.75,
+      "patient_mean_dsc": 0.8620046842653405
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.8,
+      "patient_mean_dsc": 0.8617493898438163
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.85,
+      "patient_mean_dsc": 0.8608228490200456
+    },
+    {
+      "varied_class": "medium",
+      "threshold": 0.9,
+      "patient_mean_dsc": 0.8583585981763585
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.1,
+      "patient_mean_dsc": 0.8615010271955861
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.15,
+      "patient_mean_dsc": 0.8617764745936988
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.2,
+      "patient_mean_dsc": 0.8619358608811749
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.25,
+      "patient_mean_dsc": 0.8620046842653405
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.3,
+      "patient_mean_dsc": 0.8619737564279448
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.35,
+      "patient_mean_dsc": 0.8616495916946595
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.4,
+      "patient_mean_dsc": 0.8615141210784676
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.45,
+      "patient_mean_dsc": 0.8613655480499057
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.5,
+      "patient_mean_dsc": 0.8611185399246254
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.55,
+      "patient_mean_dsc": 0.8608788178738128
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.6,
+      "patient_mean_dsc": 0.8605678945786063
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.65,
+      "patient_mean_dsc": 0.8600293878369146
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.7,
+      "patient_mean_dsc": 0.8593254136027209
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.75,
+      "patient_mean_dsc": 0.8587394478373432
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.8,
+      "patient_mean_dsc": 0.8579349984265853
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.85,
+      "patient_mean_dsc": 0.8565738343921988
+    },
+    {
+      "varied_class": "large",
+      "threshold": 0.9,
+      "patient_mean_dsc": 0.8539490468852998
+    }
+  ],
+  "n_slices": 3542,
+  "n_patients": 60
+}

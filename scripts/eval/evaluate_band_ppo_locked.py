@@ -137,7 +137,12 @@ def main() -> None:
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", type=str, default="results/band_ppo_locked.json")
+    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50")
     args = parser.parse_args()
+    thresholds = [float(t) for t in args.stage2_thresholds.split(",")]
+    if len(thresholds) != 3:
+        raise SystemExit("--stage2_thresholds 는 소형,중형,대형 3개 값이어야 합니다.")
+    log.info("Stage 2 임계값 %s", thresholds)
 
     if not os.path.exists("checkpoints/shape_classifier_best.pt"):
         raise SystemExit("분류기 가중치가 없습니다: checkpoints/shape_classifier_best.pt")
@@ -178,7 +183,7 @@ def main() -> None:
         meta = []
         for offset, index in enumerate(range(start, stop)):
             cls = int(route_np[offset])
-            mask = stage2_mask(prob_np[offset], cls, THRESHOLDS, CC_SIZES)
+            mask = stage2_mask(prob_np[offset], cls, thresholds, CC_SIZES)
             masks.append((mask > 0.5).astype(np.float32))
             meta.append((index, cls))
         center = torch.from_numpy(np.ascontiguousarray(images[start:stop])).to(device)
@@ -214,6 +219,7 @@ def main() -> None:
     summary["development_excluded"] = 400
     summary["routing"] = "shape_classifier"
     summary["checkpoint"] = args.checkpoint
+    summary["stage2_thresholds"] = thresholds
     summary["aggregation"] = "equal-weight patient means of 2D tumor-slice metrics; HD95 in resized pixels"
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:

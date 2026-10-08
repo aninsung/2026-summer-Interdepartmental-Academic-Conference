@@ -107,6 +107,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--width", type=int, default=32)
+    parser.add_argument("--stage2_thresholds", type=str, default="0.80,0.80,0.50")
     parser.add_argument("--no_tta", action="store_true")
     parser.add_argument("--no_augment", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
@@ -140,10 +141,18 @@ def main() -> None:
     pipeline = AdaptivePipeline(device, in_channels=in_ch, strict_checkpoints=True)
     pipeline.eval()
 
+    thresholds = [float(t) for t in args.stage2_thresholds.split(",")]
+    if len(thresholds) != 3:
+        raise SystemExit("--stage2_thresholds 는 소형,중형,대형 3개 값이어야 합니다.")
+    log.info("Stage 2 임계값 %s", thresholds)
     log.info("Stage 2 확률맵 계산 (train)")
-    train_entries = build_stage2_entries(train_ds, pipeline, device, classes, use_tta=not args.no_tta)
+    train_entries = build_stage2_entries(
+        train_ds, pipeline, device, classes, thresholds=thresholds, use_tta=not args.no_tta,
+    )
     log.info("Stage 2 확률맵 계산 (val)")
-    val_entries = build_stage2_entries(val_ds, pipeline, device, classes, use_tta=not args.no_tta)
+    val_entries = build_stage2_entries(
+        val_ds, pipeline, device, classes, thresholds=thresholds, use_tta=not args.no_tta,
+    )
     del pipeline
     torch.cuda.empty_cache()
     if not train_entries or not val_entries:

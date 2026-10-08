@@ -2,7 +2,14 @@
 
 \usepackage{graphicx}
 \usepackage{booktabs}
+\setlength{\arrayrulewidth}{0.8pt}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\intextsep}{6pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{0pt}
 \usepackage{amsmath}
+\usepackage{amssymb}
 \usepackage{url}
 
 \graphicspath{{../results/}}
@@ -21,9 +28,9 @@ Department of Artificial Intelligence, Gachon University, Seongnam, Korea}
 \maketitle
 
 \begin{abstract}
-Whole-tumor regions on brain MRI vary in cross-sectional size and boundary appearance, so a single segmentation model is a poor fit for every scale. We classify tumor size on $128\times128$ axial slices from T1ce and FLAIR, build an initial mask with a size-specific expert, and then let one class-shared PPO turn pixels on or off inside a fixed band. Slices below 300 pixels use a 2.5D CaraNet, slices from 300 up to 700 use UNet++, and slices of 700 pixels or more use a SegResNet that predicts edema and tumor core separately. A single refinement policy edits pixels whose expert probability lies in $[0.35,0.65]$ or that lie within $\pm2$ pixels of the mask boundary. Ground truth enters only the training reward, not the inference observation. A FLAIR relative-intensity constraint is applied only to the action at the last step.
+Whole-tumor regions on brain MRI vary in cross-sectional size and boundary appearance, so a single segmentation model is a poor fit for every scale. We classify tumor size on $128\times128$ axial slices from T1ce and FLAIR, build an initial mask with a size-specific expert, and then let one class-shared PPO turn pixels on or off inside a fixed band. Small slices use a 2.5D CaraNet, medium slices use UNet++, and large slices use a SegResNet that predicts edema and tumor core separately. A single refinement policy edits pixels whose expert probability lies in $[0.35,0.65]$ or that lie within $\pm2$ pixels of the mask boundary. Ground truth enters only the training reward, not the inference observation. A FLAIR relative-intensity constraint is applied only to the action at the last step.
 
-We evaluate on 50{,}010 tumor slices from 851 of the 1{,}251 BraTS 2021 patients, after holding out a development set of 400 (280 train, 60 validation, 60 method selection). The metric is the patient mean of slice Dice similarity coefficients (DSC). Against a Stage~2 mask whose classifier routes each slice to an expert and whose thresholds are fixed at 0.80/0.80/0.50, DSC rises from 0.8337 to 0.8604 (paired patient difference $+0.0267$, 95\% CI $0.0256$--$0.0278$). The gain remains $+0.0193$ (95\% CI $0.0184$--$0.0202$) against a Stage~2 variant whose per-size thresholds were reselected on the 60 validation patients (DSC 0.8411). The change from 0.8337 to 0.8604 uses weights locked on 2026-09-30. Retraining the same split on 2026-10-07 at seeds 42, 7, and 123 gives boundary-band PPO patient-mean DSC of 0.8597, 0.8620, and 0.8609 (range 0.0023). At seed 42 the empty-slice false-positive rate is 0.521, Dice after stacking slices into a volume is 0.813, and the patient-mean HD95 on slices where both masks are nonempty is 10.73\,mm. A single U-Net scores 0.8156; attaching a global shrink/keep/expand vanilla PPO scores 0.8133. These numbers are not BraTS 3D leaderboard scores. Code and experiment records are available at \url{https://github.com/aninsung/2026-summer-Interdepartmental-Academic-Conference}.
+We evaluate on 50{,}010 tumor slices from 851 of the 1{,}251 BraTS 2021 patients, after holding out a development set of 400 (280 train, 60 validation, 60 method selection). The metric is the patient mean of slice Dice similarity coefficients (DSC). Against a Stage~2 mask whose classifier routes each slice to an expert and whose thresholds are 0.45/0.80/0.20, DSC rises from 0.8419 to 0.8595 (paired patient difference $+0.0176$, 95\% CI $0.0166$--$0.0185$). This run, dated 2026-10-08, built the Stage~2 masks at those thresholds and trained the boundary-band PPO on them. Retraining the same split on 2026-10-07 at seeds 42, 7, and 123 gives boundary-band PPO patient-mean DSC of 0.8597, 0.8620, and 0.8609 (range 0.0023). At seed 42 the empty-slice false-positive rate is 0.521, Dice after stacking slices into a volume is 0.813, and the patient-mean HD95 on slices where both masks are nonempty is 10.73\,mm. A single U-Net scores 0.8156; attaching a global shrink/keep/expand vanilla PPO scores 0.8133. These numbers are not BraTS 3D leaderboard scores. Code and experiment records are available at \url{https://github.com/aninsung/2026-summer-Interdepartmental-Academic-Conference}.
 
 \keywords{Brain tumor segmentation \and Magnetic resonance imaging \and Reinforcement learning \and PPO \and Dynamic routing \and Boundary refinement}
 \end{abstract}
@@ -46,13 +53,13 @@ The band network trained by supervision on medium slices only is the initial wei
 U-Net uses skip connections so that encoder localization and decoder semantics are available together, and it is the base architecture for medical image segmentation~\cite{ronneberger2015}. We place three models from this family on different size ranges.
 
 \subsection{CaraNet}
-CaraNet is a medical segmentation network designed to find very small objects~\cite{lou2023}. A context module sits on the encoder features, and a block that combines axial attention and reverse attention shifts attention to the outside of the region already found, where the boundary is easy to miss. Supervision is applied to outputs at several stages. We use it as the small expert, for areas below 300 pixels.
+CaraNet is a medical segmentation network designed to find very small objects~\cite{lou2023}. A context module sits on the encoder features, and a block that combines axial attention and reverse attention shifts attention to the outside of the region already found, where the boundary is easy to miss. Supervision is applied to outputs at several stages. We use it as the small expert.
 
 \subsection{SegResNet}
-SegResNet is an encoder--decoder that inserts ResNet residual blocks~\cite{myronenko2018}. Each block applies normalization, ReLU, and convolution twice and then adds the input. The original model segments 3D brain-tumor MRI and attaches a reconstruction branch from the encoder output as a regularizer. We use it as the large expert, for areas of 700 pixels or more, and merge separate edema and tumor-core predictions into a whole-tumor probability.
+SegResNet is an encoder--decoder that inserts ResNet residual blocks~\cite{myronenko2018}. Each block applies normalization, ReLU, and convolution twice and then adds the input. The original model segments 3D brain-tumor MRI and attaches a reconstruction branch from the encoder output as a regularizer. We use it as the large expert, and merge separate edema and tumor-core predictions into a whole-tumor probability.
 
 \subsection{UNet++}
-UNet++ connects encoder and decoder with nested dense skip connections~\cite{zhou2019}. Features at the same resolution pass through intermediate nodes, which reduces the semantic gap between encoder and decoder features and improves boundary accuracy. Deep supervision can be applied to outputs of several depths. We use it as the medium expert, for areas from 300 up to 700 pixels.
+UNet++ connects encoder and decoder with nested dense skip connections~\cite{zhou2019}. Features at the same resolution pass through intermediate nodes, which reduces the semantic gap between encoder and decoder features and improves boundary accuracy. Deep supervision can be applied to outputs of several depths. We use it as the medium expert.
 
 \subsection{PPO}
 Proximal policy optimization (PPO) is a policy-gradient reinforcement-learning algorithm~\cite{schulman2017}. Sampling, in which the agent observes a state, chooses an action, and receives a reward, alternates with training, in which the collected trajectories yield a loss that updates the policy network. Clipping the probability ratio between the new and old policies limits the size of one update and stabilizes learning. Reusing the same trajectories for several epochs spends samples more efficiently than a plain policy gradient. Here one slice is the environment, and the action at each band pixel is off, keep, or on.
@@ -64,7 +71,7 @@ In medical imaging, multi-agent iterative refinement of 3D boundaries~\cite{liao
 
 Figure~\ref{fig:pipeline} is the full pipeline. The classifier chooses the slice size, a size-specific expert builds the initial mask, and the boundary-band PPO edits only pixels inside the band.
 
-\begin{figure}[t]
+\begin{figure}[!ht]
 \centering
 \includegraphics[width=\textwidth]{pipeline_overview.jpg}
 \caption{Pipeline. Stage~1 classifies size, Stage~2 runs a size-specific expert, Stage~3 applies the boundary-band PPO, and Stage~4 evaluates.}
@@ -74,35 +81,38 @@ Figure~\ref{fig:pipeline} is the full pipeline. The classifier chooses the slice
 \subsection{Data and Split}
 The inputs are T1ce and FLAIR from BraTS 2021~\cite{baid2021}. Slices are resized to $128\times128$, z-score normalized inside the brain, clipped to the 1st--99th percentiles, and scaled to $[0,1]$. Only slices whose tumor-pixel fraction is at least 0.2\% enter training and evaluation. Whole tumor is every pixel whose segmentation label is nonzero. Size is defined by the ground-truth area: below 300 pixels is small, from 300 up to 700 is medium, and 700 or more is large.
 
-Splits are by patient, so adjacent slices of the same patient do not fall into both training and validation. Of 1{,}251 patients, a development set of 400 drawn with seed 42 is split into 280 train, 60 validation, and 60 method selection. The remaining 851 patients (50{,}010 tumor slices) were not used to train weights or to select the method in this study. The fixed Stage~2 thresholds 0.80/0.80/0.50 and the connected-component sizes do come from an earlier protocol (a 210-patient pool drawn with the same seed), and 148 patients from that pool are among these 851. The band design was chosen on the current method-selection set of 60. Table~\ref{tab:split} lists these roles.
+Splits are by patient, so adjacent slices of the same patient do not fall into both training and validation. Of 1{,}251 patients, a development set of 400 drawn with seed 42 is split into 280 train, 60 validation, and 60 method selection. The remaining 851 patients (50{,}010 tumor slices) were not used to train weights or to select the method in this study. The binarization thresholds 0.45/0.80/0.20 were chosen on the 60 validation patients of this split. The connected-component minimum sizes, 0, 15, and 25 pixels, are kept from the earlier protocol. The band design was chosen on the current method-selection set of 60. Table~\ref{tab:split} lists these roles.
 
-\begin{table}[t]
+\begin{table}[!ht]
 \caption{Patient split.}
 \label{tab:split}
 \centering
-\begin{tabular}{lrl}
-\toprule
+\begin{tabular}{|l|r|l|}
+\hline
 Role & Patients & Use \\
-\midrule
+\hline
 Train & 280 & Classifier, experts, boundary-band PPO \\
+\hline
 Validation & 60 & Checkpoint selection; baseline thresholds \\
+\hline
 Method selection & 60 & Policy adoption. Not the reported performance \\
+\hline
 Locked evaluation & 851 & Patient mean from a single application \\
-\bottomrule
+\hline
 \end{tabular}
 \end{table}
 
 \subsection{Routing and Experts}
-The classifier is a ResNet-18 initialized from ImageNet. Its input is 2.5D, formed by stacking neighboring slices, and the first convolution is adapted by summing the RGB kernel along the channel axis. Slices within $\pm80$ pixels of an area boundary are dropped from classifier training to reduce label noise at the cut points. The loss is cross-entropy with label smoothing 0.05. Validation accuracy for this run is 0.8151. On the 851-patient slices, the classifier matches the ground-truth size on a fraction 0.801 of slices.
+The classifier is a ResNet-18 initialized from ImageNet. Its input is 2.5D, formed by stacking neighboring slices, and the first convolution is adapted by summing the RGB kernel along the channel axis. Slices within $\pm80$ pixels of an area boundary are dropped from classifier training to reduce label noise at the cut points. The loss is cross-entropy with label smoothing 0.05. Validation accuracy for this run is 0.8216. On the 851-patient slices, the classifier matches the ground-truth size on a fraction 0.8353 of slices.
 
-At inference the classifier selects the expert. Below 300 pixels the expert is a 2.5D CaraNet: six input channels, oversampling of very small ground-truth masks, and a second pass after cropping to $64\times64$. From 300 up to 700 pixels the expert is a UNet++ on the two channels of the center slice. At 700 pixels or more, SegResNet predicts edema and tumor core separately and merges them as $1-(1-p_{\mathrm{ED}})(1-p_{\mathrm{TC}})$. The large expert is trained on all sizes and, at inference, is used only on slices classified as large.
+At inference the classifier selects the expert. Small slices use a 2.5D CaraNet: six input channels, oversampling of very small ground-truth masks, and a second pass after cropping to $64\times64$. Medium slices use a UNet++ on the two channels of the center slice. Large slices use SegResNet, which predicts edema and tumor core separately and merges them as $1-(1-p_{\mathrm{ED}})(1-p_{\mathrm{TC}})$. The large expert is trained on all sizes and, at inference, is used only on slices classified as large.
 
-Probabilities are the mean of the original and of horizontal and vertical flips. Binarization thresholds are 0.80, 0.80, and 0.50 for small, medium, and large, and the minimum connected-component sizes are 0, 15, and 25 pixels. These thresholds were kept from the earlier protocol and were not reselected on the current development validation; the control that reselects them on the 60 validation patients is Section~\ref{sec:retune}. Experts train for 20 epochs, batch size 64, Adam with learning rate $3\times10^{-4}$, a cosine schedule, and mixed precision. The loss is the sum of binary cross-entropy and Dice. On this split the small CaraNet has validation DSC 0.8159.
+Probabilities are the mean of the original and of horizontal and vertical flips. Binarization thresholds are 0.45, 0.80, and 0.20 for small, medium, and large, and the minimum connected-component sizes are 0, 15, and 25 pixels. Section~\ref{sec:locked} records the validation search that places this operating point on the plateau of the joint patient-mean DSC. Stage~2 masks and the 851-patient evaluation use these values. Experts train for 20 epochs, batch size 64, Adam with learning rate $3\times10^{-4}$, a cosine schedule, and mixed precision. The loss is the sum of binary cross-entropy and Dice. On this split the small CaraNet has validation DSC 0.8177.
 
-Expert selection during training differs from inference. Policy training and checkpoint selection route by ground-truth area. On 19.9\% of the 851 evaluation slices, the policy refines a mask from an expert other than the one that was trained for that ground-truth size.
+Expert selection during training differs from inference. Policy training and checkpoint selection route by ground-truth area. On 16.5\% of the 851 evaluation slices, the policy refines a mask from an expert other than the one that was trained for that ground-truth size.
 
 \subsection{Boundary-Band PPO}
-\begin{figure}[t]
+\begin{figure}[!ht]
 \centering
 \includegraphics[width=\textwidth]{fig2_ppo_internal_route.jpg}
 \caption{Internal route of the boundary-band PPO. The upper path is five-step argmax inference. The lower path is training: reward, GAE--PPO loss, and the AdamW update of the action and value heads. Locked numbers are in Table~\ref{tab:locked}.}
@@ -116,7 +126,7 @@ The FLAIR constraint applies only to the last step. Relative intensity is comput
 
 The reward uses ground truth only during training. A flipped pixel scores $+1$ if it matches the ground truth and $-1$ otherwise. When both masks are nonempty so that HD95 can be computed, the HD95 decrease multiplied by 0.25 is added at every flipped pixel. The HD95 term therefore scales with the number of flips. Generalized advantage estimation (GAE) is computed on band pixels only. The PPO clip is 0.1, the discount is 0.9, GAE $\lambda$ is 0.95, the entropy coefficient is 0.001, and the value coefficient is 0.5. The optimizer is AdamW, with action learning rate $1\times10^{-5}$ and value learning rate $1\times10^{-4}$. Training runs for 6 epochs, with 2 PPO epochs and batch size 16. The three size classes are mixed in one batch.
 
-The saved epoch is the one whose macro DSC under ground-truth-area routing is at least that of Stage~2 and whose macro HD95 is the lowest. The saved model is epoch 5, with validation macro DSC 0.8972 and HD95 3.558. Stage~2 on the same validation set has DSC 0.8741 and HD95 3.838.
+The saved epoch is the one whose macro DSC under ground-truth-area routing is at least that of Stage~2 and whose macro HD95 is the lowest. The saved checkpoint has validation macro DSC 0.8936 and HD95 3.608. Stage~2 on the same validation set has DSC 0.8789 and HD95 3.768.
 
 Figure~\ref{fig:ppo-route} is the internal route. Inference takes the four-channel observation, defines the edit band, applies the FLAIR guard only at the last step, and updates the mask for five steps by argmax. Training uses ground truth only in the reward. A batch of 16 runs the five-step route, and GAE--PPO updates the action and value heads.
 
@@ -125,34 +135,37 @@ The primary metric is the patient mean of slice DSC. Slices within a patient are
 
 HD95 is the 95\% surface distance between the two contours on the same $128\times128$ grid, in pixels, not millimetres. If either the prediction or the ground truth is empty, that slice is dropped from the HD95 mean, and the dropped slices can differ between methods. Equal patient counts therefore do not make this a paired comparison on the same slice set, and we do not use it as a claim. HD95 values in the tables are descriptive means under this definition.
 
-Size rows are not patient cohorts. Each row pools slices whose ground-truth area falls in that range and then averages patients who have at least one such slice. All 851 patients have at least one slice below 300 pixels, so that row has 851 patients; it is not a cohort of small-tumor patients. The 300--700 row has 757 patients and the $\geq700$ row has 408, and the same patient can appear in more than one row. Row counts must not be added. Slice counts are 19{,}077 small, 19{,}907 medium, and 11{,}026 large.
+Size rows are not patient cohorts. Each row pools slices whose ground-truth area falls in that range and then averages patients who have at least one such slice. All 851 patients have at least one small slice, so that row has 851 patients; it is not a cohort of small-tumor patients. The medium row has 757 patients and the large row has 408, and the same patient can appear in more than one row. Row counts must not be added. Slice counts are 19{,}077 small, 19{,}907 medium, and 11{,}026 large.
 
 \section{Experiments}
 
 \subsection{Setup}
-The locked evaluation is the 851 patients left after removing the development 400. Routing uses the classifier. Each expert is averaged over test-time flips, thresholded at 0.80/0.80/0.50, and cleaned by connected-component removal. The boundary-band PPO then runs for five steps. Training and this evaluation were run with deterministic algorithms off and seed 42. The numbers are from this single training run.
+The locked evaluation is the 851 patients left after removing the development 400. Routing uses the classifier. Each expert is averaged over test-time flips, thresholded at 0.45/0.80/0.20, and cleaned by connected-component removal. The boundary-band PPO then runs for five steps. Training and this evaluation were run with deterministic algorithms off and seed 42. The numbers are from this single training run.
 
 The 60 patients used for method selection are not in the locked evaluation. Routing on that set uses ground-truth area. DSC in Section~\ref{sec:select} therefore cannot be read next to Section~\ref{sec:locked} as a rise or a drop: the set, the routing, and the aggregation differ.
 
-The internal control is Stage~2 with the same classifier, the same experts, and the same thresholds, with only the boundary-band PPO removed. The ablation study is Section~\ref{sec:retrain}.
+The internal control is Stage~2 with the same classifier, the same experts, and the same thresholds, with only the boundary-band PPO removed. Single-backbone sector PPO is Section~\ref{sec:sector}. The ablation study, including the single U-Net and the global vanilla PPO, is Section~\ref{sec:retrain}.
 
 \subsection{Method Selection}
 \label{sec:select}
 On the 60 method-selection patients (3{,}495 tumor slices) the expert was chosen by ground-truth area. DSC was higher than Stage~2 in all three sizes and the recorded mean HD95 was lower, so this policy was adopted. Table~\ref{tab:select} is that adoption record. The performance claim of the paper is Table~\ref{tab:locked}.
 
-\begin{table}[t]
+\begin{table}[!ht]
 \caption{Method selection on 60 patients with ground-truth-area routing. This is not the locked performance.}
 \label{tab:select}
 \centering
-\begin{tabular}{lcccc}
-\toprule
+\begin{tabular}{|l|c|c|c|c|}
+\hline
 Range & Stage~2 DSC & PPO DSC & Stage~2 HD95 & PPO HD95 \\
-\midrule
+\hline
 Small & 0.7500 & 0.7846 & 6.640 & 6.393 \\
+\hline
 Medium & 0.9035 & 0.9215 & 3.592 & 2.885 \\
+\hline
 Large & 0.9223 & 0.9330 & 4.312 & 4.073 \\
+\hline
 Overall & 0.8494 & 0.8721 & 4.905 & 4.474 \\
-\bottomrule
+\hline
 \end{tabular}
 \end{table}
 
@@ -160,153 +173,190 @@ Under the same development protocol, a regressor that repeatedly shifts a closed
 
 \subsection{Locked Evaluation}
 \label{sec:locked}
-Table~\ref{tab:locked} is one application to the 851 patients with classifier routing. The primary result is the overall row. The 95\% CI of the paired patient difference $+0.0267$ does not contain zero. The three rows below are not small, medium, and large patient cohorts. The control in this section is Stage~2 at the fixed thresholds; the control with thresholds reselected on validation is Section~\ref{sec:retune}. Inference does not revert slices whose DSC falls.
+Thresholds were chosen on the experts of this run, using the 60 validation patients and 3{,}542 tumor slices. Routing is the classifier, and probabilities use test-time flips. The search covers 0.10--0.90 in steps of 0.05 and scores the three values jointly by patient-mean DSC. The joint maximum is 0.45/0.75/0.25, with DSC 0.8620. The next combination is 0.00003 lower. The earlier protocol 0.80/0.80/0.50 scores 0.8563, which is 0.0057 below the maximum.
 
-\begin{table}[t]
-\caption{Unused 851 patients, classifier routing. Patient mean of slice DSC.}
-\label{tab:locked}
+Figure~\ref{fig:thr} varies one threshold while the other two stay at the joint maximum. The orange diamond is the adopted value. Small 0.45 is the peak of its curve. Medium 0.80 scores 0.8617 and large 0.20 scores 0.8619, gaps of 0.0003 and 0.0001 from 0.8620. Threshold 0.10 drops the medium class patient-mean DSC to 0.097 and the joint DSC to 0.558, so it is omitted from the figure. The adopted triple 0.45/0.80/0.20 lies on this plateau. Stage~2 masks for PPO training and the 851-patient evaluation use that triple.
+
+\begin{table}[!ht]
+\caption{Validation, 60 patients. Per-class patient-mean DSC. The adopted row changes only that class threshold.}
+\label{tab:thr}
 \centering
-\begin{tabular}{lcccc}
-\toprule
-Ground-truth area & Patients & Stage~2 DSC & PPO DSC & Paired difference (95\% CI) \\
-\midrule
-Overall & 851 & 0.8337 & \textbf{0.8604} & $+0.0267$ (0.0256--0.0278) \\
-$<300$ px & 851 & 0.7579 & \textbf{0.7933} & $+0.0354$ (0.0338--0.0370) \\
-300--700 px & 757 & 0.8700 & \textbf{0.8952} & $+0.0252$ (0.0239--0.0265) \\
-$\geq700$ px & 408 & 0.8981 & \textbf{0.9169} & $+0.0188$ (0.0173--0.0205) \\
-\bottomrule
+\begin{tabular}{|l|c|c|c|}
+\hline
+ & Small & Medium & Large \\
+\hline
+Per-class best threshold & 0.50 & 0.75 & 0.25 \\
+\hline
+Best DSC & 0.7858 & 0.8963 & 0.9308 \\
+\hline
+Adopted threshold & 0.45 & 0.80 & 0.20 \\
+\hline
+Adopted DSC & 0.7858 & 0.8954 & 0.9304 \\
+\hline
+Slices / patients & 1{,}258 / 60 & 1{,}420 / 54 & 864 / 36 \\
+\hline
 \end{tabular}
 \end{table}
 
-The difference is largest in the small range. Those 851 patients are not small-tumor patients; they are every patient with at least one slice below 300 pixels. The large-range difference is the smallest, at $+0.0188$. The initial DSC there is already 0.8981, so the band has less room to raise overlap.
+On the small class the DSC gap between 0.45 and 0.50 is 0.0001. Medium differs by 0.0009 and large by 0.0004. Concatenating the three per-class peaks is not the joint maximum. The joint search is the selection criterion, and the adopted point moves medium and large one grid step from that maximum, onto the flat top. Table~\ref{tab:thr} lists the per-class scores.
 
-Mean HD95 recorded in the same file falls from 4.888 to 4.609 pixels overall, and by range from 5.801 to 5.697, from 4.364 to 3.887, and from 4.484 to 3.924 pixels. Because the slices dropped for empty masks differ between Stage~2 and PPO, we do not report these gaps as a paired improvement.
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=\textwidth]{threshold_selection.png}
+\caption{Joint patient-mean DSC on the 60 validation patients. Each panel holds the other two thresholds at 0.45/0.75/0.25. The orange diamond and dashed line mark the adopted values 0.45, 0.80, and 0.20.}
+\label{fig:thr}
+\end{figure}
 
-Figure~\ref{fig:delta} shows six slices from patients outside the development 400. The front of each column title is the ground-truth area, and the back is the expert selected by the classifier. The first medium column has a medium ground-truth area routed to CaraNet. Rows are the ground truth, Stage~2, and the boundary-band PPO. DSC and HD95 under each cell are for that slice, not the patient means in Table~\ref{tab:locked}. DSC rises on all six slices. HD95 falls on the second small slice, the second medium slice, and both large slices. It stays at 4.24 pixels on the first small slice and rises from 2.00 to 3.38 pixels on the first medium slice. The quantitative claim is Table~\ref{tab:locked}.
+Table~\ref{tab:locked} is one application to the 851 patients with classifier routing. Stage~2 in that table is the initial mask at the adopted thresholds. The primary result is the overall row. The 95\% CI of the paired patient difference $+0.0176$ does not contain zero. The three rows below are not small, medium, and large patient cohorts. Inference does not revert slices whose DSC falls.
 
-\begin{figure}[t]
+\begin{table}[!ht]
+\caption{Unused 851 patients, classifier routing, thresholds 0.45/0.80/0.20. Patient mean of slice DSC.}
+\label{tab:locked}
+\centering
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{|l|c|c|c|c|c|}
+\hline
+Ground-truth area & Patients & Slices & Stage~2 DSC & PPO DSC & Paired difference (95\% CI) \\
+\hline
+Overall & 851 & 50{,}010 & 0.8419 & \textbf{0.8595} & $+0.0176$ (0.0166--0.0185) \\
+\hline
+Small & 851 & 19{,}077 & 0.7693 & \textbf{0.7922} & $+0.0229$ (0.0215--0.0243) \\
+\hline
+Medium & 757 & 19{,}907 & 0.8780 & \textbf{0.8932} & $+0.0152$ (0.0144--0.0160) \\
+\hline
+Large & 408 & 11{,}026 & 0.9030 & \textbf{0.9156} & $+0.0125$ (0.0112--0.0138) \\
+\hline
+\end{tabular}
+\end{table}
+
+The Patients column is the sample of the paired interval. The Slices column counts tumor slices whose ground-truth area falls in that bin. Small, medium, and large contain 19{,}077, 19{,}907, and 11{,}026 slices, and those three counts sum to 50{,}010. The same patient can appear in more than one size row, so the patient counts sum past 851. The 851 patients in the small row are every patient with at least one small slice. The difference is largest for small, at $+0.0229$. The large difference is the smallest, at $+0.0125$. The initial DSC there is already 0.9030, so the band has less room to raise overlap.
+
+Mean HD95 in the same evaluation is 4.747 pixels for Stage~2 and 4.547 pixels for the PPO. By range the means are 5.591 and 5.577, 4.231 and 3.897, and 4.408 and 3.950 pixels. Because the slices dropped for empty masks differ between Stage~2 and PPO, we do not report these gaps as a paired improvement. The reported overall HD95 of the method is 4.547 pixels.
+
+Figure~\ref{fig:delta} shows six slices from an earlier locked set of weights, drawn from patients outside the development 400. The front of each column title is the ground-truth area, and the back is the expert selected by the classifier. DSC and HD95 under each cell are for that slice, not the patient means in Table~\ref{tab:locked}. The quantitative claim is Table~\ref{tab:locked}.
+
+\begin{figure}[!ht]
 \centering
 \includegraphics[width=\textwidth]{band_ppo_delta_matched/delta_matched_comparison.png}
-\caption{Six slices from unused patients. Top: ground truth (green). Middle: Stage~2 (red). Bottom: boundary-band PPO (cyan). DSC and HD95 under each cell are for that slice.}
+\caption{Six slices from unused patients, from the earlier locked weights. Top: ground truth (green). Middle: Stage~2 (red). Bottom: boundary-band PPO (cyan). DSC and HD95 under each cell are for that slice.}
 \label{fig:delta}
 \end{figure}
 
-\subsection{Threshold Reselection Control}
-\label{sec:retune}
-Stage~2 at the fixed thresholds is biased toward a narrow mask, with precision 0.883 and recall 0.820. To test whether the Table~\ref{tab:locked} gap is only a threshold adjustment, we jointly reselected the three per-size thresholds on the 60 validation patients by patient-mean DSC under classifier routing. The grid is 0.10--0.90 in steps of 0.05, and the connected-component sizes are unchanged. The selected values are 0.45, 0.80, and 0.20 for small, medium, and large, none of which is a grid endpoint. Validation DSC moved from 0.8588 to 0.8650. Those thresholds were applied once to the 851 patients. PPO weights were not changed; they were trained on the fixed-threshold masks.
+\subsection{Single-Backbone Sector PPO}
+\label{sec:sector}
+Table~\ref{tab:sector} pairs one PPO with each backbone. The action moves a $5\times8$ sector grid for 15 steps, and the initial-mask threshold is 0.5. The evaluation is the slice mean on 48 patients drawn with seed 7 from the same split (2{,}754 tumor slices). HD95 averages only slices on which both masks are nonempty, in pixels. The TRIO row applies the boundary-band PPO to the same 48 patients. The aggregation differs from the 851-patient mean in Table~\ref{tab:locked}.
 
-\begin{table}[t]
-\caption{Unused 851 patients. Paired comparison against Stage~2 with reselected thresholds.}
-\label{tab:retune}
+\begin{table}[!ht]
+\caption{Single-backbone sector PPO. Slice mean on 48 patients.}
+\label{tab:sector}
 \centering
-\small
-\begin{tabular}{lcccc}
-\toprule
-Area & Fixed Stage~2 & Reselected & PPO & PPO $-$ reselected (95\% CI) \\
-\midrule
-Overall & 0.8337 & 0.8411 & \textbf{0.8604} & $+0.0193$ (0.0184--0.0202) \\
-$<300$ px & 0.7579 & 0.7682 & \textbf{0.7933} & $+0.0251$ (0.0237--0.0265) \\
-300--700 px & 0.8700 & 0.8790 & \textbf{0.8952} & $+0.0162$ (0.0154--0.0170) \\
-$\geq700$ px & 0.8981 & 0.9014 & \textbf{0.9169} & $+0.0156$ (0.0143--0.0169) \\
-\bottomrule
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{|l|c|c|c|c|c|c|}
+\hline
+Method & S DSC & M DSC & L DSC & S HD95 & M HD95 & L HD95 \\
+\hline
+TRIO & \textbf{0.812} & \textbf{0.904} & 0.916 & \textbf{4.877} & \textbf{3.432} & \textbf{3.761} \\
+\hline
+U-Net + sector PPO & 0.537 & 0.813 & 0.866 & 12.126 & 6.518 & 6.527 \\
+\hline
+UNet++ + sector PPO & 0.778 & 0.894 & \textbf{0.926} & 5.786 & 3.617 & 3.773 \\
+\hline
+UNet+++ + sector PPO & 0.543 & 0.828 & 0.900 & 10.308 & 5.087 & 4.345 \\
+\hline
+Attention U-Net + sector PPO & 0.761 & 0.884 & 0.904 & 6.660 & 3.821 & 4.606 \\
+\hline
+SegResNet + sector PPO & 0.676 & 0.871 & 0.912 & 8.821 & 4.240 & 4.319 \\
+\hline
 \end{tabular}
 \end{table}
 
-Threshold reselection alone has paired difference $+0.0074$ (0.0066--0.0082), about 28\% of the $+0.0267$ in Table~\ref{tab:locked}. The remaining $+0.0193$ is still above the reselected Stage~2, and the interval excludes zero in every range. Reselection raises recall from 0.820 to 0.849 and lowers precision from 0.883 to 0.863. PPO reaches precision 0.892 and recall 0.860, both above the reselected Stage~2. Starting PPO from the reselected masks yields the same overall DSC, 0.8604. The band appears to cover most of the gap between the two thresholds; that fraction was not measured separately.
+On this 48-patient sample the small DSC is highest for TRIO, at 0.812. Medium and large DSC for UNet++ with sector PPO are 0.894 and 0.926.
 
 \subsection{Ablation Study}
 \label{sec:retrain}
-The weights differ from the 2026-09-30 lock in Table~\ref{tab:locked}. The patient split is unchanged, and only the seed changes, to 42, 7, and 123. Table~\ref{tab:seeds} is the patient mean of tumor-slice DSC. The range of boundary-band PPO DSC across seeds is 0.0023, and the three-seed mean is 0.8609.
+This section is a different training from Table~\ref{tab:locked}. The patient split is unchanged. Either the seed changes, or only the inference condition of the seed-42 weights changes. The baseline is Stage~2 with size-specific experts. Medium supervised initialization, PPO, and five steps are added in that order. A check in Table~\ref{tab:components} means that component is on. The number is the 851-patient mean DSC.
 
-\begin{table}[t]
-\caption{Retraining on the same split. Patient mean of tumor-slice DSC.}
-\label{tab:seeds}
+\begin{table}[!ht]
+\caption{Added components. Seed 42, 851 patients. Patient-mean DSC.}
+\label{tab:components}
 \centering
-\begin{tabular}{lccc}
-\toprule
-Seed & Stage~2 & Band PPO & Large expert, all slices \\
-\midrule
-42 & 0.8339 & \textbf{0.8597} & 0.8503 \\
-7 & 0.8370 & \textbf{0.8620} & 0.8540 \\
-123 & 0.8352 & \textbf{0.8609} & 0.8500 \\
-\bottomrule
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+Size experts & Band supervision & PPO & 5 steps & DSC \\
+\hline
+\checkmark & & & & 0.8339 \\
+\hline
+\checkmark & \checkmark & & & 0.8383 \\
+\hline
+\checkmark & \checkmark & \checkmark & & 0.8460 \\
+\hline
+\checkmark & \checkmark & \checkmark & \checkmark & \textbf{0.8597} \\
+\hline
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:ablate} changes only the inference condition on the seed-42 weights. Rows are the 851-patient mean except the last, which drops the 148 patients shared with the earlier 210-patient pool. Five steps score above one step and above one step of the medium supervised initialization. Radius 0 falls to 0.8427, while three steps, the guard removed, and the two band-width changes stay in 0.8575--0.8601.
+Stage~2 alone scores 0.8339. One step of band supervision scores 0.8383, one PPO step on that initialization scores 0.8460, and five steps score 0.8597. Each added component raises DSC. Across seeds 42, 7, and 123 on the same split, Stage~2 is $0.8354\pm0.0016$, boundary-band PPO is $0.8609\pm0.0012$, and the large expert on every slice is $0.8514\pm0.0022$. The standard deviation is the sample standard deviation of the three seeds, and the PPO range is 0.0023.
 
-\begin{table}[t]
-\caption{Seed-42 inference ablation. Patient-mean DSC.}
-\label{tab:ablate}
+\begin{figure}[!ht]
 \centering
-\begin{tabular}{lc}
-\toprule
-Condition & DSC \\
-\midrule
-5-step boundary-band PPO & \textbf{0.8597} \\
-1 step & 0.8460 \\
-Medium supervised initialization, 1 step & 0.8383 \\
-Large expert + boundary-band PPO & 0.8676 \\
-Ground-truth-size routing, 5 steps & 0.8698 \\
-Radius 0 & 0.8427 \\
-3 steps & 0.8589 \\
-FLAIR guard off & 0.8575 \\
-Radius 4 & 0.8596 \\
-Probability band $[0.45,0.55]$ & 0.8597 \\
-Probability band $[0.25,0.75]$ & 0.8601 \\
-5 steps, 703 patients & 0.8579 \\
-\bottomrule
-\end{tabular}
-\end{table}
+\includegraphics[width=\textwidth]{ablation_hparams.png}
+\caption{Seed-42 inference hyperparameters. (a) Refinement steps. (b) Band radius. (c) Probability band. The dashed line is the adopted setting: 5 steps, radius 2, band $[0.35,0.65]$, DSC 0.8597.}
+\label{fig:hparams}
+\end{figure}
 
-Table~\ref{tab:gaps} uses 131{,}905 slices, including empty ones. The false-positive rate is the fraction of slices with tumor-pixel fraction below 0.2\% on which a mask appears. HD95 is the patient mean on slices where Stage~2 and the PPO both have a mask, in millimetres (pixel $\times 1.9$). 3D Dice stacks slices along $z$. A dash means that common-mask HD95 was not computed for the large expert.
-
-\begin{table}[t]
-\caption{Empty-slice false positives, common-mask HD95, and 3D Dice.}
+\begin{table}[!ht]
+\caption{Additional metrics over three seeds, including 131{,}905 empty slices. Mean $\pm$ sample standard deviation.}
 \label{tab:gaps}
 \centering
-\footnotesize
+\small
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{clccc}
-\toprule
-Seed & Metric & Stage~2 & Band PPO & Large, all slices \\
-\midrule
-42 & False positive & 0.567 & \textbf{0.521} & 0.930 \\
-42 & HD95 (mm) & 11.536 & \textbf{10.734} & -- \\
-42 & 3D Dice & 0.779 & \textbf{0.813} & 0.799 \\
-7 & False positive & 0.532 & \textbf{0.497} & 0.821 \\
-7 & HD95 (mm) & 10.979 & \textbf{10.351} & -- \\
-7 & 3D Dice & 0.786 & \textbf{0.811} & 0.796 \\
-123 & False positive & 0.601 & \textbf{0.571} & 0.829 \\
-123 & HD95 (mm) & 11.516 & \textbf{10.731} & -- \\
-123 & 3D Dice & 0.771 & \textbf{0.809} & 0.759 \\
-\bottomrule
+\begin{tabular}{|l|c|c|c|}
+\hline
+Metric & Stage~2 & Band PPO & Large, all slices \\
+\hline
+DSC & $0.8354\pm0.0016$ & $\mathbf{0.8609\pm0.0012}$ & $0.8514\pm0.0022$ \\
+\hline
+False positive & $0.5667\pm0.0345$ & $\mathbf{0.5297\pm0.0378}$ & $0.8600\pm0.0608$ \\
+\hline
+HD95 (mm) & $11.344\pm0.316$ & $\mathbf{10.605\pm0.220}$ & -- \\
+\hline
+3D Dice & $0.7787\pm0.0075$ & $\mathbf{0.8110\pm0.0020}$ & $0.7847\pm0.0223$ \\
+\hline
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:unet} is a single U-Net trained for 20 epochs on the same 280 patients, thresholded at 0.5, and evaluated on the 851 patients (50{,}010 tumor slices). The vanilla PPO then edits that mask by a global one-pixel shrink, keep, or expand for 15 steps. The paired patient difference is $-0.0023$ (95\% CI $-0.0029$--$-0.0017$). The size rows have 851, 757, and 408 patients.
+The three axes in Figure~\ref{fig:hparams} each change one setting of the last row of Table~\ref{tab:components}. Steps rise from 0.8460 at one step to 0.8589 at three and 0.8597 at five. Radius 0 falls to 0.8427, while radii 2 and 4 score 0.8597 and 0.8596. Probability bands $[0.45,0.55]$, $[0.35,0.65]$, and $[0.25,0.75]$ score 0.8597, 0.8597, and 0.8601. Once the radius is not zero, DSC barely moves for three or more steps or for these band widths. Turning the FLAIR guard off scores 0.8575.
 
-\begin{table}[t]
+Using only the large expert scores 0.8503, and adding the boundary-band PPO to that mask scores 0.8676. Routing by ground-truth size instead of the classifier scores 0.8698. On the 703 patients left after removing the 148 who overlap the earlier 210-patient pool, five-step PPO scores 0.8579.
+
+Table~\ref{tab:gaps} uses 131{,}905 slices, including empty ones. The false-positive rate is the fraction of slices with tumor-pixel fraction below 0.2\% on which a mask appears. HD95 is the patient mean on slices where Stage~2 and the PPO both have a mask, in millimetres (pixel $\times 1.9$). 3D Dice stacks slices along $z$. Means and standard deviations are the sample statistics of the three seeds. Per-seed DSC is 0.8339, 0.8370, 0.8352 for Stage~2, 0.8597, 0.8620, 0.8609 for PPO, and 0.8503, 0.8540, 0.8500 for the large expert on all slices. False-positive rates are 0.567, 0.532, 0.601 for Stage~2, 0.521, 0.497, 0.571 for PPO, and 0.930, 0.821, 0.829 for the large expert. HD95 is 11.536, 10.979, 11.516\,mm for Stage~2 and 10.734, 10.351, 10.731\,mm for PPO. 3D Dice is 0.779, 0.786, 0.771 for Stage~2, 0.813, 0.811, 0.809 for PPO, and 0.799, 0.796, 0.759 for the large expert.
+
+Table~\ref{tab:unet} is a single U-Net trained for 20 epochs on the same 280 patients, thresholded at 0.5, and evaluated on the 851 patients (50{,}010 tumor slices). The vanilla PPO then edits that mask by a global one-pixel shrink, keep, or expand for 15 steps. The paired patient difference is $-0.0023$ (95\% CI $-0.0029$--$-0.0017$). The size rows have 851, 757, and 408 patients. A global shrink, keep, or expand does not raise DSC in any size.
+
+\begin{table}[!ht]
 \caption{Single U-Net and a global vanilla PPO. Patient mean on 851 patients.}
 \label{tab:unet}
 \centering
 \small
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{lccccc}
-\toprule
+\begin{tabular}{|l|c|c|c|c|c|}
+\hline
 Method & DSC (95\% CI) & HD95 (px) & Small & Medium & Large \\
-\midrule
+\hline
 U-Net & 0.8156 (0.8067--0.8243) & 6.939 & 0.7215 & 0.8758 & 0.8973 \\
+\hline
 Vanilla PPO & 0.8133 (0.8046--0.8220) & 6.955 & 0.7197 & 0.8736 & 0.8939 \\
-\bottomrule
+\hline
 \end{tabular}
 \end{table}
 
 \section{Conclusion}
 
-TRIO is size classification, size-specific experts, and one boundary-band PPO. On 851 unused patients the patient-mean DSC is 0.8337 before the PPO, at Stage~2, and 0.8604 after five steps of the boundary-band PPO. The paired patient difference $+0.0267$ has 95\% CI $0.0256$--$0.0278$. The difference is largest below 300 pixels, at $+0.0354$, and smallest at 700 pixels or more, at $+0.0188$.
+TRIO is size classification, size-specific experts, and one boundary-band PPO. On 851 unused patients, Stage~2 at thresholds 0.45/0.80/0.20 has patient-mean DSC 0.8419, and five steps of the boundary-band PPO reach 0.8595. The paired patient difference $+0.0176$ has 95\% CI $0.0166$--$0.0185$. The difference is largest for small, at $+0.0229$, and smallest for large, at $+0.0125$.
 
-The remaining experiments measure the threshold, retraining, the step count, a single large expert, and a global vanilla PPO. Stage~2 with per-size thresholds reselected on the 60 validation patients scores 0.8411, and its paired difference from the PPO is $+0.0193$ (95\% CI $0.0184$--$0.0202$). Threshold reselection alone accounts for $+0.0074$. Retraining the same split on 2026-10-07 at seeds 42, 7, and 123 keeps boundary-band PPO DSC in 0.8597--0.8620. At seed 42 the five-step PPO scores 0.8597, one step scores 0.8460, one step of the medium supervised initialization scores 0.8383, and the large expert on every slice scores 0.8503. On the same 851 patients a single U-Net scores 0.8156, and a vanilla PPO that shrinks, keeps, or expands the whole mask by one pixel scores 0.8133. At seed 42 the empty-slice false-positive rate falls from 0.567 to 0.521, and 3D Dice after stacking slices rises from 0.779 to 0.813.
+The remaining experiments measure retraining, the step count, a single large expert, a global vanilla PPO, and sector PPO. Retraining the same split on 2026-10-07 at seeds 42, 7, and 123 keeps boundary-band PPO DSC in 0.8597--0.8620. At seed 42 the five-step PPO scores 0.8597, one step scores 0.8460, one step of the medium supervised initialization scores 0.8383, and the large expert on every slice scores 0.8503. On the same 851 patients a single U-Net scores 0.8156, and a vanilla PPO that shrinks, keeps, or expands the whole mask by one pixel scores 0.8133. At seed 42 the empty-slice false-positive rate falls from 0.567 to 0.521, and 3D Dice after stacking slices rises from 0.779 to 0.813.
 
 \begin{thebibliography}{15}
 \bibitem{ronneberger2015}

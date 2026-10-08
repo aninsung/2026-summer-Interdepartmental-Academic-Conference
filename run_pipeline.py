@@ -154,7 +154,8 @@ def main():
     # 3. Stage 3
     if not args.skip_agents and args.refinement_profile == "band_ppo":
         band_data = ["--train_root", "src/data/archive", "--max_train_patients", str(n_patients),
-                     "--patient_split", split_path, "--modality", args.modality, "--seed", str(args.seed)]
+                     "--patient_split", split_path, "--modality", args.modality, "--seed", str(args.seed),
+                     "--stage2_thresholds", args.stage2_thresholds]
         run_command(
             [python_exec, "scripts/train/train_band_refine.py", "--classes", "medium", "--epochs", "20",
              "--num_workers", str(args.num_workers), "--save_path", "checkpoints/band_refine_medium.pt"] + band_data,
@@ -196,7 +197,8 @@ def main():
     if not args.skip_eval and args.refinement_profile == "band_ppo":
         cmd_eval = [python_exec, "scripts/eval/evaluate_band_ppo_locked.py",
                     "--train_root", "src/data/archive", "--patient_split", split_path,
-                    "--checkpoint", "checkpoints/band_ppo.pt", "--seed", str(args.seed)]
+                    "--checkpoint", "checkpoints/band_ppo.pt", "--seed", str(args.seed),
+                    "--stage2_thresholds", args.stage2_thresholds]
         if args.output_dir:
             os.makedirs(args.output_dir, exist_ok=True)
             cmd_eval += ["--out", os.path.join(args.output_dir, "band_ppo_locked.json")]
