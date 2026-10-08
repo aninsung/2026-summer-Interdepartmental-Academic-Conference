@@ -10,8 +10,9 @@
 </p>
 
 <p align="center">
-  가천대학교 컴퓨터공학과 · 202135993 · <strong>안인성</strong><br />
-  가천대학교 인공지능학과 · 202634031 · <strong>한수진</strong>
+  가천대학교 컴퓨터공학과 · 202135993 · <strong>안인성</strong> · a3426751@gachon.ac.kr<br />
+  가천대학교 인공지능학과 · 202634031 · <strong>한수진</strong> · hansj@gachon.ac.kr<br />
+  교신저자 · <strong>최아영</strong> · aychoi@gachon.ac.kr
 </p>
 
 <p align="center">
